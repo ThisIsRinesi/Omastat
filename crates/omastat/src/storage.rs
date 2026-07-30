@@ -119,6 +119,26 @@ impl Storage {
         )
     }
 
+    pub fn totals_for_month(&self) -> Result<Vec<AppTotals>> {
+        let now = Local::now();
+        let start = Local
+            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+            .single()
+            .context("failed to compute local month start")?
+            .timestamp();
+        self.totals_between(start, now.timestamp())
+    }
+
+    pub fn totals_for_year(&self) -> Result<Vec<AppTotals>> {
+        let now = Local::now();
+        let start = Local
+            .with_ymd_and_hms(now.year(), 1, 1, 0, 0, 0)
+            .single()
+            .context("failed to compute local year start")?
+            .timestamp();
+        self.totals_between(start, now.timestamp())
+    }
+
     pub fn totals_all_time(&self) -> Result<Vec<AppTotals>> {
         let now = Local::now().timestamp();
         let start: i64 = self

@@ -12,18 +12,26 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Gauge, Paragraph, Row,
-        Sparkline, Table, Tabs, Wrap,
+        Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table, Tabs, Wrap,
     },
 };
 use std::{
+    f64::consts::PI,
     io,
     time::{Duration, Instant},
 };
 
-const TABS: [&str; 3] = ["Today", "Week", "All Time"];
+const TABS: [&str; 4] = ["Today", "Week", "Replay", "All Time"];
 const FRAME_TIME: Duration = Duration::from_millis(83);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
+const PIE_COLORS: [Color; 6] = [
+    Color::Yellow,
+    Color::Cyan,
+    Color::Magenta,
+    Color::LightGreen,
+    Color::LightBlue,
+    Color::Gray,
+];
 
 pub fn run(storage: Storage) -> Result<()> {
     enable_raw_mode()?;
@@ -61,6 +69,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
                     KeyCode::Char('1') => app.set_tab(0),
                     KeyCode::Char('2') => app.set_tab(1),
                     KeyCode::Char('3') => app.set_tab(2),
+                    KeyCode::Char('4') => app.set_tab(3),
                     _ => {}
                 },
                 Event::Resize(_, _) => {}
@@ -77,9 +86,10 @@ struct App {
     last_refresh: Instant,
     today: Vec<AppTotals>,
     week: Vec<AppTotals>,
+    month: Vec<AppTotals>,
+    year: Vec<AppTotals>,
     all_time: Vec<AppTotals>,
     days: Vec<DayTotals>,
-    total_observed_seconds: i64,
 }
 
 impl App {
@@ -90,9 +100,10 @@ impl App {
             last_refresh: Instant::now(),
             today: storage.totals_for_today()?,
             week: storage.totals_for_week()?,
+            month: storage.totals_for_month()?,
+            year: storage.totals_for_year()?,
             all_time: storage.totals_all_time()?,
             days: storage.daily_totals(14)?,
-            total_observed_seconds: storage.total_duration()?,
         })
     }
 
@@ -109,6 +120,7 @@ impl App {
         match self.tab {
             0 => &self.today,
             1 => &self.week,
+            2 => &self.year,
             _ => &self.all_time,
         }
     }
@@ -147,7 +159,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         .constraints([
             Constraint::Length(4),
             Constraint::Length(3),
-            Constraint::Length(8),
+            Constraint::Length(11),
             Constraint::Min(12),
             Constraint::Length(2),
         ])
@@ -178,8 +190,8 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let focused = focused_total(rows);
     let top = rows
         .first()
-        .map(|row| row.app_class.as_str())
-        .unwrap_or("No app usage yet");
+        .map(|row| short_app(&row.app_class, 32))
+        .unwrap_or_else(|| "No app usage yet".to_string());
     let sweep = scanline(app.tick, area.width.saturating_sub(2) as usize);
 
     let lines = vec![
@@ -231,14 +243,19 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tab: usize) {
 }
 
 fn render_hero(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let [left, right] = *Layout::default()
+    let [left, middle, right] = *Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+        .constraints([
+            Constraint::Percentage(31),
+            Constraint::Percentage(34),
+            Constraint::Percentage(35),
+        ])
         .split(area)
     else {
         return;
     };
     render_replay_card(frame, left, app);
+    render_focus_pie(frame, middle, app.rows(), app.tick);
     render_trend_card(frame, right, app);
 }
 
@@ -247,6 +264,8 @@ fn render_replay_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let focused = focused_total(rows);
     let open = open_total(rows);
     let ratio = ratio(focused, open);
+    let month_focused = focused_total(&app.month);
+    let year_focused = focused_total(&app.year);
     let top = rows
         .first()
         .map(|row| short_app(&row.app_class, 24))
@@ -254,7 +273,10 @@ fn render_replay_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "Session recap",
+            match app.tab {
+                2 => "Year in progress",
+                _ => "Session recap",
+            },
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -276,6 +298,18 @@ fn render_replay_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Style::default().fg(Color::Magenta),
             ),
         ]),
+        Line::from(vec![
+            Span::raw("Month "),
+            Span::styled(
+                format_duration(month_focused),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw("  Year "),
+            Span::styled(
+                format_duration(year_focused),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
     ];
 
     frame.render_widget(
@@ -284,6 +318,84 @@ fn render_replay_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn render_focus_pie(frame: &mut Frame<'_>, area: Rect, rows: &[AppTotals], tick: u64) {
+    let total = focused_total(rows).max(0);
+    if total == 0 {
+        frame.render_widget(
+            Paragraph::new("No focused time recorded for this view.")
+                .alignment(Alignment::Center)
+                .block(card("Focus mix"))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
+    let segments = pie_segments(rows, total);
+    let height = area.height.saturating_sub(2).min(9) as usize;
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let width = if inner_width < 42 {
+        inner_width.saturating_sub(19).clamp(11, 21)
+    } else {
+        21
+    };
+    let legend_width = inner_width.saturating_sub(width + 2);
+    let center_x = (width.saturating_sub(1) as f64) / 2.0;
+    let center_y = (height.saturating_sub(1) as f64) / 2.0;
+    let outer = center_y.min(center_x / 1.85).max(2.5);
+    let inner = (outer * 0.46).max(1.2);
+    let active = (tick / 18) as usize % segments.len().max(1);
+
+    let mut lines = Vec::with_capacity(height);
+    for y in 0..height {
+        let mut spans = Vec::with_capacity(width + 3);
+        for x in 0..width {
+            let dx = (x as f64 - center_x) / 1.85;
+            let dy = y as f64 - center_y;
+            let distance = (dx * dx + dy * dy).sqrt();
+            if distance > outer || distance < inner {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+
+            let angle = normalized_angle(dy.atan2(dx));
+            let segment_index = segment_index(angle, &segments);
+            let mut style = Style::default().fg(segments[segment_index].color);
+            if segment_index == active {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            spans.push(Span::styled("█", style));
+        }
+
+        if let Some(segment) = segments.get(y) {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                "■ ",
+                Style::default()
+                    .fg(segment.color)
+                    .add_modifier(if y == active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+            let label_width = legend_width.saturating_sub(7).clamp(6, 12);
+            spans.push(Span::styled(
+                format!(
+                    "{:<label_width$} {:>3.0}%",
+                    short_app(&segment.label, label_width),
+                    segment.share * 100.0
+                ),
+                Style::default().fg(Color::Gray),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    frame.render_widget(Paragraph::new(lines).block(card("Focus mix")), area);
 }
 
 fn render_trend_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -320,22 +432,14 @@ fn render_trend_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows = app.rows();
     let focused = focused_total(rows);
     let open = open_total(rows);
-    let total_observed = app.total_observed_seconds.max(1);
+    let density = ratio(focused, open);
+    let top_share = rows
+        .first()
+        .map(|row| ratio(row.focused_seconds, focused))
+        .unwrap_or(0.0);
 
-    render_gauge(
-        frame,
-        focus_area,
-        "focused share",
-        ratio(focused, total_observed),
-        Color::Yellow,
-    );
-    render_gauge(
-        frame,
-        open_area,
-        "open share",
-        ratio(open, total_observed),
-        Color::Magenta,
-    );
+    render_gauge(frame, focus_area, "focus density", density, Color::Yellow);
+    render_gauge(frame, open_area, "top app share", top_share, Color::Magenta);
 }
 
 fn render_gauge(frame: &mut Frame<'_>, area: Rect, label: &'static str, value: f64, color: Color) {
@@ -362,32 +466,39 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_chart(frame: &mut Frame<'_>, area: Rect, rows: &[AppTotals], tick: u64) {
     let reveal = ((tick.min(12) + 1) as f64 / 13.0).clamp(0.0, 1.0);
-    let bars = rows
+    let max = rows
+        .first()
+        .map(|row| row.focused_seconds.max(1))
+        .unwrap_or(1);
+    let inner_width = area.width.saturating_sub(4) as usize;
+    let bar_width = inner_width.saturating_sub(24).clamp(10, 42);
+    let lines = rows
         .iter()
-        .take(8)
+        .take(10)
         .map(|row| {
-            let value = ((row.focused_seconds.max(0) as f64) * reveal).round() as u64;
-            Bar::default()
-                .label(Line::from(short_app(&row.app_class, 10)))
-                .value(value)
-                .text_value(format_duration(row.focused_seconds))
-                .style(Style::default().fg(Color::Cyan))
-                .value_style(Style::default().fg(Color::Yellow))
+            let share = ratio(row.focused_seconds, max);
+            let filled = ((share * bar_width as f64) * reveal).round() as usize;
+            let empty = bar_width.saturating_sub(filled);
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<12}", short_app(&row.app_class, 12)),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled("█".repeat(filled), Style::default().fg(Color::Cyan)),
+                Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(
+                    duration_fixed(row.focused_seconds),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ])
         })
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        BarChart::default()
+        Paragraph::new(lines)
             .block(card("Top focus"))
-            .bar_width(8)
-            .bar_gap(2)
-            .group_gap(1)
-            .data(BarGroup::default().bars(&bars))
-            .max(
-                rows.first()
-                    .map(|row| row.focused_seconds.max(1) as u64)
-                    .unwrap_or(1),
-            ),
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -402,10 +513,10 @@ fn render_table(frame: &mut Frame<'_>, area: Rect, rows: &[AppTotals]) {
         Row::new(vec![
             Cell::from(format!("{:>2}", index + 1)).style(Style::default().fg(Color::DarkGray)),
             Cell::from(short_app(&row.app_class, 28)).style(Style::default().fg(color)),
-            Cell::from(format_duration(row.focused_seconds)),
-            Cell::from(format_duration(row.open_seconds)),
+            Cell::from(duration_fixed(row.focused_seconds)),
+            Cell::from(duration_fixed(row.open_seconds)),
             Cell::from(format!(
-                "{:.0}%",
+                "{:>6.0}%",
                 ratio(row.focused_seconds, row.open_seconds) * 100.0
             )),
         ])
@@ -419,7 +530,7 @@ fn render_table(frame: &mut Frame<'_>, area: Rect, rows: &[AppTotals]) {
                 Constraint::Min(14),
                 Constraint::Length(10),
                 Constraint::Length(10),
-                Constraint::Length(7),
+                Constraint::Length(8),
             ],
         )
         .header(
@@ -437,7 +548,7 @@ fn render_table(frame: &mut Frame<'_>, area: Rect, rows: &[AppTotals]) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
-        Paragraph::new("h/l or Left/Right switch views   1-3 jump   r refresh   q quit")
+        Paragraph::new("h/l or Left/Right switch views   1-4 jump   r refresh   q quit")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center),
         area,
@@ -450,6 +561,61 @@ fn card(title: &'static str) -> Block<'static> {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
+}
+
+#[derive(Debug)]
+struct PieSegment {
+    label: String,
+    share: f64,
+    cumulative_share: f64,
+    color: Color,
+}
+
+fn pie_segments(rows: &[AppTotals], total: i64) -> Vec<PieSegment> {
+    let mut segments = rows
+        .iter()
+        .filter(|row| row.focused_seconds > 0)
+        .take(5)
+        .enumerate()
+        .scan(0.0, |cumulative, (index, row)| {
+            let share = ratio(row.focused_seconds, total);
+            *cumulative += share;
+            Some(PieSegment {
+                label: row.app_class.clone(),
+                share,
+                cumulative_share: *cumulative,
+                color: PIE_COLORS[index],
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let represented = segments
+        .last()
+        .map(|segment| segment.cumulative_share)
+        .unwrap_or(0.0);
+    if represented < 0.995 {
+        segments.push(PieSegment {
+            label: "Other".to_string(),
+            share: 1.0 - represented,
+            cumulative_share: 1.0,
+            color: PIE_COLORS[5],
+        });
+    } else if let Some(last) = segments.last_mut() {
+        last.cumulative_share = 1.0;
+    }
+
+    segments
+}
+
+fn normalized_angle(angle: f64) -> f64 {
+    ((angle + PI * 2.5) % (PI * 2.0)) / (PI * 2.0)
+}
+
+fn segment_index(angle_share: f64, segments: &[PieSegment]) -> usize {
+    segments
+        .iter()
+        .position(|segment| angle_share <= segment.cumulative_share)
+        .unwrap_or_else(|| segments.len().saturating_sub(1))
 }
 
 fn focused_total(rows: &[AppTotals]) -> i64 {
@@ -529,4 +695,8 @@ fn format_duration(seconds: i64) -> String {
     } else {
         format!("{minutes}m")
     }
+}
+
+fn duration_fixed(seconds: i64) -> String {
+    format!("{:>9}", format_duration(seconds))
 }
