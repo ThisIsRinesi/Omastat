@@ -1,0 +1,15 @@
+[Unit]
+Description=Hours Played app usage tracker
+Documentation=https://wiki.hypr.land/IPC/
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/hours-played daemon
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=graphical-session.target
+

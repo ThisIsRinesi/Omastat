@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/hours-played"]
+resolver = "2"
+
