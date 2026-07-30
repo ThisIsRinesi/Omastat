@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod hyprland;
+mod session;
 mod storage;
 mod tracker;
 
@@ -27,13 +28,17 @@ async fn main() -> Result<()> {
             tracker.run().await?;
         }
         Commands::Today => {
-            cli::print_report("Today", storage.totals_for_today()?);
+            cli::print_report("Today", storage.totals_for_today()?, cli.json)?;
         }
         Commands::Week => {
-            cli::print_report("This Week", storage.totals_for_week()?);
+            cli::print_report("This Week", storage.totals_for_week()?, cli.json)?;
         }
         Commands::Apps => {
-            cli::print_report("All Time", storage.totals_all_time()?);
+            cli::print_report("All Time", storage.totals_all_time()?, cli.json)?;
+        }
+        Commands::Range { from, to } => {
+            let rows = storage.totals_for_date_range(&from, &to)?;
+            cli::print_report(&format!("{from} through {to}"), rows, cli.json)?;
         }
         Commands::Doctor => {
             cli::doctor(&config, &storage).await?;

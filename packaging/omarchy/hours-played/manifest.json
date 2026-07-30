@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "local.hours-played",
+  "name": "Hours Played",
+  "version": "0.1.0",
+  "author": "rinesi",
+  "license": "MIT",
+  "description": "Today focused/open app usage from the local Hours Played SQLite database.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Hours Played",
+    "description": "Shows today's top focused app and total focused time.",
+    "category": "Utilities",
+    "aliases": ["hours-played", "screen-time"],
+    "allowMultiple": false,
+    "defaults": {
+      "refreshIntervalSec": 60,
+      "command": "hours-played --json today"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 15,
+        "max": 3600,
+        "step": 15,
+        "defaultValue": 60
+      },
+      {
+        "key": "command",
+        "type": "string",
+        "label": "Report command",
+        "defaultValue": "hours-played --json today"
+      }
+    ]
+  }
+}
+

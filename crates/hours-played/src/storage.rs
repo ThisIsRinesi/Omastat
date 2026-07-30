@@ -2,6 +2,7 @@ use crate::config::Config;
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, TimeZone};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -13,7 +14,7 @@ pub enum IntervalKind {
     Open,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AppTotals {
     pub app_class: String,
     pub focused_seconds: i64,
@@ -119,6 +120,40 @@ impl Storage {
             .flatten()
             .unwrap_or(now);
         self.totals_between(start, now)
+    }
+
+    pub fn totals_for_date_range(&self, from: &str, to: &str) -> Result<Vec<AppTotals>> {
+        let start_date = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d")
+            .with_context(|| format!("invalid --from date {from:?}, expected YYYY-MM-DD"))?;
+        let end_date = chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d")
+            .with_context(|| format!("invalid --to date {to:?}, expected YYYY-MM-DD"))?;
+
+        if end_date < start_date {
+            anyhow::bail!("--to must be on or after --from");
+        }
+
+        let start = Local
+            .from_local_datetime(
+                &start_date
+                    .and_hms_opt(0, 0, 0)
+                    .context("invalid start date")?,
+            )
+            .single()
+            .context("failed to compute local range start")?
+            .timestamp();
+        let end = Local
+            .from_local_datetime(
+                &end_date
+                    .succ_opt()
+                    .context("date range end overflow")?
+                    .and_hms_opt(0, 0, 0)
+                    .context("invalid end date")?,
+            )
+            .single()
+            .context("failed to compute local range end")?
+            .timestamp();
+
+        self.totals_between(start, end)
     }
 
     fn migrate(&self) -> Result<()> {

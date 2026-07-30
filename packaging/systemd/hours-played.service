@@ -6,10 +6,10 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/hours-played daemon
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin
+ExecStart=/usr/bin/env hours-played daemon
 Restart=on-failure
 RestartSec=5s
 
 [Install]
 WantedBy=graphical-session.target
-

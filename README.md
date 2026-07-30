@@ -18,6 +18,12 @@ Title capture can be enabled explicitly in:
 ```toml
 [privacy]
 title_capture = "all"
+
+[tracking]
+reconcile_seconds = 300
+session_poll_seconds = 30
+pause_on_session_idle = true
+pause_on_session_locked = true
 ```
 
 Config path:
@@ -39,13 +45,18 @@ cargo test
 cargo run -p hours-played -- doctor
 cargo run -p hours-played -- daemon
 cargo run -p hours-played -- today
+cargo run -p hours-played -- --json today
 cargo run -p hours-played -- week
 cargo run -p hours-played -- apps
+cargo run -p hours-played -- range --from 2026-07-01 --to 2026-07-30
 ```
 
 The tracker uses Hyprland's event socket for focus/open/close events and uses
 `hyprctl -j clients` plus `hyprctl -j activewindow` for startup and recovery
 snapshots.
+
+Focused time is paused when `loginctl show-session` reports the current session
+as idle or locked. Open time continues while apps remain open.
 
 ## Systemd User Service
 
@@ -55,5 +66,37 @@ A sample service is available at:
 packaging/systemd/hours-played.service
 ```
 
-Install it manually after building or packaging the binary.
+After installing the binary somewhere in PATH, install the user service with:
 
+```bash
+packaging/systemd/install-user-service.sh
+```
+
+## Arch Packaging
+
+A starter `PKGBUILD` lives at:
+
+```text
+packaging/arch/PKGBUILD
+```
+
+It expects a release tarball named `hours-played-0.1.0.tar.gz`.
+
+## Omarchy Widget
+
+A repository-contained Omarchy shell plugin lives at:
+
+```text
+packaging/omarchy/hours-played/
+```
+
+It reads `hours-played --json today`, shows the top focused app and today's
+total focused time, and opens `hours-played today` in a terminal on click.
+
+Install it into your user plugin directory when you want to try it:
+
+```bash
+mkdir -p ~/.config/omarchy/plugins/local.hours-played
+cp packaging/omarchy/hours-played/* ~/.config/omarchy/plugins/local.hours-played/
+omarchy plugin rescan
+```

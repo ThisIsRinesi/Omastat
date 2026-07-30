@@ -1,6 +1,7 @@
 use crate::{
     config::Config,
     hyprland::{self, Event, EventStream, Snapshot, Window},
+    session,
     storage::{IntervalKind, Storage},
 };
 use anyhow::Result;
@@ -19,7 +20,9 @@ struct TrackerState {
     windows: HashMap<String, Window>,
     app_open_counts: HashMap<String, usize>,
     open_interval_ids: HashMap<String, i64>,
+    active_address: Option<String>,
     focused: Option<FocusedInterval>,
+    focus_paused: bool,
 }
 
 struct FocusedInterval {
@@ -45,6 +48,9 @@ impl Tracker {
         let mut reconnect_backoff = Duration::from_secs(1);
         let mut reconcile_timer = time::interval(Duration::from_secs(
             self.config.tracking.reconcile_seconds.max(30),
+        ));
+        let mut session_timer = time::interval(Duration::from_secs(
+            self.config.tracking.session_poll_seconds.max(5),
         ));
 
         loop {
@@ -82,6 +88,9 @@ impl Tracker {
                     _ = reconcile_timer.tick() => {
                         self.reconcile().await?;
                     }
+                    _ = session_timer.tick() => {
+                        self.refresh_session_status().await?;
+                    }
                     _ = tokio::signal::ctrl_c() => {
                         self.shutdown()?;
                         return Ok(());
@@ -104,9 +113,9 @@ impl Tracker {
                     if !self.state.windows.contains_key(&address) {
                         self.reconcile().await?;
                     }
-                    self.focus_window(Some(&address))?;
+                    self.set_active_window(Some(&address))?;
                 } else {
-                    self.focus_window(None)?;
+                    self.set_active_window(None)?;
                 }
             }
             Event::Unknown => {}
@@ -145,11 +154,21 @@ impl Tracker {
             }
         }
 
-        self.focus_window(snapshot.active_address.as_deref())?;
+        self.set_active_window(snapshot.active_address.as_deref())?;
         Ok(())
     }
 
     fn open_window(&mut self, window: Window) -> Result<()> {
+        if self
+            .state
+            .windows
+            .get(&window.address)
+            .is_some_and(|existing| existing.class == window.class)
+        {
+            self.state.windows.insert(window.address.clone(), window);
+            return Ok(());
+        }
+
         if self.state.windows.contains_key(&window.address) {
             self.close_window(&window.address)?;
         }
@@ -184,11 +203,11 @@ impl Tracker {
 
         if self
             .state
-            .focused
+            .active_address
             .as_ref()
-            .is_some_and(|focused| focused.address == address)
+            .is_some_and(|active| active == address)
         {
-            self.focus_window(None)?;
+            self.set_active_window(None)?;
         }
 
         let app_class = window.class;
@@ -204,20 +223,55 @@ impl Tracker {
         Ok(())
     }
 
-    fn focus_window(&mut self, address: Option<&str>) -> Result<()> {
+    fn set_active_window(&mut self, address: Option<&str>) -> Result<()> {
+        self.state.active_address = address.map(ToOwned::to_owned);
+        self.sync_focused_interval()
+    }
+
+    fn set_focus_paused(&mut self, paused: bool) -> Result<()> {
+        if self.state.focus_paused == paused {
+            return Ok(());
+        }
+        self.state.focus_paused = paused;
+        self.sync_focused_interval()
+    }
+
+    async fn refresh_session_status(&mut self) -> Result<()> {
+        match session::status().await {
+            Ok(status) => {
+                let paused = status.should_pause(
+                    self.config.tracking.pause_on_session_idle,
+                    self.config.tracking.pause_on_session_locked,
+                );
+                self.set_focus_paused(paused)?;
+            }
+            Err(error) => {
+                debug!("session status unavailable: {error:#}");
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_focused_interval(&mut self) -> Result<()> {
         let now = unix_now();
+        let address = self.state.active_address.as_deref();
 
         if self
             .state
             .focused
             .as_ref()
             .is_some_and(|focused| Some(focused.address.as_str()) == address)
+            && !self.state.focus_paused
         {
             return Ok(());
         }
 
         if let Some(previous) = self.state.focused.take() {
             self.storage.close_interval(previous.interval_id, now)?;
+        }
+
+        if self.state.focus_paused {
+            return Ok(());
         }
 
         let Some(address) = address else {
@@ -321,8 +375,8 @@ mod tests {
 
         tracker.open_window(window("0x1", "firefox")).unwrap();
         tracker.open_window(window("0x2", "code")).unwrap();
-        tracker.focus_window(Some("0x1")).unwrap();
-        tracker.focus_window(Some("0x2")).unwrap();
+        tracker.set_active_window(Some("0x1")).unwrap();
+        tracker.set_active_window(Some("0x2")).unwrap();
 
         assert_eq!(
             tracker
@@ -346,6 +400,87 @@ mod tests {
 
         assert_eq!(tracker.state.app_open_counts.get("firefox"), Some(&1));
         assert_eq!(tracker.state.open_interval_ids.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_openwindow_preserves_focus_for_same_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker.open_window(window("0x1", "firefox")).unwrap();
+        tracker.set_active_window(Some("0x1")).unwrap();
+        tracker.open_window(window("0x1", "firefox")).unwrap();
+
+        assert_eq!(
+            tracker
+                .state
+                .focused
+                .as_ref()
+                .map(|focused| focused.address.as_str()),
+            Some("0x1")
+        );
+        assert_eq!(tracker.state.app_open_counts.get("firefox"), Some(&1));
+    }
+
+    #[test]
+    fn session_pause_closes_and_resumes_focus_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker.open_window(window("0x1", "firefox")).unwrap();
+        tracker.set_active_window(Some("0x1")).unwrap();
+        assert!(tracker.state.focused.is_some());
+
+        tracker.set_focus_paused(true).unwrap();
+        assert!(tracker.state.focused.is_none());
+
+        tracker.set_focus_paused(false).unwrap();
+        assert!(tracker.state.focused.is_some());
+    }
+
+    #[tokio::test]
+    async fn fake_event_stream_drives_tracking_state() {
+        struct FakeEventStream {
+            events: std::vec::IntoIter<crate::hyprland::Event>,
+        }
+
+        impl FakeEventStream {
+            fn new(events: Vec<crate::hyprland::Event>) -> Self {
+                Self {
+                    events: events.into_iter(),
+                }
+            }
+
+            async fn next_event(&mut self) -> Option<crate::hyprland::Event> {
+                self.events.next()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+        let mut stream = FakeEventStream::new(vec![
+            crate::hyprland::Event::WindowOpened(window("0x1", "firefox")),
+            crate::hyprland::Event::FocusChanged {
+                address: Some("0x1".to_string()),
+            },
+            crate::hyprland::Event::WindowClosed {
+                address: "0x1".to_string(),
+            },
+        ]);
+
+        while let Some(event) = stream.next_event().await {
+            tracker.apply_event(event).await.unwrap();
+        }
+
+        assert!(tracker.state.windows.is_empty());
+        assert!(tracker.state.focused.is_none());
+        assert!(tracker.state.open_interval_ids.is_empty());
     }
 
     fn window(address: &str, class: &str) -> Window {

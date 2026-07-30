@@ -22,6 +22,12 @@ pub struct PrivacyConfig {
 pub struct TrackingConfig {
     #[serde(default = "default_reconcile_seconds")]
     pub reconcile_seconds: u64,
+    #[serde(default = "default_session_poll_seconds")]
+    pub session_poll_seconds: u64,
+    #[serde(default = "default_pause_on_session_idle")]
+    pub pause_on_session_idle: bool,
+    #[serde(default = "default_pause_on_session_locked")]
+    pub pause_on_session_locked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -80,12 +86,27 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self {
             reconcile_seconds: default_reconcile_seconds(),
+            session_poll_seconds: default_session_poll_seconds(),
+            pause_on_session_idle: default_pause_on_session_idle(),
+            pause_on_session_locked: default_pause_on_session_locked(),
         }
     }
 }
 
 fn default_reconcile_seconds() -> u64 {
     300
+}
+
+fn default_session_poll_seconds() -> u64 {
+    30
+}
+
+fn default_pause_on_session_idle() -> bool {
+    true
+}
+
+fn default_pause_on_session_locked() -> bool {
+    true
 }
 
 fn default_config_path() -> PathBuf {

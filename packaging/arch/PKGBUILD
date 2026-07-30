@@ -1,0 +1,32 @@
+# Maintainer: rinesi
+pkgname=hours-played
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local focused/open application time tracker for Hyprland and Omarchy"
+arch=("x86_64")
+url="https://github.com/rinesi/hours-played"
+license=("MIT")
+depends=("gcc-libs" "glibc" "systemd" "hyprland")
+makedepends=("cargo")
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=("SKIP")
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --locked -p hours-played
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  cargo test --locked
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/hours-played" "$pkgdir/usr/bin/hours-played"
+  install -Dm644 "packaging/systemd/hours-played.service" "$pkgdir/usr/lib/systemd/user/hours-played.service"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/hours-played/README.md"
+  install -Dm644 "packaging/omarchy/hours-played/manifest.json" "$pkgdir/usr/share/hours-played/omarchy/hours-played/manifest.json"
+  install -Dm644 "packaging/omarchy/hours-played/BarWidget.qml" "$pkgdir/usr/share/hours-played/omarchy/hours-played/BarWidget.qml"
+}
+
