@@ -4,6 +4,7 @@ mod hyprland;
 mod session;
 mod storage;
 mod tracker;
+mod tui;
 
 use anyhow::Result;
 use clap::Parser;
@@ -39,6 +40,9 @@ async fn main() -> Result<()> {
         Commands::Range { from, to } => {
             let rows = storage.totals_for_date_range(&from, &to)?;
             cli::print_report(&format!("{from} through {to}"), rows, cli.json)?;
+        }
+        Commands::Tui => {
+            tui::run(storage)?;
         }
         Commands::Doctor => {
             cli::doctor(&config, &storage).await?;

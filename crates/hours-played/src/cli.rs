@@ -40,6 +40,8 @@ pub enum Commands {
         #[arg(long)]
         to: String,
     },
+    /// Open the interactive terminal dashboard.
+    Tui,
     /// Check environment, IPC, config, and storage paths.
     Doctor,
 }
@@ -108,6 +110,8 @@ pub async fn doctor(config: &Config, storage: &Storage) -> Result<()> {
         Ok(status) => {
             println!("Session idle: {}", status.idle);
             println!("Session locked: {}", status.locked);
+            println!("Session stay awake: {}", status.stay_awake);
+            println!("Session source: {}", status.source);
         }
         Err(error) => {
             println!("Session status unavailable: {error}");

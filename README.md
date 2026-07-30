@@ -49,14 +49,35 @@ cargo run -p hours-played -- --json today
 cargo run -p hours-played -- week
 cargo run -p hours-played -- apps
 cargo run -p hours-played -- range --from 2026-07-01 --to 2026-07-30
+cargo run -p hours-played -- tui
 ```
 
 The tracker uses Hyprland's event socket for focus/open/close events and uses
 `hyprctl -j clients` plus `hyprctl -j activewindow` for startup and recovery
 snapshots.
 
-Focused time is paused when `loginctl show-session` reports the current session
-as idle or locked. Open time continues while apps remain open.
+Focused time follows Omarchy's own idle service. The daemon first reads
+`omarchy-shell idle status` and `omarchy-shell lock isLocked`, which means the
+same stay-awake toggle used by the Omarchy bar controls whether idle tracking is
+armed. If Omarchy shell IPC is unavailable, the daemon falls back to
+`loginctl show-session`. Open time continues while apps remain open.
+
+## TUI
+
+The interactive terminal dashboard uses Ratatui:
+
+```bash
+hours-played tui
+```
+
+Controls:
+
+```text
+Left/Right or h/l  Switch Today, Week, All Time
+1/2/3              Jump to a view
+r                  Refresh from SQLite
+q or Esc           Quit
+```
 
 ## Systemd User Service
 
