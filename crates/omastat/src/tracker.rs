@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use std::collections::HashMap;
-use tokio::time::{self, Duration};
+use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 pub struct Tracker {
@@ -46,12 +46,18 @@ impl Tracker {
         self.reconcile().await?;
 
         let mut reconnect_backoff = Duration::from_secs(1);
+        self.refresh_session_status().await?;
+
         let mut reconcile_timer = time::interval(Duration::from_secs(
             self.config.tracking.reconcile_seconds.max(30),
         ));
+        reconcile_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        reconcile_timer.tick().await;
         let mut session_timer = time::interval(Duration::from_secs(
-            self.config.tracking.session_poll_seconds.max(5),
+            self.config.tracking.session_poll_seconds.max(15),
         ));
+        session_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        session_timer.tick().await;
 
         loop {
             let mut stream = match EventStream::connect().await {

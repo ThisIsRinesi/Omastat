@@ -163,6 +163,8 @@ impl Storage {
         self.conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA busy_timeout = 250;
             PRAGMA foreign_keys = ON;
 
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -171,7 +173,7 @@ impl Storage {
             );
 
             CREATE TABLE IF NOT EXISTS intervals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 kind TEXT NOT NULL CHECK (kind IN ('focused', 'open')),
                 app_class TEXT NOT NULL,
                 window_address TEXT,

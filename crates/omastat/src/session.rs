@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::{env, path::PathBuf};
-use tokio::process::Command;
+use tokio::{
+    process::Command,
+    time::{Duration, timeout},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatus {
@@ -78,11 +81,13 @@ async fn loginctl_status() -> Result<SessionStatus> {
 }
 
 async fn command_output(program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to run {program} {}", args.join(" ")))?;
+    let output = timeout(
+        Duration::from_secs(2),
+        Command::new(program).args(args).output(),
+    )
+    .await
+    .with_context(|| format!("timed out running {program} {}", args.join(" ")))?
+    .with_context(|| format!("failed to run {program} {}", args.join(" ")))?;
 
     if !output.status.success() {
         return Err(anyhow!(

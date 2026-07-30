@@ -14,7 +14,7 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt", "signal", "time"] }
 toml = "0.9.8"
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

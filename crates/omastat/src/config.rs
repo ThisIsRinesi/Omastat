@@ -101,7 +101,7 @@ fn default_reconcile_seconds() -> u64 {
 }
 
 fn default_session_poll_seconds() -> u64 {
-    30
+    60
 }
 
 fn default_pause_on_session_idle() -> bool {
