@@ -1,10 +1,10 @@
 # Maintainer: rinesi
-pkgname=hours-played
+pkgname=omastat
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Local focused/open application time tracker for Hyprland and Omarchy"
+pkgdesc="Local focused/open application usage utility for Hyprland and Omarchy"
 arch=("x86_64")
-url="https://github.com/rinesi/hours-played"
+url="https://github.com/rinesi/omastat"
 license=("MIT")
 depends=("gcc-libs" "glibc" "systemd" "hyprland")
 makedepends=("cargo")
@@ -13,7 +13,7 @@ sha256sums=("SKIP")
 
 build() {
   cd "$pkgname-$pkgver"
-  cargo build --release --locked -p hours-played
+  cargo build --release --locked -p omastat
 }
 
 check() {
@@ -23,10 +23,9 @@ check() {
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 "target/release/hours-played" "$pkgdir/usr/bin/hours-played"
-  install -Dm644 "packaging/systemd/hours-played.service" "$pkgdir/usr/lib/systemd/user/hours-played.service"
-  install -Dm644 "README.md" "$pkgdir/usr/share/doc/hours-played/README.md"
-  install -Dm644 "packaging/omarchy/hours-played/manifest.json" "$pkgdir/usr/share/hours-played/omarchy/hours-played/manifest.json"
-  install -Dm644 "packaging/omarchy/hours-played/BarWidget.qml" "$pkgdir/usr/share/hours-played/omarchy/hours-played/BarWidget.qml"
+  install -Dm755 "target/release/omastat" "$pkgdir/usr/bin/omastat"
+  install -Dm644 "packaging/systemd/omastat.service" "$pkgdir/usr/lib/systemd/user/omastat.service"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/omastat/README.md"
+  install -Dm644 "packaging/omarchy/omastat/manifest.json" "$pkgdir/usr/share/omastat/omarchy/omastat/manifest.json"
+  install -Dm644 "packaging/omarchy/omastat/BarWidget.qml" "$pkgdir/usr/share/omastat/omarchy/omastat/BarWidget.qml"
 }
-

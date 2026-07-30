@@ -4,10 +4,10 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "local.hours-played"
+  moduleName: "local.omastat"
 
-  property string displayText: "HP"
-  property string tooltip: "Hours Played"
+  property string displayText: "Oma"
+  property string tooltip: "Omastat"
   property bool refreshRunning: false
   property var rows: []
 
@@ -30,8 +30,8 @@ BarWidget {
     onRunningChanged: root.refreshRunning = running
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        root.displayText = "HP"
-        root.tooltip = "Hours Played report failed"
+        root.displayText = "Oma"
+        root.tooltip = "Omastat report failed"
       }
     }
 
@@ -42,7 +42,7 @@ BarWidget {
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("hours-played", text.trim())
+      onStreamFinished: if (text.trim() !== "") console.warn("omastat", text.trim())
     }
   }
 
@@ -58,13 +58,13 @@ BarWidget {
     onPressed: function(button) {
       if (!root.bar) return
       if (button === Qt.RightButton) root.refresh()
-      else root.bar.run("xdg-terminal-exec hours-played today")
+      else root.bar.run("xdg-terminal-exec omastat today")
     }
   }
 
   function refresh() {
     if (reportProcess.running) return
-    reportProcess.command = splitCommand(String(root.setting("command", "hours-played --json today")))
+    reportProcess.command = splitCommand(String(root.setting("command", "omastat --json today")))
     reportProcess.running = true
   }
 
@@ -73,8 +73,8 @@ BarWidget {
       rows = JSON.parse(String(text || "[]"))
     } catch (error) {
       rows = []
-      displayText = "HP"
-      tooltip = "Hours Played report parse failed"
+      displayText = "Oma"
+      tooltip = "Omastat report parse failed"
       return
     }
 
@@ -82,8 +82,8 @@ BarWidget {
     for (var i = 0; i < rows.length; i++) totalFocused += Number(rows[i].focused_seconds || 0)
 
     if (rows.length === 0 || totalFocused <= 0) {
-      displayText = "HP 0s"
-      tooltip = "No tracked focused time today"
+      displayText = "Oma 0s"
+      tooltip = "No focused time today"
       return
     }
 
@@ -114,4 +114,3 @@ BarWidget {
     return minutes + "m"
   }
 }
-

@@ -1,5 +1,5 @@
 [Unit]
-Description=Hours Played app usage tracker
+Description=Omastat app usage daemon
 Documentation=https://wiki.hypr.land/IPC/
 After=graphical-session.target
 PartOf=graphical-session.target
@@ -7,7 +7,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin
-ExecStart=/usr/bin/env hours-played daemon
+ExecStart=/usr/bin/env omastat daemon
 Restart=on-failure
 RestartSec=5s
 

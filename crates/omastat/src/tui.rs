@@ -127,7 +127,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, rows: &[AppTotals]) {
     let title = vec![
         Line::from(vec![
             Span::styled(
-                "HOURS PLAYED",
+                "OMASTAT",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),

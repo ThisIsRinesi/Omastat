@@ -31,6 +31,9 @@ impl Storage {
         let path = explicit_path
             .map(PathBuf::from)
             .unwrap_or_else(default_db_path);
+        if explicit_path.is_none() {
+            copy_legacy_db_if_needed(&path)?;
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -239,8 +242,35 @@ impl IntervalKind {
 fn default_db_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join("omastat")
+        .join("omastat.db")
+}
+
+fn legacy_db_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("hours-played")
         .join("hours-played.db")
+}
+
+fn copy_legacy_db_if_needed(path: &Path) -> Result<()> {
+    let legacy = legacy_db_path();
+    if path.exists() || !legacy.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(&legacy, path).with_context(|| {
+        format!(
+            "failed to copy legacy database {} to {}",
+            legacy.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

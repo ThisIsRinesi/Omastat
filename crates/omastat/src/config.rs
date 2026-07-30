@@ -43,6 +43,9 @@ impl Config {
         let path = explicit_path
             .map(PathBuf::from)
             .unwrap_or_else(default_config_path);
+        if explicit_path.is_none() {
+            copy_legacy_config_if_needed(&path)?;
+        }
 
         if !path.exists() {
             return Ok(Self {
@@ -112,6 +115,33 @@ fn default_pause_on_session_locked() -> bool {
 fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join("omastat")
+        .join("config.toml")
+}
+
+fn legacy_config_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("hours-played")
         .join("config.toml")
+}
+
+fn copy_legacy_config_if_needed(path: &std::path::Path) -> Result<()> {
+    let legacy = legacy_config_path();
+    if path.exists() || !legacy.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(&legacy, path).with_context(|| {
+        format!(
+            "failed to copy legacy config {} to {}",
+            legacy.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
 }

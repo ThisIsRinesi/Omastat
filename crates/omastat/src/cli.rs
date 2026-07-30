@@ -7,8 +7,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "hours-played")]
-#[command(about = "Track focused and open application time on Hyprland/Omarchy")]
+#[command(name = "omastat")]
+#[command(about = "Measure focused and open application time on Hyprland/Omarchy")]
 pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
@@ -25,7 +25,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Run the foreground tracker daemon.
+    /// Run the foreground daemon.
     Daemon,
     /// Show today's app totals.
     Today,

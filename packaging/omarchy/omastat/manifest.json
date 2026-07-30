@@ -1,25 +1,25 @@
 {
   "schemaVersion": 1,
-  "id": "local.hours-played",
-  "name": "Hours Played",
+  "id": "local.omastat",
+  "name": "Omastat",
   "version": "0.1.0",
   "author": "rinesi",
   "license": "MIT",
-  "description": "Today focused/open app usage from the local Hours Played SQLite database.",
+  "description": "Today focused/open app usage from local Omastat data.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Hours Played",
+    "displayName": "Omastat",
     "description": "Shows today's top focused app and total focused time.",
     "category": "Utilities",
-    "aliases": ["hours-played", "screen-time"],
+    "aliases": ["omastat", "usage"],
     "allowMultiple": false,
     "defaults": {
       "refreshIntervalSec": 60,
-      "command": "hours-played --json today"
+      "command": "omastat --json today"
     },
     "schema": [
       {
@@ -35,9 +35,8 @@
         "key": "command",
         "type": "string",
         "label": "Report command",
-        "defaultValue": "hours-played --json today"
+        "defaultValue": "omastat --json today"
       }
     ]
   }
 }
-
