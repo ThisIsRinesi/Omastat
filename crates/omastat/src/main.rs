@@ -1,17 +1,11 @@
-mod cli;
-mod config;
-mod hyprland;
-mod session;
-mod storage;
-mod tracker;
-mod tui;
-
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
-use config::Config;
-use storage::Storage;
-use tracker::Tracker;
+use omastat::{
+    cli::{self, Cli, Commands},
+    config::Config,
+    storage::Storage,
+    tui,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -24,10 +18,6 @@ async fn main() -> Result<()> {
     let storage = Storage::open(cli.database.as_deref(), &config)?;
 
     match cli.command {
-        Commands::Daemon => {
-            let mut tracker = Tracker::new(storage, config);
-            tracker.run().await?;
-        }
         Commands::Today => {
             cli::print_report("Today", storage.totals_for_today()?, cli.json)?;
         }

@@ -25,8 +25,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Run the foreground daemon.
-    Daemon,
     /// Show today's app totals.
     Today,
     /// Show current week app totals.

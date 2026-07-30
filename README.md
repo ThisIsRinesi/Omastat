@@ -42,7 +42,7 @@ ${XDG_DATA_HOME:-~/.local/share}/omastat/omastat.db
 ```bash
 cargo test
 cargo run -p omastat -- doctor
-cargo run -p omastat -- daemon
+cargo run -p omastat --bin omastatd
 cargo run -p omastat -- today
 cargo run -p omastat -- --json today
 cargo run -p omastat -- week

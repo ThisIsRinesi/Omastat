@@ -24,6 +24,7 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 "target/release/omastat" "$pkgdir/usr/bin/omastat"
+  install -Dm755 "target/release/omastatd" "$pkgdir/usr/bin/omastatd"
   install -Dm644 "packaging/systemd/omastat.service" "$pkgdir/usr/lib/systemd/user/omastat.service"
   install -Dm644 "README.md" "$pkgdir/usr/share/doc/omastat/README.md"
   install -Dm644 "packaging/omarchy/omastat/manifest.json" "$pkgdir/usr/share/omastat/omarchy/omastat/manifest.json"

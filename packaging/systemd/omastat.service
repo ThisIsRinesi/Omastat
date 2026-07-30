@@ -7,7 +7,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin
-ExecStart=/usr/bin/env omastat daemon
+ExecStart=/usr/bin/env omastatd
 Restart=on-failure
 RestartSec=5s
 

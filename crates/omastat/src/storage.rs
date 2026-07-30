@@ -21,6 +21,13 @@ pub struct AppTotals {
     pub open_seconds: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DayTotals {
+    pub label: String,
+    pub focused_seconds: i64,
+    pub open_seconds: i64,
+}
+
 pub struct Storage {
     conn: Connection,
     path: PathBuf,
@@ -123,6 +130,83 @@ impl Storage {
             .flatten()
             .unwrap_or(now);
         self.totals_between(start, now)
+    }
+
+    pub fn daily_totals(&self, days: u32) -> Result<Vec<DayTotals>> {
+        let now = Local::now();
+        let today_start = Local
+            .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+            .single()
+            .context("failed to compute local day start")?;
+        let days = days.max(1) as usize;
+        let range_start = today_start - chrono::Duration::days(days.saturating_sub(1) as i64);
+        let range_end = today_start + chrono::Duration::days(1);
+        let mut output = (0..days)
+            .map(|offset| {
+                let start = range_start + chrono::Duration::days(offset as i64);
+                DayTotals {
+                    label: start.format("%a").to_string(),
+                    focused_seconds: 0,
+                    open_seconds: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let boundaries = (0..=days)
+            .map(|offset| (range_start + chrono::Duration::days(offset as i64)).timestamp())
+            .collect::<Vec<_>>();
+
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                kind,
+                MAX(started_at, ?1) AS bounded_start,
+                MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
+            FROM intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ",
+        )?;
+        let intervals = stmt
+            .query_map(
+                params![range_start.timestamp(), range_end.timestamp()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        for (kind, started_at, ended_at) in intervals {
+            for (index, window) in boundaries.windows(2).enumerate() {
+                let overlap = ended_at.min(window[1]) - started_at.max(window[0]);
+                if overlap <= 0 {
+                    continue;
+                }
+                match kind.as_str() {
+                    "focused" => output[index].focused_seconds += overlap,
+                    "open" => output[index].open_seconds += overlap,
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    pub fn total_duration(&self) -> Result<i64> {
+        let now = Local::now().timestamp();
+        let start: i64 = self
+            .conn
+            .query_row("SELECT MIN(started_at) FROM intervals", [], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .flatten()
+            .unwrap_or(now);
+        Ok(now.saturating_sub(start))
     }
 
     pub fn totals_for_date_range(&self, from: &str, to: &str) -> Result<Vec<AppTotals>> {
@@ -279,6 +363,7 @@ fn copy_legacy_db_if_needed(path: &Path) -> Result<()> {
 mod tests {
     use super::{IntervalKind, Storage};
     use crate::config::Config;
+    use chrono::{Datelike, Local, TimeZone};
 
     #[test]
     fn aggregates_overlapping_intervals() {
@@ -316,5 +401,31 @@ mod tests {
 
         let rows = storage.totals_between(100, 160).unwrap();
         assert_eq!(rows[0].focused_seconds, 60);
+    }
+
+    #[test]
+    fn daily_totals_bucket_interval_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+        let now = Local::now();
+        let today_start = Local
+            .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+            .single()
+            .unwrap();
+        let yesterday_start = today_start - chrono::Duration::days(1);
+        let started_at = (yesterday_start + chrono::Duration::hours(1)).timestamp();
+        let ended_at = (yesterday_start + chrono::Duration::hours(2)).timestamp();
+
+        let focused = storage
+            .start_interval(IntervalKind::Focused, "ghostty", None, None, started_at)
+            .unwrap();
+        storage.close_interval(focused, ended_at).unwrap();
+
+        let days = storage.daily_totals(2).unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].focused_seconds, 3600);
+        assert_eq!(days[1].focused_seconds, 0);
     }
 }
