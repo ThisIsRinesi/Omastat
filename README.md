@@ -93,6 +93,13 @@ After installing the binary somewhere in PATH, install the user service with:
 packaging/systemd/install-user-service.sh
 ```
 
+For local development, install the current build and a Git `post-commit` hook
+that rebuilds, reinstalls, and restarts the user service after every commit:
+
+```bash
+packaging/dev/install-autoupdate.sh
+```
+
 ## Arch Packaging
 
 A starter `PKGBUILD` lives at:
