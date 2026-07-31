@@ -72,8 +72,10 @@ omastat tui
 Controls:
 
 ```text
-Left/Right or h/l  Switch Today, Week, Year, All
-1/2/3/4            Jump to a view
+Left/Right or h/l  Cycle Day, Week, Month, Year, Life lenses
+1/2/3/4/5          Jump to a lens
+Up/Down or j/k     Move the app inspector selection
+PageUp/PageDown    Jump the selection
 r                  Refresh from SQLite
 q or Esc           Quit
 ```

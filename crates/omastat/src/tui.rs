@@ -14,12 +14,8 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    symbols::Marker,
     text::{Line, Span},
-    widgets::{
-        Axis, Block, BorderType, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table,
-        Wrap,
-    },
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 use std::{
     f64::consts::PI,
@@ -27,22 +23,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-const TABS: [&str; 4] = ["Today", "Week", "Year", "All"];
-const FRAME_TIME: Duration = Duration::from_millis(66);
+const LENSES: [&str; 5] = ["DAY", "WEEK", "MONTH", "YEAR", "LIFE"];
+const FRAME_TIME: Duration = Duration::from_millis(50);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
-const BG: Color = Color::Rgb(4, 7, 11);
-const PANEL: Color = Color::Rgb(8, 13, 20);
-const PANEL_ALT: Color = Color::Rgb(11, 17, 25);
-const TEXT: Color = Color::Rgb(218, 231, 239);
-const MUTED: Color = Color::Rgb(96, 112, 126);
-const DIM: Color = Color::Rgb(35, 48, 60);
+
+const BG: Color = Color::Rgb(2, 5, 8);
+const PANEL: Color = Color::Rgb(7, 11, 16);
+const PANEL_2: Color = Color::Rgb(10, 17, 24);
+const SELECTED: Color = Color::Rgb(22, 33, 45);
+const TEXT: Color = Color::Rgb(226, 238, 242);
+const MUTED: Color = Color::Rgb(104, 120, 132);
+const DIM: Color = Color::Rgb(36, 49, 60);
 const CYAN: Color = Color::Rgb(74, 222, 255);
-const BLUE: Color = Color::Rgb(85, 145, 255);
-const GREEN: Color = Color::Rgb(78, 255, 168);
-const YELLOW: Color = Color::Rgb(255, 216, 89);
-const MAGENTA: Color = Color::Rgb(255, 91, 210);
-const ORANGE: Color = Color::Rgb(255, 151, 82);
-const PIE_COLORS: [Color; 6] = [CYAN, MAGENTA, YELLOW, GREEN, BLUE, ORANGE];
+const BLUE: Color = Color::Rgb(92, 144, 255);
+const GREEN: Color = Color::Rgb(79, 255, 170);
+const YELLOW: Color = Color::Rgb(255, 218, 93);
+const MAGENTA: Color = Color::Rgb(255, 93, 211);
+const ORANGE: Color = Color::Rgb(255, 150, 80);
+const RED: Color = Color::Rgb(255, 92, 112);
 const SPINNER: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
 
 pub fn run(storage: Storage) -> Result<()> {
@@ -76,12 +74,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('r') => app.refresh(storage)?,
-                    KeyCode::Left | KeyCode::Char('h') => app.previous_tab(),
-                    KeyCode::Right | KeyCode::Char('l') => app.next_tab(),
-                    KeyCode::Char('1') => app.set_tab(0),
-                    KeyCode::Char('2') => app.set_tab(1),
-                    KeyCode::Char('3') => app.set_tab(2),
-                    KeyCode::Char('4') => app.set_tab(3),
+                    KeyCode::Left | KeyCode::Char('h') => app.previous_lens(),
+                    KeyCode::Right | KeyCode::Char('l') => app.next_lens(),
+                    KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+                    KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+                    KeyCode::PageUp => app.move_selection(-6),
+                    KeyCode::PageDown => app.move_selection(6),
+                    KeyCode::Home => app.select_first(),
+                    KeyCode::End => app.select_last(),
+                    KeyCode::Char('1') => app.set_lens(0),
+                    KeyCode::Char('2') => app.set_lens(1),
+                    KeyCode::Char('3') => app.set_lens(2),
+                    KeyCode::Char('4') => app.set_lens(3),
+                    KeyCode::Char('5') => app.set_lens(4),
                     _ => {}
                 },
                 Event::Resize(_, _) => {}
@@ -93,7 +98,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
 
 #[derive(Debug)]
 struct App {
-    tab: usize,
+    lens: usize,
+    selected: usize,
     tick: u64,
     last_refresh: Instant,
     loaded_at: DateTime<Local>,
@@ -109,7 +115,8 @@ impl App {
     fn load(storage: &Storage) -> Result<Self> {
         let mut steam = SteamResolver::default();
         Ok(Self {
-            tab: 0,
+            lens: 0,
+            selected: 0,
             tick: 0,
             last_refresh: Instant::now(),
             loaded_at: Local::now(),
@@ -123,64 +130,101 @@ impl App {
     }
 
     fn refresh(&mut self, storage: &Storage) -> Result<()> {
-        let tab = self.tab;
+        let lens = self.lens;
+        let selected = self.selected;
         let tick = self.tick;
         *self = Self::load(storage)?;
-        self.tab = tab;
+        self.lens = lens;
+        self.selected = selected;
         self.tick = tick;
+        self.clamp_selection();
         Ok(())
     }
 
     fn rows(&self) -> &[AppTotals] {
-        match self.tab {
+        match self.lens {
             0 => &self.today,
             1 => &self.week,
-            2 => &self.year,
+            2 => &self.month,
+            3 => &self.year,
             _ => &self.all_time,
         }
     }
 
-    fn selected_label(&self) -> &'static str {
-        TABS[self.tab]
+    fn lens_label(&self) -> &'static str {
+        LENSES[self.lens]
     }
 
-    fn previous_tab(&mut self) {
-        self.set_tab(if self.tab == 0 {
-            TABS.len() - 1
+    fn selected_row(&self) -> Option<&AppTotals> {
+        self.rows().get(self.selected)
+    }
+
+    fn lens_total(&self, lens: usize) -> i64 {
+        focused_total(match lens {
+            0 => &self.today,
+            1 => &self.week,
+            2 => &self.month,
+            3 => &self.year,
+            _ => &self.all_time,
+        })
+    }
+
+    fn previous_lens(&mut self) {
+        self.set_lens(if self.lens == 0 {
+            LENSES.len() - 1
         } else {
-            self.tab - 1
+            self.lens - 1
         });
     }
 
-    fn next_tab(&mut self) {
-        self.set_tab((self.tab + 1) % TABS.len());
+    fn next_lens(&mut self) {
+        self.set_lens((self.lens + 1) % LENSES.len());
     }
 
-    fn set_tab(&mut self, tab: usize) {
-        self.tab = tab.min(TABS.len() - 1);
+    fn set_lens(&mut self, lens: usize) {
+        self.lens = lens.min(LENSES.len() - 1);
         self.tick = 0;
+        self.clamp_selection();
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let len = self.rows().len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+
+        self.selected = (self.selected as isize + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    fn select_last(&mut self) {
+        self.selected = self.rows().len().saturating_sub(1);
+    }
+
+    fn clamp_selection(&mut self) {
+        self.selected = self.selected.min(self.rows().len().saturating_sub(1));
     }
 }
 
 fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    render_backdrop(frame, area, app.tick);
+    fill_area(frame, area, BG);
 
-    if area.width < 104 || area.height < 26 {
-        render_compact(frame, area, app);
+    if area.width < 52 || area.height < 16 {
+        render_tiny(frame, area, app);
         return;
     }
 
-    let header_height = if area.height < 31 { 4 } else { 5 };
-    let telemetry_height = if area.height < 31 { 9 } else { 12 };
-    let [header, nav, telemetry, main, footer] = *Layout::default()
+    let [header, body, footer] = *Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(header_height),
-            Constraint::Length(3),
-            Constraint::Length(telemetry_height),
-            Constraint::Min(8),
             Constraint::Length(2),
+            Constraint::Min(12),
+            Constraint::Length(1),
         ])
         .split(area)
     else {
@@ -188,331 +232,459 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     };
 
     render_header(frame, header, app);
-    render_tabs(frame, nav, app);
-    render_telemetry(frame, telemetry, app);
-    render_main(frame, main, app);
+    if area.width < 76 {
+        render_narrow_monitor(frame, body, app);
+    } else {
+        render_monitor(frame, body, app);
+    }
     render_footer(frame, footer, app);
 }
 
-fn render_backdrop(frame: &mut Frame<'_>, area: Rect, tick: u64) {
-    let width = area.width as usize;
-    let height = area.height as usize;
-    let mut lines = Vec::with_capacity(height);
-
-    for y in 0..height {
-        let mut row = String::with_capacity(width);
-        for x in 0..width {
-            let phase = (x * 5 + y * 11 + tick as usize) % 53;
-            let ch = match phase {
-                0 => '·',
-                1 if y % 4 == 0 => '─',
-                2 if x % 13 == 0 => '│',
-                _ => ' ',
-            };
-            row.push(ch);
-        }
-        lines.push(Line::from(Span::styled(
-            row,
-            Style::default().fg(Color::Rgb(17, 26, 35)).bg(BG),
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(BG)), area);
-}
-
-fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let rows = app.rows();
-    let max_rows = area.height.saturating_sub(7) as usize;
-    let mut lines = vec![
+fn render_tiny(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lines = vec![
         Line::from(vec![
-            Span::styled(
-                "omastat ",
-                Style::default()
-                    .fg(pulse_color(app.tick))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                app.selected_label().to_uppercase(),
-                Style::default().fg(MUTED),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Focus ", Style::default().fg(MUTED)),
-            Span::styled(
-                format_duration(focused_total(rows)),
-                Style::default().fg(YELLOW),
-            ),
-            Span::raw("  "),
-            Span::styled("Open ", Style::default().fg(MUTED)),
-            Span::styled(format_duration(open_total(rows)), Style::default().fg(CYAN)),
-            Span::raw("  "),
-            Span::styled("Apps ", Style::default().fg(MUTED)),
-            Span::styled(rows.len().to_string(), Style::default().fg(TEXT)),
+            Span::styled("omastat ", Style::default().fg(pulse_color(app.tick))),
+            Span::styled(app.lens_label(), Style::default().fg(lens_color(app.lens))),
         ]),
         Line::from(Span::styled(
-            activity_rail(app.tick, area.width.saturating_sub(4) as usize),
-            Style::default().fg(DIM),
-        )),
-    ];
-
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No tracked usage yet.",
+            "terminal too small",
             Style::default().fg(MUTED),
-        )));
-    } else {
-        for (index, row) in rows.iter().take(max_rows.max(1)).enumerate() {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:>2} ", index + 1), Style::default().fg(DIM)),
-                Span::styled(short_app(&row.app_class, 20), Style::default().fg(TEXT)),
-                Span::raw(" "),
-                Span::styled(
-                    duration_fixed(row.focused_seconds),
-                    Style::default().fg(YELLOW),
-                ),
-            ]));
-        }
-    }
-
+        )),
+        Line::from(Span::styled("q quits", Style::default().fg(DIM))),
+    ];
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel("OMASTAT", CYAN))
-            .style(Style::default().bg(PANEL))
-            .wrap(Wrap { trim: true }),
+            .alignment(Alignment::Center)
+            .block(panel("MONITOR", CYAN))
+            .style(Style::default().bg(PANEL)),
         area,
     );
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let rows = app.rows();
-    let focused = focused_total(rows);
-    let open = open_total(rows);
-    let density = ratio(focused, open);
-    let top = rows
-        .first()
-        .map(|row| short_app(&row.app_class, 28))
-        .unwrap_or_else(|| "idle".to_string());
-    let status = format!("{} LIVE", SPINNER[(app.tick as usize / 2) % SPINNER.len()]);
-    let clock = app.loaded_at.format("%H:%M:%S").to_string();
-    let accent = pulse_color(app.tick);
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                " omastat",
-                Style::default()
-                    .fg(accent)
-                    .bg(BG)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" // focus telemetry", Style::default().fg(MUTED).bg(BG)),
-            Span::raw("  "),
-            Span::styled(status, Style::default().fg(GREEN).bg(BG)),
-            Span::styled("  refreshed ", Style::default().fg(DIM).bg(BG)),
-            Span::styled(clock, Style::default().fg(TEXT).bg(BG)),
-        ]),
-        Line::from(vec![
-            metric_span("view", app.selected_label(), CYAN),
-            metric_span("focused", &format_duration(focused), YELLOW),
-            metric_span("open", &format_duration(open), BLUE),
-            metric_span("density", &percent(density), MAGENTA),
-            metric_span("apps", &rows.len().to_string(), GREEN),
-            metric_span("leader", &top, ORANGE),
-        ]),
-        Line::from(Span::styled(
-            activity_rail(app.tick, area.width.saturating_sub(2) as usize),
-            Style::default().fg(DIM).bg(BG),
-        )),
-    ];
-
-    if area.height > 4 {
-        lines.push(Line::from(vec![
-            Span::styled(" month ", Style::default().fg(DIM).bg(BG)),
-            Span::styled(
-                format_duration(focused_total(&app.month)),
-                Style::default().fg(CYAN).bg(BG),
-            ),
-            Span::styled("  year ", Style::default().fg(DIM).bg(BG)),
-            Span::styled(
-                format_duration(focused_total(&app.year)),
-                Style::default().fg(YELLOW).bg(BG),
-            ),
-            Span::styled("  best day ", Style::default().fg(DIM).bg(BG)),
-            Span::styled(best_focus_day(&app.days), Style::default().fg(TEXT).bg(BG)),
-        ]));
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(BG)).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(accent).bg(BG)),
-        ),
-        area,
-    );
-}
-
-fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let mut tabs = Vec::new();
-    tabs.push(Span::raw(" "));
-    for (index, title) in TABS.iter().enumerate() {
-        let selected = index == app.tab;
-        let color = if selected {
-            pulse_color(app.tick)
-        } else {
-            MUTED
-        };
-        let label = format!(" {}:{} ", index + 1, title.to_uppercase());
-        tabs.push(Span::styled(
-            label,
-            Style::default()
-                .fg(color)
-                .bg(if selected { PANEL_ALT } else { BG })
-                .add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ));
-        tabs.push(Span::styled(" ", Style::default().fg(DIM).bg(BG)));
-    }
-
-    let rail_width = area.width.saturating_sub(2) as usize;
-    let lines = vec![
-        Line::from(tabs),
-        Line::from(Span::styled(
-            segmented_rail(app.tick, rail_width),
-            Style::default().fg(DIM).bg(BG),
-        )),
-    ];
-
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(BG)).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(DIM).bg(BG)),
-        ),
-        area,
-    );
-}
-
-fn render_telemetry(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let [left, middle, right] = *Layout::default()
+fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let [rail, deck] = *Layout::default()
         .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(12), Constraint::Min(48)])
+        .split(area)
+    else {
+        return;
+    };
+
+    render_mode_rail(frame, rail, app);
+
+    let signal_height = if deck.height < 19 { 7 } else { 8 };
+    let [top, bottom] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(signal_height), Constraint::Min(8)])
+        .split(deck)
+    else {
+        return;
+    };
+    let [flow, core] = *Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(63), Constraint::Percentage(37)])
+        .split(top)
+    else {
+        return;
+    };
+    let [stack, inspect] = *Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(bottom)
+    else {
+        return;
+    };
+
+    render_timeflow(frame, flow, app);
+    render_core(frame, core, app);
+    render_app_stack(frame, stack, app);
+    render_inspector(frame, inspect, app);
+}
+
+fn render_narrow_monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let [modes, flow, stack] = *Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(35),
-            Constraint::Percentage(35),
+            Constraint::Length(3),
+            Constraint::Length(7),
+            Constraint::Min(6),
         ])
         .split(area)
     else {
         return;
     };
 
-    render_command_panel(frame, left, app);
-    render_focus_mix(frame, middle, app);
-    render_rhythm_panel(frame, right, app);
+    render_mode_strip(frame, modes, app);
+    render_timeflow(frame, flow, app);
+    render_app_stack(frame, stack, app);
 }
 
-fn render_command_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    fill_area(frame, area, BG);
+
+    let rows = app.rows();
+    let focused = focused_total(rows);
+    let open = open_total(rows);
+    let density = ratio(focused, open);
+    let accent = pulse_color(app.tick);
+    let clock = app.loaded_at.format("%H:%M:%S").to_string();
+    let spin = SPINNER[(app.tick as usize / 2) % SPINNER.len()];
+    let line = Line::from(vec![
+        Span::styled(
+            " OMASTAT",
+            Style::default()
+                .fg(accent)
+                .bg(BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("::monitor ", Style::default().fg(MUTED).bg(BG)),
+        Span::styled(spin, Style::default().fg(GREEN).bg(BG)),
+        Span::styled(" lens ", Style::default().fg(DIM).bg(BG)),
+        Span::styled(
+            app.lens_label(),
+            Style::default()
+                .fg(lens_color(app.lens))
+                .bg(BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  focus ", Style::default().fg(DIM).bg(BG)),
+        Span::styled(format_duration(focused), Style::default().fg(YELLOW).bg(BG)),
+        Span::styled("  open ", Style::default().fg(DIM).bg(BG)),
+        Span::styled(format_duration(open), Style::default().fg(BLUE).bg(BG)),
+        Span::styled("  density ", Style::default().fg(DIM).bg(BG)),
+        Span::styled(percent(density), Style::default().fg(MAGENTA).bg(BG)),
+        Span::styled("  updated ", Style::default().fg(DIM).bg(BG)),
+        Span::styled(clock, Style::default().fg(TEXT).bg(BG)),
+    ]);
+    let scan = Line::from(Span::styled(
+        scan_rail(area.width as usize, app.tick),
+        Style::default().fg(DIM).bg(BG),
+    ));
+    frame.render_widget(
+        Paragraph::new(vec![line, scan]).style(Style::default().bg(BG)),
+        area,
+    );
+}
+
+fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    fill_area(frame, area, BG);
+
+    let mode = format!("{} {}", app.lens + 1, app.lens_label());
+    let left = format!(" h/l lens  j/k select  pg jump  r refresh  q quit  [{mode}]");
+    let right = format!("{}s refresh", AUTO_REFRESH.as_secs());
+    let padding =
+        area.width
+            .saturating_sub((left.chars().count() + right.chars().count()) as u16) as usize;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(left, Style::default().fg(MUTED).bg(BG)),
+            Span::styled(" ".repeat(padding), Style::default().bg(BG)),
+            Span::styled(right, Style::default().fg(DIM).bg(BG)),
+        ]))
+        .style(Style::default().bg(BG)),
+        area,
+    );
+}
+
+fn render_mode_rail(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    fill_area(frame, area, PANEL);
+
+    let block = panel("LENS", CYAN);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let max_total = (0..LENSES.len())
+        .map(|index| app.lens_total(index))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut lines = Vec::new();
+
+    for (index, label) in LENSES.iter().enumerate() {
+        let selected = index == app.lens;
+        let color = lens_color(index);
+        let bg = if selected { SELECTED } else { PANEL };
+        let marker = if selected { "▶" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(color).bg(bg)),
+            Span::styled(format!("{} ", index + 1), Style::default().fg(DIM).bg(bg)),
+            Span::styled(
+                *label,
+                Style::default()
+                    .fg(if selected { TEXT } else { MUTED })
+                    .bg(bg)
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            mini_bar(
+                ratio(app.lens_total(index), max_total),
+                inner.width as usize,
+                color,
+            ),
+            Style::default().fg(color).bg(bg),
+        )));
+        lines.push(Line::from(Span::styled(
+            format_duration(app.lens_total(index)),
+            Style::default().fg(DIM).bg(PANEL),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(PANEL))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_mode_strip(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    fill_area(frame, area, PANEL);
+
+    let block = panel("LENS", CYAN);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut spans = Vec::new();
+    for (index, label) in LENSES.iter().enumerate() {
+        let selected = index == app.lens;
+        spans.push(Span::styled(
+            format!(" {}:{} ", index + 1, label),
+            Style::default()
+                .fg(if selected { TEXT } else { MUTED })
+                .bg(if selected { SELECTED } else { PANEL })
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL)),
+        inner,
+    );
+}
+
+fn render_timeflow(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    fill_area(frame, area, PANEL);
+
+    let block = panel("TIMEFLOW", GREEN);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let graph_height = inner.height.saturating_sub(1).max(1) as usize;
+    let mut lines = day_graph(&app.days, inner.width as usize, graph_height, app.tick);
+    let latest = app
+        .days
+        .last()
+        .map(|day| {
+            format!(
+                " {} {} focused / {} open",
+                day.label,
+                format_duration(day.focused_seconds),
+                format_duration(day.open_seconds)
+            )
+        })
+        .unwrap_or_else(|| " no daily samples".to_string());
+    lines.push(Line::from(vec![
+        Span::styled("14d", Style::default().fg(DIM).bg(PANEL)),
+        Span::styled(latest, Style::default().fg(MUTED).bg(PANEL)),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(PANEL))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_core(frame: &mut Frame<'_>, area: Rect, app: &App) {
     fill_area(frame, area, PANEL);
 
     let rows = app.rows();
     let focused = focused_total(rows);
     let open = open_total(rows);
     let density = ratio(focused, open);
-    let active_days = app
-        .days
-        .iter()
-        .filter(|day| day.focused_seconds > 0)
-        .count();
-    let top_share = rows
-        .first()
-        .map(|row| ratio(row.focused_seconds, focused))
-        .unwrap_or(0.0);
-    let trend = trend_ratio(&app.days);
     let top = rows
         .first()
-        .map(|row| short_app(&row.app_class, 22))
-        .unwrap_or_else(|| "none".to_string());
-    let width = area.width.saturating_sub(6) as usize;
-    let meter_width = width.saturating_sub(16).clamp(8, 28);
+        .map(|row| short_app(&row.app_class, area.width.saturating_sub(8) as usize))
+        .unwrap_or_else(|| "no signal".to_string());
+    let block = panel("CORE", pulse_color(app.tick));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
+    let meter_width = inner.width.saturating_sub(12).max(3) as usize;
     let lines = vec![
+        Line::from(Span::styled(
+            "FOCUS CLOCK",
+            Style::default()
+                .fg(DIM)
+                .bg(PANEL)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format_duration(focused),
+            Style::default()
+                .fg(YELLOW)
+                .bg(PANEL)
+                .add_modifier(Modifier::BOLD),
+        )),
+        meter_line("dense", density, meter_width, MAGENTA, app.tick, PANEL),
+        meter_line(
+            "apps",
+            ratio(rows.len() as i64, 24),
+            meter_width,
+            CYAN,
+            app.tick + 8,
+            PANEL,
+        ),
         Line::from(vec![
-            Span::styled("view ", Style::default().fg(DIM).bg(PANEL)),
-            Span::styled(
-                app.selected_label().to_uppercase(),
-                Style::default()
-                    .fg(CYAN)
-                    .bg(PANEL)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format_duration(focused),
-                Style::default().fg(YELLOW).bg(PANEL),
-            ),
-            Span::styled(" focused  ", Style::default().fg(MUTED).bg(PANEL)),
-            Span::styled(format_duration(open), Style::default().fg(BLUE).bg(PANEL)),
-            Span::styled(" open", Style::default().fg(MUTED).bg(PANEL)),
-        ]),
-        Line::from(vec![
-            Span::styled("leader ", Style::default().fg(DIM).bg(PANEL)),
+            Span::styled("top ", Style::default().fg(DIM).bg(PANEL)),
             Span::styled(top, Style::default().fg(TEXT).bg(PANEL)),
         ]),
-        Line::from(vec![
-            Span::styled("active days ", Style::default().fg(DIM).bg(PANEL)),
-            Span::styled(
-                format!("{active_days}/14"),
-                Style::default().fg(GREEN).bg(PANEL),
-            ),
-            Span::styled("  apps ", Style::default().fg(DIM).bg(PANEL)),
-            Span::styled(rows.len().to_string(), Style::default().fg(TEXT).bg(PANEL)),
-        ]),
-        meter_line("density", density, meter_width, MAGENTA, app.tick),
-        meter_line("leader", top_share, meter_width, ORANGE, app.tick + 6),
-        meter_line("rhythm", trend, meter_width, GREEN, app.tick + 12),
+        Line::from(orbit_spans(inner.width as usize, app.tick)),
     ];
 
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel("COMMAND", CYAN))
             .style(Style::default().bg(PANEL))
             .wrap(Wrap { trim: true }),
-        area,
+        inner,
     );
 }
 
-fn render_focus_mix(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_app_stack(frame: &mut Frame<'_>, area: Rect, app: &App) {
     fill_area(frame, area, PANEL);
 
-    let block = panel("FOCUS MIX", MAGENTA);
+    let block = panel("APP STACK", BLUE);
     let inner = block.inner(area);
-    frame.render_widget(block.style(Style::default().bg(PANEL)), area);
+    frame.render_widget(block, area);
 
-    let total = focused_total(app.rows()).max(0);
-    if total == 0 {
-        let lines = vec![
+    let rows = app.rows();
+    if rows.is_empty() {
+        let mut lines = vec![
             Line::from(Span::styled(
-                format!(
-                    "{} awaiting signal",
-                    SPINNER[(app.tick as usize / 2) % SPINNER.len()]
-                ),
-                Style::default()
-                    .fg(MUTED)
-                    .bg(PANEL)
-                    .add_modifier(Modifier::BOLD),
+                "waiting for app intervals",
+                Style::default().fg(MUTED).bg(PANEL),
             )),
             Line::from(Span::styled(
-                activity_rail(app.tick, inner.width.saturating_sub(2) as usize),
+                scan_rail(inner.width as usize, app.tick),
                 Style::default().fg(DIM).bg(PANEL),
             )),
+        ];
+        lines.extend(empty_matrix(
+            inner.width as usize,
+            inner.height.saturating_sub(2) as usize,
+        ));
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(PANEL))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let max = rows
+        .first()
+        .map(|row| row.focused_seconds.max(1))
+        .unwrap_or(1);
+    let focused = focused_total(rows).max(1);
+    let visible = inner.height.saturating_sub(1) as usize;
+    let width = inner.width as usize;
+    let name_width = width.saturating_sub(27).clamp(8, 22);
+    let bar_width = width.saturating_sub(name_width + 20).clamp(5, 30);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" #  ", Style::default().fg(DIM).bg(PANEL_2)),
+        Span::styled(
+            fit_text("process", name_width),
+            Style::default().fg(MUTED).bg(PANEL_2),
+        ),
+        Span::styled(" focus map", Style::default().fg(MUTED).bg(PANEL_2)),
+    ])];
+
+    for (index, row) in rows.iter().take(visible.max(1)).enumerate() {
+        let row_bg = if index == app.selected {
+            SELECTED
+        } else {
+            PANEL
+        };
+        let color = rank_color(index);
+        let marker = if index == app.selected { "▸" } else { " " };
+        let mut spans = vec![
+            Span::styled(marker, Style::default().fg(color).bg(row_bg)),
+            Span::styled(
+                format!("{:>2} ", index + 1),
+                Style::default().fg(DIM).bg(row_bg),
+            ),
+            Span::styled(
+                fit_text(&short_app(&row.app_class, name_width), name_width),
+                Style::default()
+                    .fg(if index == app.selected { TEXT } else { color })
+                    .bg(row_bg)
+                    .add_modifier(if index == app.selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            Span::styled(" ", Style::default().bg(row_bg)),
+        ];
+        spans.extend(bar_spans(
+            ratio(row.focused_seconds, max),
+            bar_width,
+            color,
+            app.tick + index as u64 * 2,
+            row_bg,
+        ));
+        spans.push(Span::styled(
+            format!(" {} ", duration_compact(row.focused_seconds)),
+            Style::default().fg(YELLOW).bg(row_bg),
+        ));
+        spans.push(Span::styled(
+            percent(ratio(row.focused_seconds, focused)),
+            Style::default().fg(MAGENTA).bg(row_bg),
+        ));
+        lines.push(Line::from(spans));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(PANEL))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    fill_area(frame, area, PANEL);
+
+    let block = panel("INSPECT", ORANGE);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = app.rows();
+    let total_focus = focused_total(rows).max(1);
+    let Some(row) = app.selected_row() else {
+        let lines = vec![
             Line::from(Span::styled(
-                "No focused intervals in this view.",
+                "no app selected",
                 Style::default().fg(MUTED).bg(PANEL),
+            )),
+            Line::from(Span::styled(
+                orbit_text(inner.width as usize, app.tick),
+                Style::default().fg(DIM).bg(PANEL),
             )),
         ];
         frame.render_widget(
@@ -522,383 +694,160 @@ fn render_focus_mix(frame: &mut Frame<'_>, area: Rect, app: &App) {
             inner,
         );
         return;
-    }
-
-    let segments = pie_segments(app.rows(), total);
-    let height = inner.height.max(1) as usize;
-    let ring_width = if inner.width < 54 {
-        inner.width.saturating_sub(20).clamp(11, 19) as usize
-    } else {
-        23
-    };
-    let legend_width = inner.width.saturating_sub(ring_width as u16 + 3) as usize;
-    let center_x = (ring_width.saturating_sub(1) as f64) / 2.0;
-    let center_y = (height.saturating_sub(1) as f64) / 2.0;
-    let outer = center_y.min(center_x / 1.9).max(2.2);
-    let inner_radius = (outer * 0.45).max(1.0);
-    let active = (app.tick / 14) as usize % segments.len().max(1);
-    let sweep_angle = ((app.tick % 96) as f64) / 96.0;
-    let mut lines = Vec::with_capacity(height);
-
-    for y in 0..height {
-        let mut spans = Vec::with_capacity(ring_width + legend_width + 3);
-        for x in 0..ring_width {
-            let dx = (x as f64 - center_x) / 1.9;
-            let dy = y as f64 - center_y;
-            let distance = (dx * dx + dy * dy).sqrt();
-            if distance > outer || distance < inner_radius {
-                spans.push(Span::styled(" ", Style::default().bg(PANEL)));
-                continue;
-            }
-
-            let angle = normalized_angle(dy.atan2(dx));
-            let segment_index = segment_index(angle, &segments);
-            let sweep =
-                (angle - sweep_angle).abs() < 0.025 || (angle + 1.0 - sweep_angle).abs() < 0.025;
-            let mut style = Style::default().fg(segments[segment_index].color).bg(PANEL);
-            if segment_index == active || sweep {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            spans.push(Span::styled(if sweep { "▓" } else { "█" }, style));
-        }
-
-        spans.push(Span::styled("  ", Style::default().bg(PANEL)));
-        if let Some(segment) = segments.get(y) {
-            let marker = if y == active { "◆ " } else { "■ " };
-            let label_width = legend_width.saturating_sub(10).clamp(5, 18);
-            spans.push(Span::styled(
-                marker,
-                Style::default()
-                    .fg(segment.color)
-                    .bg(PANEL)
-                    .add_modifier(if y == active {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ));
-            spans.push(Span::styled(
-                format!("{:<label_width$}", short_app(&segment.label, label_width)),
-                Style::default().fg(TEXT).bg(PANEL),
-            ));
-            spans.push(Span::styled(
-                format!(" {:>4}", percent(segment.share)),
-                Style::default().fg(MUTED).bg(PANEL),
-            ));
-        }
-
-        lines.push(Line::from(spans));
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(PANEL)),
-        inner,
-    );
-}
-
-fn render_rhythm_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let block = panel("RHYTHM", GREEN);
-    let inner = block.inner(area);
-    frame.render_widget(block.style(Style::default().bg(PANEL)), area);
-
-    let strip_height = if inner.height > 7 { 2 } else { 1 };
-    let [chart, strip, metrics] = *Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(4),
-            Constraint::Length(strip_height),
-            Constraint::Length(2),
-        ])
-        .split(inner)
-    else {
-        return;
     };
 
-    render_focus_trend(frame, chart, &app.days, app.tick);
-    render_day_strip(frame, strip, &app.days, app.tick);
-
-    let today = app.days.last().map(|day| day.focused_seconds).unwrap_or(0);
-    let average = average_focus(&app.days);
-    let lines = vec![Line::from(vec![
-        Span::styled("today ", Style::default().fg(DIM).bg(PANEL)),
-        Span::styled(
-            format_duration(today),
-            Style::default().fg(YELLOW).bg(PANEL),
-        ),
-        Span::styled("  avg ", Style::default().fg(DIM).bg(PANEL)),
-        Span::styled(
-            format_duration(average),
+    let width = inner.width as usize;
+    let density = ratio(row.focused_seconds, row.open_seconds);
+    let share = ratio(row.focused_seconds, total_focus);
+    let name = fit_text(&row.app_class, width);
+    let meter_width = width.saturating_sub(12).max(3);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("#{:02}", app.selected + 1),
+            Style::default().fg(DIM).bg(PANEL),
+        )),
+        Line::from(Span::styled(
+            name,
+            Style::default()
+                .fg(TEXT)
+                .bg(PANEL)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("focus ", Style::default().fg(DIM).bg(PANEL)),
+            Span::styled(
+                format_duration(row.focused_seconds),
+                Style::default().fg(YELLOW).bg(PANEL),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("open  ", Style::default().fg(DIM).bg(PANEL)),
+            Span::styled(
+                format_duration(row.open_seconds),
+                Style::default().fg(BLUE).bg(PANEL),
+            ),
+        ]),
+        meter_line("dense", density, meter_width, MAGENTA, app.tick, PANEL),
+        meter_line("share", share, meter_width, GREEN, app.tick + 11, PANEL),
+        Line::from(orbit_spans(width, app.tick + 5)),
+        Line::from(Span::styled(
+            sparkline(&app.days, width, app.tick),
             Style::default().fg(CYAN).bg(PANEL),
-        ),
-        Span::styled("  peak ", Style::default().fg(DIM).bg(PANEL)),
-        Span::styled(
-            best_focus_day(&app.days),
-            Style::default().fg(TEXT).bg(PANEL),
-        ),
-    ])];
+        )),
+    ];
+
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(PANEL))
             .wrap(Wrap { trim: true }),
-        metrics,
+        inner,
     );
 }
 
-fn render_focus_trend(frame: &mut Frame<'_>, area: Rect, days: &[DayTotals], tick: u64) {
-    let mut focus_points = days
-        .iter()
-        .enumerate()
-        .map(|(index, day)| (index as f64, day.focused_seconds.max(0) as f64 / 3600.0))
-        .collect::<Vec<_>>();
-
-    if let Some(last) = focus_points.last_mut() {
-        let shimmer = ((tick % 32) as f64 / 32.0 * PI).sin().max(0.0) * 0.05;
-        last.1 += shimmer;
+fn day_graph(days: &[DayTotals], width: usize, height: usize, tick: u64) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
     }
 
-    let max_hours = focus_points
-        .iter()
-        .map(|(_, hours)| *hours)
-        .fold(0.0, f64::max)
-        .max(1.0);
-    let last_index = days.len().saturating_sub(1).max(1) as f64;
-    let first_label = days.first().map(|day| day.label.as_str()).unwrap_or("");
-    let last_label = days.last().map(|day| day.label.as_str()).unwrap_or("");
-    let mid_label = format!("{:.1}h", max_hours / 2.0);
-    let top_label = format!("{max_hours:.1}h");
-    let datasets = vec![
-        Dataset::default()
-            .name("fill")
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Area)
-            .fill_to_y(0.0)
-            .style(Style::default().fg(Color::Rgb(22, 44, 55)).bg(PANEL))
-            .data(&focus_points),
-        Dataset::default()
-            .name("focus")
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(
-                Style::default()
-                    .fg(CYAN)
-                    .bg(PANEL)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .data(&focus_points),
-    ];
-    let chart = Chart::new(datasets)
-        .style(Style::default().bg(PANEL))
-        .x_axis(
-            Axis::default()
-                .bounds([0.0, last_index])
-                .labels([first_label, last_label])
-                .style(Style::default().fg(MUTED).bg(PANEL)),
-        )
-        .y_axis(
-            Axis::default()
-                .bounds([0.0, max_hours])
-                .labels(["0h", mid_label.as_str(), top_label.as_str()])
-                .style(Style::default().fg(MUTED).bg(PANEL)),
-        );
-    frame.render_widget(chart, area);
-}
-
-fn render_day_strip(frame: &mut Frame<'_>, area: Rect, days: &[DayTotals], tick: u64) {
-    let max = days
+    let days = if days.is_empty() { &[][..] } else { days };
+    let focus_max = days
         .iter()
         .map(|day| day.focused_seconds)
         .max()
         .unwrap_or(0)
         .max(1);
-    let mut spans = vec![Span::styled("14d ", Style::default().fg(DIM).bg(PANEL))];
-
-    for (index, day) in days.iter().enumerate() {
-        let share = ratio(day.focused_seconds, max);
-        let symbol = heat_symbol(share);
-        let color = if day.focused_seconds <= 0 {
-            DIM
-        } else if index == days.len().saturating_sub(1) && tick % 24 < 12 {
-            YELLOW
-        } else if share > 0.75 {
-            GREEN
-        } else if share > 0.4 {
-            CYAN
-        } else {
-            BLUE
-        };
-        spans.push(Span::styled(symbol, Style::default().fg(color).bg(PANEL)));
-    }
-
-    let latest = days
-        .last()
-        .map(|day| format!("  {} {}", day.label, format_duration(day.focused_seconds)))
-        .unwrap_or_default();
-    spans.push(Span::styled(latest, Style::default().fg(MUTED).bg(PANEL)));
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(spans)]).style(Style::default().bg(PANEL)),
-        area,
-    );
-}
-
-fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let [bars, table] = *Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(area)
-    else {
-        return;
-    };
-    render_app_load(frame, bars, app);
-    render_table(frame, table, app);
-}
-
-fn render_app_load(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let rows = app.rows();
-    let max = rows
-        .first()
-        .map(|row| row.focused_seconds.max(1))
-        .unwrap_or(1);
-    let visible = area.height.saturating_sub(3) as usize;
-    let width = area.width.saturating_sub(8) as usize;
-    let bar_width = width.saturating_sub(20).clamp(8, 46);
-    let reveal = ((app.tick.min(18) + 1) as f64 / 19.0).clamp(0.0, 1.0);
-    let mut lines = Vec::new();
-
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No app usage recorded for this view.",
-            Style::default().fg(MUTED).bg(PANEL),
-        )));
-    } else {
-        for (index, row) in rows.iter().take(visible.max(1)).enumerate() {
-            let share = ratio(row.focused_seconds, max);
-            let color = rank_color(index);
-            let name_width = width.saturating_sub(bar_width + 12).clamp(8, 18);
-            let mut spans = vec![
-                Span::styled(
-                    format!("{:>2} ", index + 1),
-                    Style::default().fg(DIM).bg(PANEL),
-                ),
-                Span::styled(
-                    format!("{:<name_width$}", short_app(&row.app_class, name_width)),
-                    Style::default().fg(TEXT).bg(PANEL),
-                ),
-                Span::styled(" ", Style::default().bg(PANEL)),
-            ];
-            spans.extend(bar_spans(
-                share * reveal,
-                bar_width,
-                color,
-                app.tick + index as u64 * 3,
-                PANEL,
-            ));
-            spans.push(Span::styled(
-                duration_fixed(row.focused_seconds),
-                Style::default().fg(YELLOW).bg(PANEL),
-            ));
-            lines.push(Line::from(spans));
-        }
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel("PROCESS LOAD", BLUE))
-            .style(Style::default().bg(PANEL))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn render_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let rows = app.rows();
-    let focused = focused_total(rows).max(1);
-    let visible = area.height.saturating_sub(4) as usize;
-    let table_rows = rows
+    let open_max = days
         .iter()
-        .take(visible.max(1))
-        .enumerate()
-        .map(|(index, row)| {
-            let color = rank_color(index);
-            let density = ratio(row.focused_seconds, row.open_seconds);
-            let share = ratio(row.focused_seconds, focused);
-            Row::new(vec![
-                Cell::from(format!("{:>2}", index + 1)).style(Style::default().fg(DIM).bg(PANEL)),
-                Cell::from(short_app(&row.app_class, 30))
-                    .style(Style::default().fg(color).bg(PANEL)),
-                Cell::from(duration_fixed(row.focused_seconds))
-                    .style(Style::default().fg(YELLOW).bg(PANEL)),
-                Cell::from(duration_fixed(row.open_seconds))
-                    .style(Style::default().fg(BLUE).bg(PANEL)),
-                Cell::from(percent(density)).style(Style::default().fg(MAGENTA).bg(PANEL)),
-                Cell::from(micro_bar(share, 8)).style(Style::default().fg(color).bg(PANEL)),
-            ])
-        });
+        .map(|day| day.open_seconds)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let col_width = if days.is_empty() {
+        width
+    } else {
+        (width / days.len()).max(1)
+    };
+    let scan_x = (tick as usize / 2) % width.max(1);
+    let mut lines = Vec::with_capacity(height);
 
-    frame.render_widget(
-        Table::new(
-            table_rows,
-            [
-                Constraint::Length(3),
-                Constraint::Min(14),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(6),
-                Constraint::Length(8),
-            ],
-        )
-        .header(
-            Row::new(["#", "App", "Focus", "Open", "Dense", "Share"]).style(
-                Style::default()
-                    .fg(TEXT)
-                    .bg(PANEL_ALT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .block(panel("LEADERBOARD", YELLOW))
-        .style(Style::default().bg(PANEL))
-        .column_spacing(1),
-        area,
-    );
+    for y in (0..height).rev() {
+        let mut spans = Vec::with_capacity(width);
+        let threshold = (y + 1) as f64 / height as f64;
+        let mut x = 0;
+        for (index, day) in days.iter().enumerate() {
+            let focus = ratio(day.focused_seconds, focus_max);
+            let open = ratio(day.open_seconds, open_max);
+            let color = heat_color(index, focus);
+            for _ in 0..col_width {
+                if x >= width {
+                    break;
+                }
+                let glyph = if focus >= threshold {
+                    "█"
+                } else if open >= threshold {
+                    "░"
+                } else if x == scan_x || (x + width - scan_x) % width < 2 {
+                    "·"
+                } else {
+                    " "
+                };
+                let fg = if focus >= threshold {
+                    color
+                } else if open >= threshold {
+                    DIM
+                } else {
+                    Color::Rgb(18, 27, 34)
+                };
+                spans.push(Span::styled(glyph, Style::default().fg(fg).bg(PANEL)));
+                x += 1;
+            }
+        }
+
+        while x < width {
+            let glyph = if x == scan_x { "·" } else { " " };
+            spans.push(Span::styled(
+                glyph,
+                Style::default().fg(Color::Rgb(18, 27, 34)).bg(PANEL),
+            ));
+            x += 1;
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let left = format!(
-        "  ←/h  →/l   1-4 views   r refresh   q quit   {}",
-        SPINNER[(app.tick as usize / 3) % SPINNER.len()]
-    );
-    let right = format!("auto-refresh {}s", AUTO_REFRESH.as_secs());
-    let padding =
-        area.width
-            .saturating_sub((left.chars().count() + right.chars().count()) as u16) as usize;
-    let line = Line::from(vec![
-        Span::styled(left, Style::default().fg(MUTED).bg(BG)),
-        Span::styled(" ".repeat(padding), Style::default().bg(BG)),
-        Span::styled(right, Style::default().fg(DIM).bg(BG)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(vec![line])
-            .style(Style::default().bg(BG))
-            .alignment(Alignment::Left),
-        area,
-    );
+fn empty_matrix(width: usize, height: usize) -> Vec<Line<'static>> {
+    (0..height)
+        .map(|row| {
+            let text = (0..width)
+                .map(|col| {
+                    if (row * 7 + col * 3) % 31 == 0 {
+                        '·'
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>();
+            Line::from(Span::styled(text, Style::default().fg(DIM).bg(PANEL)))
+        })
+        .collect()
 }
 
 fn panel(title: &'static str, accent: Color) -> Block<'static> {
     Block::default()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(Style::default().fg(accent).bg(PANEL))
         .style(Style::default().bg(PANEL))
 }
 
 fn fill_area(frame: &mut Frame<'_>, area: Rect, color: Color) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let line = " ".repeat(area.width as usize);
     let lines = (0..area.height)
         .map(|_| Line::from(Span::styled(line.clone(), Style::default().bg(color))))
@@ -909,25 +858,22 @@ fn fill_area(frame: &mut Frame<'_>, area: Rect, color: Color) {
     );
 }
 
-fn metric_span(label: &str, value: &str, color: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {label} {value} "),
-        Style::default()
-            .fg(color)
-            .bg(PANEL_ALT)
-            .add_modifier(Modifier::BOLD),
-    )
-}
-
-fn meter_line(label: &str, value: f64, width: usize, color: Color, tick: u64) -> Line<'static> {
+fn meter_line(
+    label: &str,
+    value: f64,
+    width: usize,
+    color: Color,
+    tick: u64,
+    background: Color,
+) -> Line<'static> {
     let mut spans = vec![Span::styled(
-        format!("{label:<8} "),
-        Style::default().fg(MUTED).bg(PANEL),
+        format!("{label:<5} "),
+        Style::default().fg(MUTED).bg(background),
     )];
-    spans.extend(bar_spans(value, width, color, tick, PANEL));
+    spans.extend(bar_spans(value, width, color, tick, background));
     spans.push(Span::styled(
-        format!(" {:>4}", percent(value)),
-        Style::default().fg(TEXT).bg(PANEL),
+        format!(" {}", percent(value)),
+        Style::default().fg(TEXT).bg(background),
     ));
     Line::from(spans)
 }
@@ -965,68 +911,97 @@ fn bar_spans(
         .collect()
 }
 
-fn micro_bar(value: f64, width: usize) -> String {
+fn mini_bar(value: f64, width: usize, _color: Color) -> String {
+    let width = width.max(1);
     let filled = ((value.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
     format!(
         "{}{}",
-        "▰".repeat(filled),
-        "▱".repeat(width.saturating_sub(filled))
+        "▀".repeat(filled),
+        "˙".repeat(width.saturating_sub(filled))
     )
 }
 
-#[derive(Debug)]
-struct PieSegment {
-    label: String,
-    share: f64,
-    cumulative_share: f64,
-    color: Color,
-}
-
-fn pie_segments(rows: &[AppTotals], total: i64) -> Vec<PieSegment> {
-    let mut segments = rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .take(5)
-        .enumerate()
-        .scan(0.0, |cumulative, (index, row)| {
-            let share = ratio(row.focused_seconds, total);
-            *cumulative += share;
-            Some(PieSegment {
-                label: row.app_class.clone(),
-                share,
-                cumulative_share: *cumulative,
-                color: PIE_COLORS[index],
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let represented = segments
-        .last()
-        .map(|segment| segment.cumulative_share)
-        .unwrap_or(0.0);
-    if represented < 0.995 {
-        segments.push(PieSegment {
-            label: "Other".to_string(),
-            share: 1.0 - represented,
-            cumulative_share: 1.0,
-            color: PIE_COLORS[5],
-        });
-    } else if let Some(last) = segments.last_mut() {
-        last.cumulative_share = 1.0;
+fn scan_rail(width: usize, tick: u64) -> String {
+    if width == 0 {
+        return String::new();
     }
 
-    segments
+    let head = (tick as usize / 2) % width;
+    (0..width)
+        .map(|index| {
+            let distance = index.abs_diff(head);
+            if distance == 0 {
+                '█'
+            } else if distance <= 2 {
+                '━'
+            } else if index % 8 == 0 {
+                '╴'
+            } else {
+                '─'
+            }
+        })
+        .collect()
 }
 
-fn normalized_angle(angle: f64) -> f64 {
-    ((angle + PI * 2.5) % (PI * 2.0)) / (PI * 2.0)
+fn orbit_spans(width: usize, tick: u64) -> Vec<Span<'static>> {
+    let text = orbit_text(width, tick);
+    text.chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            let color = match (index + tick as usize) % 17 {
+                0..=2 => CYAN,
+                3..=4 => GREEN,
+                5 => YELLOW,
+                _ => DIM,
+            };
+            Span::styled(ch.to_string(), Style::default().fg(color).bg(PANEL))
+        })
+        .collect()
 }
 
-fn segment_index(angle_share: f64, segments: &[PieSegment]) -> usize {
-    segments
+fn orbit_text(width: usize, tick: u64) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let width = width.min(48);
+    let center = (width as f64 - 1.0) / 2.0;
+    let phase = (tick % 96) as f64 / 96.0 * PI * 2.0;
+    (0..width)
+        .map(|index| {
+            let x = index as f64 - center;
+            let wave = (x / 2.4 + phase).sin().abs();
+            if wave > 0.93 {
+                '◆'
+            } else if wave > 0.78 {
+                '◇'
+            } else if index % 7 == 0 {
+                '·'
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+fn sparkline(days: &[DayTotals], width: usize, tick: u64) -> String {
+    let symbols = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    let max = days
         .iter()
-        .position(|segment| angle_share <= segment.cumulative_share)
-        .unwrap_or_else(|| segments.len().saturating_sub(1))
+        .map(|day| day.focused_seconds)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut out = String::new();
+    for (index, day) in days.iter().enumerate() {
+        let value = ratio(day.focused_seconds, max);
+        let mut slot = (value * (symbols.len() - 1) as f64).round() as usize;
+        if index == days.len().saturating_sub(1) && tick % 20 < 10 && slot < symbols.len() - 1 {
+            slot += 1;
+        }
+        out.push_str(symbols[slot]);
+    }
+    fit_text(&out, width)
 }
 
 fn focused_total(rows: &[AppTotals]) -> i64 {
@@ -1037,24 +1012,6 @@ fn open_total(rows: &[AppTotals]) -> i64 {
     rows.iter().map(|row| row.open_seconds).sum()
 }
 
-fn average_focus(days: &[DayTotals]) -> i64 {
-    if days.is_empty() {
-        return 0;
-    }
-    days.iter().map(|day| day.focused_seconds).sum::<i64>() / days.len() as i64
-}
-
-fn trend_ratio(days: &[DayTotals]) -> f64 {
-    let today = days.last().map(|day| day.focused_seconds).unwrap_or(0);
-    let peak = days
-        .iter()
-        .map(|day| day.focused_seconds)
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    ratio(today, peak)
-}
-
 fn ratio(numerator: i64, denominator: i64) -> f64 {
     if denominator <= 0 {
         0.0
@@ -1063,11 +1020,21 @@ fn ratio(numerator: i64, denominator: i64) -> f64 {
     }
 }
 
+fn lens_color(index: usize) -> Color {
+    match index {
+        0 => CYAN,
+        1 => GREEN,
+        2 => YELLOW,
+        3 => MAGENTA,
+        _ => ORANGE,
+    }
+}
+
 fn pulse_color(tick: u64) -> Color {
-    match tick % 36 {
-        0..=8 => CYAN,
-        9..=17 => GREEN,
-        18..=26 => YELLOW,
+    match tick % 40 {
+        0..=9 => CYAN,
+        10..=19 => GREEN,
+        20..=29 => YELLOW,
         _ => MAGENTA,
     }
 }
@@ -1079,71 +1046,24 @@ fn rank_color(index: usize) -> Color {
         2 => GREEN,
         3 => MAGENTA,
         4 => ORANGE,
+        5 => RED,
         _ => MUTED,
     }
 }
 
-fn activity_rail(tick: u64, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let slots = (width / 5).max(1);
-    let position = (tick as usize / 2) % slots;
-    (0..width)
-        .map(|index| {
-            let slot = index / 5;
-            if slot == position && index % 5 < 3 {
-                '━'
-            } else if index % 8 == 3 {
-                '╴'
-            } else if index % 5 == 1 {
-                '·'
-            } else {
-                ' '
-            }
-        })
-        .collect()
-}
-
-fn segmented_rail(tick: u64, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    (0..width)
-        .map(|index| {
-            let phase = (index + tick as usize) % 29;
-            match phase {
-                0..=2 => '━',
-                8 | 16 | 24 => '╸',
-                _ => '─',
-            }
-        })
-        .collect()
-}
-
-fn heat_symbol(share: f64) -> &'static str {
+fn heat_color(index: usize, share: f64) -> Color {
     if share <= 0.0 {
-        "░"
-    } else if share < 0.2 {
-        "▁"
-    } else if share < 0.4 {
-        "▃"
-    } else if share < 0.6 {
-        "▅"
-    } else if share < 0.8 {
-        "▆"
+        DIM
     } else {
-        "█"
+        match index % 6 {
+            0 => CYAN,
+            1 => GREEN,
+            2 => YELLOW,
+            3 => MAGENTA,
+            4 => BLUE,
+            _ => ORANGE,
+        }
     }
-}
-
-fn best_focus_day(days: &[DayTotals]) -> String {
-    days.iter()
-        .max_by_key(|day| day.focused_seconds)
-        .filter(|day| day.focused_seconds > 0)
-        .map(|day| format!("{} {}", day.label, format_duration(day.focused_seconds)))
-        .unwrap_or_else(|| "none".to_string())
 }
 
 fn short_app(value: &str, width: usize) -> String {
@@ -1154,15 +1074,22 @@ fn short_app(value: &str, width: usize) -> String {
     if value.contains('.') {
         value = value.rsplit('.').next().unwrap_or(&value).to_string();
     }
+    fit_text(&value, width)
+}
+
+fn fit_text(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
     if value.chars().count() <= width {
-        return value;
+        return format!("{value:<width$}");
     }
 
     let mut out = value
         .chars()
         .take(width.saturating_sub(1))
         .collect::<String>();
-    out.push('.');
+    out.push('…');
     out
 }
 
@@ -1185,6 +1112,15 @@ fn format_duration(seconds: i64) -> String {
     }
 }
 
-fn duration_fixed(seconds: i64) -> String {
-    format!("{:>9}", format_duration(seconds))
+fn duration_compact(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{hours:>2}h")
+    } else if minutes > 0 {
+        format!("{minutes:>2}m")
+    } else {
+        format!("{seconds:>2}s")
+    }
 }
