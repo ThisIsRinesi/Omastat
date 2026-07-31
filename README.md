@@ -72,8 +72,8 @@ omastat tui
 Controls:
 
 ```text
-Left/Right or h/l  Switch Today, Week, All Time
-1/2/3              Jump to a view
+Left/Right or h/l  Switch Today, Week, Year, All
+1/2/3/4            Jump to a view
 r                  Refresh from SQLite
 q or Esc           Quit
 ```
