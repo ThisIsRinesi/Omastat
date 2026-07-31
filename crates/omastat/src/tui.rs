@@ -27,20 +27,21 @@ const LENSES: [&str; 5] = ["DAY", "WEEK", "MONTH", "YEAR", "LIFE"];
 const FRAME_TIME: Duration = Duration::from_millis(50);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
 
-const BG: Color = Color::Rgb(2, 5, 8);
-const PANEL: Color = Color::Rgb(7, 11, 16);
-const PANEL_2: Color = Color::Rgb(10, 17, 24);
-const SELECTED: Color = Color::Rgb(22, 33, 45);
-const TEXT: Color = Color::Rgb(226, 238, 242);
-const MUTED: Color = Color::Rgb(104, 120, 132);
-const DIM: Color = Color::Rgb(36, 49, 60);
-const CYAN: Color = Color::Rgb(74, 222, 255);
-const BLUE: Color = Color::Rgb(92, 144, 255);
-const GREEN: Color = Color::Rgb(79, 255, 170);
-const YELLOW: Color = Color::Rgb(255, 218, 93);
-const MAGENTA: Color = Color::Rgb(255, 93, 211);
-const ORANGE: Color = Color::Rgb(255, 150, 80);
-const RED: Color = Color::Rgb(255, 92, 112);
+// Use the terminal palette so matugen/Skwd-wall themes can recolor the TUI.
+const BG: Color = Color::Indexed(0);
+const PANEL: Color = Color::Indexed(0);
+const PANEL_2: Color = Color::Indexed(8);
+const SELECTED: Color = Color::Indexed(8);
+const TEXT: Color = Color::Indexed(15);
+const MUTED: Color = Color::Indexed(7);
+const DIM: Color = Color::Indexed(8);
+const CYAN: Color = Color::Indexed(14);
+const BLUE: Color = Color::Indexed(12);
+const GREEN: Color = Color::Indexed(10);
+const YELLOW: Color = Color::Indexed(11);
+const MAGENTA: Color = Color::Indexed(13);
+const ORANGE: Color = Color::Indexed(3);
+const RED: Color = Color::Indexed(9);
 const SPINNER: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
 
 pub fn run(storage: Storage) -> Result<()> {
@@ -474,7 +475,7 @@ fn render_mode_strip(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_timeflow(frame: &mut Frame<'_>, area: Rect, app: &App) {
     fill_area(frame, area, PANEL);
 
-    let block = panel("TIMEFLOW", GREEN);
+    let block = panel("BRAILLE FLOW", GREEN);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -497,7 +498,7 @@ fn render_timeflow(frame: &mut Frame<'_>, area: Rect, app: &App) {
         })
         .unwrap_or_else(|| " no daily samples".to_string());
     lines.push(Line::from(vec![
-        Span::styled("14d", Style::default().fg(DIM).bg(PANEL)),
+        Span::styled("braille 14d", Style::default().fg(DIM).bg(PANEL)),
         Span::styled(latest, Style::default().fg(MUTED).bg(PANEL)),
     ]));
 
@@ -520,14 +521,18 @@ fn render_core(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .first()
         .map(|row| short_app(&row.app_class, area.width.saturating_sub(8) as usize))
         .unwrap_or_else(|| "no signal".to_string());
-    let block = panel("CORE", pulse_color(app.tick));
+    let best = best_focus_day(&app.days)
+        .map(|day| format!("{} {}", day.label, duration_compact(day.focused_seconds)))
+        .unwrap_or_else(|| "no focus yet".to_string());
+    let active = active_days(&app.days);
+    let block = panel("REPLAY", pulse_color(app.tick));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let meter_width = inner.width.saturating_sub(12).max(3) as usize;
     let lines = vec![
         Line::from(Span::styled(
-            "FOCUS CLOCK",
+            "FOCUS REPLAY",
             Style::default()
                 .fg(DIM)
                 .bg(PANEL)
@@ -553,7 +558,21 @@ fn render_core(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::styled("top ", Style::default().fg(DIM).bg(PANEL)),
             Span::styled(top, Style::default().fg(TEXT).bg(PANEL)),
         ]),
-        Line::from(orbit_spans(inner.width as usize, app.tick)),
+        Line::from(vec![
+            Span::styled("best ", Style::default().fg(DIM).bg(PANEL)),
+            Span::styled(best, Style::default().fg(GREEN).bg(PANEL)),
+        ]),
+        Line::from(vec![
+            Span::styled("days ", Style::default().fg(DIM).bg(PANEL)),
+            Span::styled(
+                format!("{active}/{} active", app.days.len().max(1)),
+                Style::default().fg(CYAN).bg(PANEL),
+            ),
+        ]),
+        Line::from(Span::styled(
+            scan_rail(inner.width as usize, app.tick + 9),
+            Style::default().fg(DIM).bg(PANEL),
+        )),
     ];
 
     frame.render_widget(
@@ -683,7 +702,7 @@ fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Style::default().fg(MUTED).bg(PANEL),
             )),
             Line::from(Span::styled(
-                orbit_text(inner.width as usize, app.tick),
+                scan_rail(inner.width as usize, app.tick),
                 Style::default().fg(DIM).bg(PANEL),
             )),
         ];
@@ -701,7 +720,7 @@ fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let share = ratio(row.focused_seconds, total_focus);
     let name = fit_text(&row.app_class, width);
     let meter_width = width.saturating_sub(12).max(3);
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             format!("#{:02}", app.selected + 1),
             Style::default().fg(DIM).bg(PANEL),
@@ -729,12 +748,15 @@ fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ]),
         meter_line("dense", density, meter_width, MAGENTA, app.tick, PANEL),
         meter_line("share", share, meter_width, GREEN, app.tick + 11, PANEL),
-        Line::from(orbit_spans(width, app.tick + 5)),
-        Line::from(Span::styled(
-            sparkline(&app.days, width, app.tick),
-            Style::default().fg(CYAN).bg(PANEL),
-        )),
     ];
+    let remaining = inner.height.saturating_sub(lines.len() as u16) as usize;
+    lines.extend(focus_mix_lines(
+        rows,
+        app.selected,
+        width,
+        remaining,
+        app.tick + 5,
+    ));
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -749,7 +771,10 @@ fn day_graph(days: &[DayTotals], width: usize, height: usize, tick: u64) -> Vec<
         return Vec::new();
     }
 
-    let days = if days.is_empty() { &[][..] } else { days };
+    if days.is_empty() {
+        return empty_matrix(width, height);
+    }
+
     let focus_max = days
         .iter()
         .map(|day| day.focused_seconds)
@@ -762,58 +787,190 @@ fn day_graph(days: &[DayTotals], width: usize, height: usize, tick: u64) -> Vec<
         .max()
         .unwrap_or(0)
         .max(1);
-    let col_width = if days.is_empty() {
-        width
-    } else {
-        (width / days.len()).max(1)
-    };
-    let scan_x = (tick as usize / 2) % width.max(1);
+    let virtual_width = width * 2;
+    let virtual_height = height * 4;
+    let scan_x = (tick as usize / 2) % width;
     let mut lines = Vec::with_capacity(height);
 
-    for y in (0..height).rev() {
+    for row in 0..height {
         let mut spans = Vec::with_capacity(width);
-        let threshold = (y + 1) as f64 / height as f64;
-        let mut x = 0;
-        for (index, day) in days.iter().enumerate() {
-            let focus = ratio(day.focused_seconds, focus_max);
-            let open = ratio(day.open_seconds, open_max);
-            let color = heat_color(index, focus);
-            for _ in 0..col_width {
-                if x >= width {
-                    break;
-                }
-                let glyph = if focus >= threshold {
-                    "█"
-                } else if open >= threshold {
-                    "░"
-                } else if x == scan_x || (x + width - scan_x) % width < 2 {
-                    "·"
-                } else {
-                    " "
-                };
-                let fg = if focus >= threshold {
-                    color
-                } else if open >= threshold {
-                    DIM
-                } else {
-                    Color::Rgb(18, 27, 34)
-                };
-                spans.push(Span::styled(glyph, Style::default().fg(fg).bg(PANEL)));
-                x += 1;
-            }
-        }
+        for col in 0..width {
+            let mut focus_mask = 0u16;
+            let mut open_mask = 0u16;
+            let mut color = DIM;
 
-        while x < width {
-            let glyph = if x == scan_x { "·" } else { " " };
-            spans.push(Span::styled(
-                glyph,
-                Style::default().fg(Color::Rgb(18, 27, 34)).bg(PANEL),
-            ));
-            x += 1;
+            for dot_y in 0..4 {
+                for dot_x in 0..2 {
+                    let virtual_x = (col * 2 + dot_x).min(virtual_width.saturating_sub(1));
+                    let index = ((virtual_x * days.len()) / virtual_width).min(days.len() - 1);
+                    let day = &days[index];
+                    let virtual_y = row * 4 + dot_y;
+                    let from_bottom = virtual_height.saturating_sub(virtual_y);
+                    let focus_level = (ratio(day.focused_seconds, focus_max)
+                        * virtual_height as f64)
+                        .ceil() as usize;
+                    let open_level =
+                        (ratio(day.open_seconds, open_max) * virtual_height as f64).ceil() as usize;
+                    let bit = braille_bit(dot_x, dot_y);
+
+                    if focus_level > 0 && from_bottom <= focus_level {
+                        focus_mask |= bit;
+                        color = heat_color(index, ratio(day.focused_seconds, focus_max));
+                    } else if open_level > 0 && from_bottom <= open_level {
+                        open_mask |= bit;
+                    }
+                }
+            }
+
+            let sweep = col == scan_x || col.abs_diff(scan_x) <= 1;
+            let (glyph, fg) = if focus_mask != 0 {
+                (braille_char(focus_mask), if sweep { TEXT } else { color })
+            } else if open_mask != 0 {
+                (braille_char(open_mask), DIM)
+            } else if sweep && (row + col + tick as usize) % 4 == 0 {
+                ("⠂".to_string(), DIM)
+            } else {
+                (" ".to_string(), DIM)
+            };
+            spans.push(Span::styled(glyph, Style::default().fg(fg).bg(PANEL)));
         }
         lines.push(Line::from(spans));
     }
 
+    lines
+}
+
+#[derive(Clone)]
+struct PieSegment {
+    label: String,
+    share: f64,
+    color: Color,
+    selected: bool,
+}
+
+fn focus_mix_lines(
+    rows: &[AppTotals],
+    selected: usize,
+    width: usize,
+    height: usize,
+    tick: u64,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let segments = pie_segments(rows, selected);
+    if segments.is_empty() {
+        return vec![Line::from(Span::styled(
+            "mix no focus signal",
+            Style::default().fg(MUTED).bg(PANEL),
+        ))];
+    }
+
+    if height < 3 || width < 14 {
+        return segments
+            .iter()
+            .take(height)
+            .map(|segment| {
+                Line::from(vec![
+                    Span::styled("mix ", Style::default().fg(DIM).bg(PANEL)),
+                    Span::styled(
+                        percent(segment.share),
+                        Style::default().fg(segment.color).bg(PANEL),
+                    ),
+                    Span::styled(
+                        format!(" {}", fit_text(&segment.label, width.saturating_sub(9))),
+                        Style::default().fg(MUTED).bg(PANEL),
+                    ),
+                ])
+            })
+            .collect();
+    }
+
+    if width < 30 {
+        let chart_width = width.min(13);
+        let chart_height = height.min(7);
+        let left_padding = width.saturating_sub(chart_width) / 2;
+        let right_padding = width.saturating_sub(chart_width + left_padding);
+        let active = segments
+            .iter()
+            .position(|segment| segment.selected)
+            .unwrap_or_else(|| ((tick / 18) as usize) % segments.len());
+
+        return (0..chart_height)
+            .map(|y| {
+                let mut spans = vec![Span::styled(
+                    " ".repeat(left_padding),
+                    Style::default().bg(PANEL),
+                )];
+                spans.extend(pie_row(
+                    &segments,
+                    active,
+                    chart_width,
+                    chart_height,
+                    y,
+                    tick,
+                ));
+                spans.push(Span::styled(
+                    " ".repeat(right_padding),
+                    Style::default().bg(PANEL),
+                ));
+                Line::from(spans)
+            })
+            .collect();
+    }
+
+    let chart_width = width.min(15);
+    let chart_height = height.min(7);
+    let legend_width = width.saturating_sub(chart_width + 1);
+    let active = segments
+        .iter()
+        .position(|segment| segment.selected)
+        .unwrap_or_else(|| ((tick / 18) as usize) % segments.len());
+    let mut lines = Vec::with_capacity(chart_height);
+
+    for y in 0..chart_height {
+        let mut spans = pie_row(&segments, active, chart_width, chart_height, y, tick);
+        spans.push(Span::styled(" ", Style::default().bg(PANEL)));
+
+        if legend_width > 0 {
+            if let Some(segment) = segments.get(y) {
+                let marker = if segment.selected { "▸" } else { " " };
+                let label_width = legend_width.saturating_sub(8);
+                spans.push(Span::styled(
+                    marker,
+                    Style::default()
+                        .fg(if segment.selected {
+                            TEXT
+                        } else {
+                            segment.color
+                        })
+                        .bg(PANEL),
+                ));
+                spans.push(Span::styled(
+                    "●",
+                    Style::default().fg(segment.color).bg(PANEL),
+                ));
+                spans.push(Span::styled(
+                    format!(" {}", percent(segment.share)),
+                    Style::default().fg(TEXT).bg(PANEL),
+                ));
+                spans.push(Span::styled(
+                    format!(" {}", fit_text(&segment.label, label_width)),
+                    Style::default().fg(MUTED).bg(PANEL),
+                ));
+            } else if y + 1 == chart_height {
+                spans.push(Span::styled(
+                    scan_rail(legend_width, tick + 13),
+                    Style::default().fg(DIM).bg(PANEL),
+                ));
+            }
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    lines.truncate(height);
     lines
 }
 
@@ -897,7 +1054,7 @@ fn bar_spans(
             if index < filled {
                 let style = if index == sweep {
                     Style::default()
-                        .fg(Color::White)
+                        .fg(TEXT)
                         .bg(background)
                         .add_modifier(Modifier::BOLD)
                 } else {
@@ -943,65 +1100,124 @@ fn scan_rail(width: usize, tick: u64) -> String {
         .collect()
 }
 
-fn orbit_spans(width: usize, tick: u64) -> Vec<Span<'static>> {
-    let text = orbit_text(width, tick);
-    text.chars()
-        .enumerate()
-        .map(|(index, ch)| {
-            let color = match (index + tick as usize) % 17 {
-                0..=2 => CYAN,
-                3..=4 => GREEN,
-                5 => YELLOW,
-                _ => DIM,
-            };
-            Span::styled(ch.to_string(), Style::default().fg(color).bg(PANEL))
-        })
-        .collect()
-}
+fn pie_segments(rows: &[AppTotals], selected: usize) -> Vec<PieSegment> {
+    let total = focused_total(rows).max(1) as f64;
+    let top_count = rows.len().min(5);
+    let mut segments = Vec::new();
 
-fn orbit_text(width: usize, tick: u64) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let width = width.min(48);
-    let center = (width as f64 - 1.0) / 2.0;
-    let phase = (tick % 96) as f64 / 96.0 * PI * 2.0;
-    (0..width)
-        .map(|index| {
-            let x = index as f64 - center;
-            let wave = (x / 2.4 + phase).sin().abs();
-            if wave > 0.93 {
-                '◆'
-            } else if wave > 0.78 {
-                '◇'
-            } else if index % 7 == 0 {
-                '·'
-            } else {
-                ' '
-            }
-        })
-        .collect()
-}
-
-fn sparkline(days: &[DayTotals], width: usize, tick: u64) -> String {
-    let symbols = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-    let max = days
-        .iter()
-        .map(|day| day.focused_seconds)
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    let mut out = String::new();
-    for (index, day) in days.iter().enumerate() {
-        let value = ratio(day.focused_seconds, max);
-        let mut slot = (value * (symbols.len() - 1) as f64).round() as usize;
-        if index == days.len().saturating_sub(1) && tick % 20 < 10 && slot < symbols.len() - 1 {
-            slot += 1;
+    for (index, row) in rows.iter().take(top_count).enumerate() {
+        if row.focused_seconds <= 0 {
+            continue;
         }
-        out.push_str(symbols[slot]);
+
+        segments.push(PieSegment {
+            label: short_app(&row.app_class, 18).trim().to_string(),
+            share: row.focused_seconds as f64 / total,
+            color: rank_color(index),
+            selected: index == selected,
+        });
     }
-    fit_text(&out, width)
+
+    let other_seconds = rows
+        .iter()
+        .skip(top_count)
+        .map(|row| row.focused_seconds.max(0))
+        .sum::<i64>();
+    if other_seconds > 0 {
+        segments.push(PieSegment {
+            label: "other".to_string(),
+            share: other_seconds as f64 / total,
+            color: MUTED,
+            selected: selected >= top_count,
+        });
+    }
+
+    segments
+}
+
+fn pie_row(
+    segments: &[PieSegment],
+    active: usize,
+    width: usize,
+    height: usize,
+    row: usize,
+    tick: u64,
+) -> Vec<Span<'static>> {
+    let center_x = (width as f64 - 1.0) / 2.0;
+    let center_y = (height as f64 - 1.0) / 2.0;
+    let outer_x = (width as f64 / 2.0).max(1.0);
+    let outer_y = (height as f64 / 2.0).max(1.0);
+    let rotation = (tick % 240) as f64 / 240.0 * PI * 0.35;
+
+    (0..width)
+        .map(|col| {
+            let dx = (col as f64 - center_x) / outer_x;
+            let dy = (row as f64 - center_y) / outer_y;
+            let radius = (dx * dx + dy * dy).sqrt();
+
+            if !(0.38..=1.0).contains(&radius) {
+                return Span::styled(" ", Style::default().bg(PANEL));
+            }
+
+            let angle = (dy.atan2(dx) + PI * 2.5 + rotation) % (PI * 2.0);
+            let segment_index = pie_segment_index(segments, angle / (PI * 2.0));
+            let segment = &segments[segment_index];
+            let highlighted = segment.selected || segment_index == active;
+            let glyph = if highlighted && tick % 20 < 10 {
+                "█"
+            } else if radius > 0.82 {
+                "▓"
+            } else {
+                "■"
+            };
+            Span::styled(
+                glyph,
+                Style::default()
+                    .fg(if highlighted { TEXT } else { segment.color })
+                    .bg(PANEL)
+                    .add_modifier(if highlighted {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            )
+        })
+        .collect()
+}
+
+fn pie_segment_index(segments: &[PieSegment], position: f64) -> usize {
+    let total = segments.iter().map(|segment| segment.share).sum::<f64>();
+    let target = position.clamp(0.0, 1.0) * total.max(f64::EPSILON);
+    let mut cumulative = 0.0;
+
+    for (index, segment) in segments.iter().enumerate() {
+        cumulative += segment.share;
+        if target <= cumulative {
+            return index;
+        }
+    }
+
+    segments.len().saturating_sub(1)
+}
+
+fn braille_bit(x: usize, y: usize) -> u16 {
+    match (x, y) {
+        (0, 0) => 0x01,
+        (0, 1) => 0x02,
+        (0, 2) => 0x04,
+        (0, 3) => 0x40,
+        (1, 0) => 0x08,
+        (1, 1) => 0x10,
+        (1, 2) => 0x20,
+        (1, 3) => 0x80,
+        _ => 0,
+    }
+}
+
+fn braille_char(mask: u16) -> String {
+    char::from_u32(0x2800 + mask as u32)
+        .unwrap_or(' ')
+        .to_string()
 }
 
 fn focused_total(rows: &[AppTotals]) -> i64 {
@@ -1010,6 +1226,18 @@ fn focused_total(rows: &[AppTotals]) -> i64 {
 
 fn open_total(rows: &[AppTotals]) -> i64 {
     rows.iter().map(|row| row.open_seconds).sum()
+}
+
+fn active_days(days: &[DayTotals]) -> usize {
+    days.iter()
+        .filter(|day| day.focused_seconds > 0 || day.open_seconds > 0)
+        .count()
+}
+
+fn best_focus_day(days: &[DayTotals]) -> Option<&DayTotals> {
+    days.iter()
+        .filter(|day| day.focused_seconds > 0)
+        .max_by_key(|day| day.focused_seconds)
 }
 
 fn ratio(numerator: i64, denominator: i64) -> f64 {
