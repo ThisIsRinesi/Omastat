@@ -14,6 +14,10 @@ pub struct SteamResolver {
 
 impl SteamResolver {
     pub fn resolve_class(&mut self, class: &str) -> String {
+        if class.trim().is_empty() {
+            return "unknown".to_string();
+        }
+
         let Some(app_id) = steam_app_id(class) else {
             return class.to_string();
         };
@@ -154,6 +158,13 @@ mod tests {
         assert_eq!(steam_app_id("steam_app_646570"), Some(646570));
         assert_eq!(steam_app_id("steam"), None);
         assert_eq!(steam_app_id("steam_app_notanid"), None);
+    }
+
+    #[test]
+    fn blank_classes_resolve_to_unknown() {
+        let mut resolver = SteamResolver::default();
+        assert_eq!(resolver.resolve_class(""), "unknown");
+        assert_eq!(resolver.resolve_class("   "), "unknown");
     }
 
     #[test]

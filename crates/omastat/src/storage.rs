@@ -160,7 +160,7 @@ impl Storage {
             .context("failed to compute local day start")?;
         let days = days.max(1) as usize;
         let range_start = today_start - chrono::Duration::days(days.saturating_sub(1) as i64);
-        let range_end = today_start + chrono::Duration::days(1);
+        let query_end = now.timestamp();
         let mut output = (0..days)
             .map(|offset| {
                 let start = range_start + chrono::Duration::days(offset as i64);
@@ -187,21 +187,18 @@ impl Storage {
             ",
         )?;
         let intervals = stmt
-            .query_map(
-                params![range_start.timestamp(), range_end.timestamp()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )?
+            .query_map(params![range_start.timestamp(), query_end], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (kind, started_at, ended_at) in intervals {
             for (index, window) in boundaries.windows(2).enumerate() {
-                let overlap = ended_at.min(window[1]) - started_at.max(window[0]);
+                let overlap = ended_at.min(window[1]).min(query_end) - started_at.max(window[0]);
                 if overlap <= 0 {
                     continue;
                 }
@@ -447,5 +444,22 @@ mod tests {
         assert_eq!(days.len(), 2);
         assert_eq!(days[0].focused_seconds, 3600);
         assert_eq!(days[1].focused_seconds, 0);
+    }
+
+    #[test]
+    fn daily_totals_bounds_unclosed_today_at_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+        let started_at = Local::now().timestamp() - 60;
+
+        storage
+            .start_interval(IntervalKind::Focused, "ghostty", None, None, started_at)
+            .unwrap();
+
+        let days = storage.daily_totals(1).unwrap();
+        assert!(days[0].focused_seconds >= 60);
+        assert!(days[0].focused_seconds < 120);
     }
 }

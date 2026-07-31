@@ -13,9 +13,11 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::Marker,
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table, Tabs, Wrap,
+        Axis, Block, BorderType, Borders, Cell, Chart, Dataset, Gauge, GraphType, Paragraph, Row,
+        Table, Tabs, Wrap,
     },
 };
 use std::{
@@ -196,7 +198,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .first()
         .map(|row| short_app(&row.app_class, 32))
         .unwrap_or_else(|| "No app usage yet".to_string());
-    let sweep = scanline(app.tick, area.width.saturating_sub(2) as usize);
+    let sweep = activity_rail(app.tick, area.width.saturating_sub(2) as usize);
 
     let lines = vec![
         Line::from(vec![
@@ -270,6 +272,12 @@ fn render_replay_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let ratio = ratio(focused, open);
     let month_focused = focused_total(&app.month);
     let year_focused = focused_total(&app.year);
+    let best_day = best_focus_day(&app.days);
+    let active_days = app
+        .days
+        .iter()
+        .filter(|day| day.focused_seconds > 0)
+        .count();
     let top = rows
         .first()
         .map(|row| short_app(&row.app_class, 24))
@@ -312,6 +320,15 @@ fn render_replay_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::styled(
                 format_duration(year_focused),
                 Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Best "),
+            Span::styled(best_day, Style::default().fg(Color::White)),
+            Span::raw("  Days "),
+            Span::styled(
+                format!("{active_days}/14"),
+                Style::default().fg(Color::LightGreen),
             ),
         ]),
     ];
@@ -403,28 +420,24 @@ fn render_focus_pie(frame: &mut Frame<'_>, area: Rect, rows: &[AppTotals], tick:
 }
 
 fn render_trend_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let [spark, gauges] = *Layout::default()
+    let block = card("Rhythm");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [chart, strip, gauges] = *Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(3)])
-        .split(area)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(inner)
     else {
         return;
     };
 
-    let data = app
-        .days
-        .iter()
-        .map(|day| day.focused_seconds.max(0) as u64)
-        .collect::<Vec<_>>();
-    let max = data.iter().copied().max().unwrap_or(1).max(1);
-    frame.render_widget(
-        Sparkline::default()
-            .block(card("14 day focus"))
-            .data(&data)
-            .max(max)
-            .style(Style::default().fg(Color::Cyan)),
-        spark,
-    );
+    render_focus_trend(frame, chart, &app.days);
+    render_day_strip(frame, strip, &app.days);
 
     let [focus_area, open_area] = *Layout::default()
         .direction(Direction::Horizontal)
@@ -447,13 +460,116 @@ fn render_trend_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_gauge(frame: &mut Frame<'_>, area: Rect, label: &'static str, value: f64, color: Color) {
+    let [label_area, gauge_area] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area)
+    else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(label).style(Style::default().fg(Color::DarkGray)),
+        label_area,
+    );
     frame.render_widget(
         Gauge::default()
-            .block(card(label))
             .gauge_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
             .ratio(value.clamp(0.0, 1.0)),
-        area,
+        gauge_area,
     );
+}
+
+fn render_focus_trend(frame: &mut Frame<'_>, area: Rect, days: &[DayTotals]) {
+    let focus_points = days
+        .iter()
+        .enumerate()
+        .map(|(index, day)| (index as f64, day.focused_seconds.max(0) as f64 / 3600.0))
+        .collect::<Vec<_>>();
+    let max_hours = focus_points
+        .iter()
+        .map(|(_, hours)| *hours)
+        .fold(0.0, f64::max)
+        .max(1.0);
+    let last_index = days.len().saturating_sub(1).max(1) as f64;
+    let first_label = days.first().map(|day| day.label.as_str()).unwrap_or("");
+    let last_label = days.last().map(|day| day.label.as_str()).unwrap_or("");
+    let mid_label = format!("{:.1}h", max_hours / 2.0);
+    let top_label = format!("{max_hours:.1}h");
+    let datasets = vec![
+        Dataset::default()
+            .name("focus area")
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Area)
+            .fill_to_y(0.0)
+            .style(Style::default().fg(Color::DarkGray))
+            .data(&focus_points),
+        Dataset::default()
+            .name("focus")
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .data(&focus_points),
+    ];
+    let chart = Chart::new(datasets)
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, last_index])
+                .labels([first_label, last_label]),
+        )
+        .y_axis(Axis::default().bounds([0.0, max_hours]).labels([
+            "0h",
+            mid_label.as_str(),
+            top_label.as_str(),
+        ]));
+    frame.render_widget(chart, area);
+}
+
+fn render_day_strip(frame: &mut Frame<'_>, area: Rect, days: &[DayTotals]) {
+    let max = days
+        .iter()
+        .map(|day| day.focused_seconds)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let blocks = days
+        .iter()
+        .map(|day| {
+            let share = ratio(day.focused_seconds, max);
+            let symbol = if share <= 0.0 {
+                "░"
+            } else if share < 0.25 {
+                "▂"
+            } else if share < 0.5 {
+                "▄"
+            } else if share < 0.75 {
+                "▆"
+            } else {
+                "█"
+            };
+            Span::styled(
+                symbol,
+                Style::default().fg(if day.focused_seconds > 0 {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    let latest = days
+        .last()
+        .map(|day| format!("  {} {}", day.label, format_duration(day.focused_seconds)))
+        .unwrap_or_default();
+
+    let mut spans = vec![Span::styled("14d ", Style::default().fg(Color::DarkGray))];
+    spans.extend(blocks);
+    spans.push(Span::styled(latest, Style::default().fg(Color::Gray)));
+
+    frame.render_widget(Paragraph::new(vec![Line::from(spans)]), area);
 }
 
 fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -647,23 +763,33 @@ fn pulse_color(tick: u64) -> Color {
     }
 }
 
-fn scanline(tick: u64, width: usize) -> String {
+fn activity_rail(tick: u64, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
 
-    let position = (tick as usize) % width;
+    let slots = (width / 4).max(1);
+    let position = (tick as usize / 2) % slots;
     (0..width)
         .map(|index| {
-            if index == position {
-                '>'
-            } else if index + 1 == position || index == position + 1 {
-                '-'
+            let slot = index / 4;
+            if slot == position && index % 4 != 3 {
+                '━'
+            } else if index % 4 == 1 {
+                '·'
             } else {
-                '.'
+                ' '
             }
         })
         .collect()
+}
+
+fn best_focus_day(days: &[DayTotals]) -> String {
+    days.iter()
+        .max_by_key(|day| day.focused_seconds)
+        .filter(|day| day.focused_seconds > 0)
+        .map(|day| format!("{} {}", day.label, format_duration(day.focused_seconds)))
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn short_app(value: &str, width: usize) -> String {
