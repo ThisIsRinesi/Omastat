@@ -17,32 +17,17 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
+use serde_json::Value as JsonValue;
 use std::{
     f64::consts::PI,
-    io,
+    fs, io,
     time::{Duration, Instant},
 };
+use toml::Value as TomlValue;
 
 const LENSES: [&str; 5] = ["DAY", "WEEK", "MONTH", "YEAR", "LIFE"];
-const FRAME_TIME: Duration = Duration::from_millis(50);
+const FRAME_TIME: Duration = Duration::from_millis(250);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
-
-// Use the terminal palette so matugen/Skwd-wall themes can recolor the TUI.
-const BG: Color = Color::Indexed(0);
-const PANEL: Color = Color::Indexed(0);
-const PANEL_2: Color = Color::Indexed(8);
-const SELECTED: Color = Color::Indexed(8);
-const TEXT: Color = Color::Indexed(15);
-const MUTED: Color = Color::Indexed(7);
-const DIM: Color = Color::Indexed(8);
-const CYAN: Color = Color::Indexed(14);
-const BLUE: Color = Color::Indexed(12);
-const GREEN: Color = Color::Indexed(10);
-const YELLOW: Color = Color::Indexed(11);
-const MAGENTA: Color = Color::Indexed(13);
-const ORANGE: Color = Color::Indexed(3);
-const RED: Color = Color::Indexed(9);
-const SPINNER: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
 
 pub fn run(storage: Storage) -> Result<()> {
     enable_raw_mode()?;
@@ -104,6 +89,7 @@ struct App {
     tick: u64,
     last_refresh: Instant,
     loaded_at: DateTime<Local>,
+    theme: Theme,
     today: Vec<AppTotals>,
     week: Vec<AppTotals>,
     month: Vec<AppTotals>,
@@ -121,6 +107,7 @@ impl App {
             tick: 0,
             last_refresh: Instant::now(),
             loaded_at: Local::now(),
+            theme: Theme::load(),
             today: steam.resolve_totals(storage.totals_for_today()?),
             week: steam.resolve_totals(storage.totals_for_week()?),
             month: steam.resolve_totals(storage.totals_for_month()?),
@@ -156,10 +143,6 @@ impl App {
         LENSES[self.lens]
     }
 
-    fn selected_row(&self) -> Option<&AppTotals> {
-        self.rows().get(self.selected)
-    }
-
     fn lens_total(&self, lens: usize) -> i64 {
         focused_total(match lens {
             0 => &self.today,
@@ -184,7 +167,6 @@ impl App {
 
     fn set_lens(&mut self, lens: usize) {
         self.lens = lens.min(LENSES.len() - 1);
-        self.tick = 0;
         self.clamp_selection();
     }
 
@@ -213,10 +195,11 @@ impl App {
 
 fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    fill_area(frame, area, BG);
+    let theme = &app.theme;
+    fill_area(frame, area, theme.bg);
 
     if area.width < 52 || area.height < 16 {
-        render_tiny(frame, area, app);
+        render_tiny(frame, area, app, theme);
         return;
     }
 
@@ -232,143 +215,201 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         return;
     };
 
-    render_header(frame, header, app);
-    if area.width < 76 {
-        render_narrow_monitor(frame, body, app);
+    render_header(frame, header, app, theme);
+    if area.width < 82 {
+        render_compact(frame, body, app, theme);
     } else {
-        render_monitor(frame, body, app);
+        render_dashboard(frame, body, app, theme);
     }
-    render_footer(frame, footer, app);
+    render_footer(frame, footer, app, theme);
 }
 
-fn render_tiny(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_tiny(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let lines = vec![
         Line::from(vec![
-            Span::styled("omastat ", Style::default().fg(pulse_color(app.tick))),
-            Span::styled(app.lens_label(), Style::default().fg(lens_color(app.lens))),
+            Span::styled("omastat ", Style::default().fg(theme.primary)),
+            Span::styled(
+                app.lens_label(),
+                Style::default().fg(lens_color(app.lens, theme)),
+            ),
         ]),
         Line::from(Span::styled(
             "terminal too small",
-            Style::default().fg(MUTED),
+            Style::default().fg(theme.muted),
         )),
-        Line::from(Span::styled("q quits", Style::default().fg(DIM))),
+        Line::from(Span::styled("q quits", Style::default().fg(theme.dim))),
     ];
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
-            .block(panel("MONITOR", CYAN))
-            .style(Style::default().bg(PANEL)),
+            .block(panel("MONITOR", theme, theme.primary))
+            .style(Style::default().bg(theme.panel)),
         area,
     );
 }
 
-fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let [rail, deck] = *Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(12), Constraint::Min(48)])
+fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.bg);
+
+    let top_height = if area.height < 25 {
+        8
+    } else {
+        (area.height / 3).clamp(9, 12)
+    };
+    let [top, bottom] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(top_height), Constraint::Min(10)])
         .split(area)
     else {
         return;
     };
-
-    render_mode_rail(frame, rail, app);
-
-    let signal_height = if deck.height < 19 { 7 } else { 8 };
-    let [top, bottom] = *Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(signal_height), Constraint::Min(8)])
-        .split(deck)
-    else {
-        return;
-    };
-    let [flow, core] = *Layout::default()
+    let [flow, summary] = *Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(63), Constraint::Percentage(37)])
+        .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
         .split(top)
     else {
         return;
     };
-    let [stack, inspect] = *Layout::default()
+    let [apps, side] = *Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
         .split(bottom)
     else {
         return;
     };
 
-    render_timeflow(frame, flow, app);
-    render_core(frame, core, app);
-    render_app_stack(frame, stack, app);
-    render_inspector(frame, inspect, app);
+    render_flow(frame, flow, app, theme);
+    render_replay(frame, summary, app, theme);
+    render_apps(frame, apps, app, theme);
+    render_side(frame, side, app, theme);
 }
 
-fn render_narrow_monitor(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let [modes, flow, stack] = *Layout::default()
+fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let [top, apps] = *Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(7),
-            Constraint::Min(6),
-        ])
+        .constraints([Constraint::Length(8), Constraint::Min(8)])
         .split(area)
     else {
         return;
     };
+    let [flow, replay] = *Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(top)
+    else {
+        return;
+    };
 
-    render_mode_strip(frame, modes, app);
-    render_timeflow(frame, flow, app);
-    render_app_stack(frame, stack, app);
+    render_flow(frame, flow, app, theme);
+    render_replay(frame, replay, app, theme);
+    render_apps(frame, apps, app, theme);
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, BG);
+fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.bg);
 
     let rows = app.rows();
     let focused = focused_total(rows);
     let open = open_total(rows);
     let density = ratio(focused, open);
-    let accent = pulse_color(app.tick);
-    let clock = app.loaded_at.format("%H:%M:%S").to_string();
-    let spin = SPINNER[(app.tick as usize / 2) % SPINNER.len()];
-    let line = Line::from(vec![
+    let clock = Local::now().format("%H:%M:%S").to_string();
+    let mut spans = vec![
         Span::styled(
             " OMASTAT",
             Style::default()
-                .fg(accent)
-                .bg(BG)
+                .fg(theme.primary)
+                .bg(theme.bg)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("::monitor ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(spin, Style::default().fg(GREEN).bg(BG)),
-        Span::styled(" lens ", Style::default().fg(DIM).bg(BG)),
+        Span::styled(" :: ", Style::default().fg(theme.dim).bg(theme.bg)),
+    ];
+
+    if area.width < 96 {
+        spans.extend([
+            Span::styled(" lens ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(
+                format!(" {} ", app.lens_label()),
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(lens_color(app.lens, theme))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+    } else {
+        for (index, label) in LENSES.iter().enumerate() {
+            let selected = index == app.lens;
+            spans.push(Span::styled(
+                format!(" {label} "),
+                Style::default()
+                    .fg(if selected {
+                        theme.bg
+                    } else {
+                        lens_color(index, theme)
+                    })
+                    .bg(if selected {
+                        lens_color(index, theme)
+                    } else {
+                        theme.bg
+                    })
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+        }
+    }
+
+    spans.extend([
+        Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
         Span::styled(
-            app.lens_label(),
-            Style::default()
-                .fg(lens_color(app.lens))
-                .bg(BG)
-                .add_modifier(Modifier::BOLD),
+            format_duration(focused),
+            Style::default().fg(theme.warn).bg(theme.bg),
         ),
-        Span::styled("  focus ", Style::default().fg(DIM).bg(BG)),
-        Span::styled(format_duration(focused), Style::default().fg(YELLOW).bg(BG)),
-        Span::styled("  open ", Style::default().fg(DIM).bg(BG)),
-        Span::styled(format_duration(open), Style::default().fg(BLUE).bg(BG)),
-        Span::styled("  density ", Style::default().fg(DIM).bg(BG)),
-        Span::styled(percent(density), Style::default().fg(MAGENTA).bg(BG)),
-        Span::styled("  updated ", Style::default().fg(DIM).bg(BG)),
-        Span::styled(clock, Style::default().fg(TEXT).bg(BG)),
+        Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(
+            format_duration(open),
+            Style::default().fg(theme.secondary).bg(theme.bg),
+        ),
+        Span::styled("  density ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(
+            percent(density),
+            Style::default().fg(theme.tertiary).bg(theme.bg),
+        ),
     ]);
-    let scan = Line::from(Span::styled(
-        scan_rail(area.width as usize, app.tick),
-        Style::default().fg(DIM).bg(BG),
-    ));
+
+    if area.width >= 96 {
+        spans.extend([
+            Span::styled("  updated ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(
+                app.loaded_at.format("%H:%M:%S").to_string(),
+                Style::default().fg(theme.muted).bg(theme.bg),
+            ),
+            Span::styled("  now ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
+        ]);
+    } else {
+        spans.extend([
+            Span::styled("  ", Style::default().bg(theme.bg)),
+            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
+        ]);
+    }
+
     frame.render_widget(
-        Paragraph::new(vec![line, scan]).style(Style::default().bg(BG)),
+        Paragraph::new(vec![
+            Line::from(spans),
+            Line::from(Span::styled(
+                rule(area.width as usize),
+                Style::default().fg(theme.border).bg(theme.bg),
+            )),
+        ])
+        .style(Style::default().bg(theme.bg)),
         area,
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, BG);
+fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.bg);
 
     let mode = format!("{} {}", app.lens + 1, app.lens_label());
     let left = format!(" h/l lens  j/k select  pg jump  r refresh  q quit  [{mode}]");
@@ -378,19 +419,228 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .saturating_sub((left.chars().count() + right.chars().count()) as u16) as usize;
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(left, Style::default().fg(MUTED).bg(BG)),
-            Span::styled(" ".repeat(padding), Style::default().bg(BG)),
-            Span::styled(right, Style::default().fg(DIM).bg(BG)),
+            Span::styled(left, Style::default().fg(theme.muted).bg(theme.bg)),
+            Span::styled(" ".repeat(padding), Style::default().bg(theme.bg)),
+            Span::styled(right, Style::default().fg(theme.dim).bg(theme.bg)),
         ]))
-        .style(Style::default().bg(BG)),
+        .style(Style::default().bg(theme.bg)),
         area,
     );
 }
 
-fn render_mode_rail(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
+fn render_flow(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.panel);
 
-    let block = panel("LENS", CYAN);
+    let block = panel("timeline", theme, theme.primary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let graph_height = inner.height.saturating_sub(2).max(1) as usize;
+    let mut lines = day_graph(&app.days, inner.width as usize, graph_height, theme);
+    lines.push(day_footer(&app.days, inner.width as usize, theme));
+    lines.push(Line::from(Span::styled(
+        rule(inner.width as usize),
+        Style::default().fg(theme.dim).bg(theme.panel),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_replay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.panel);
+
+    let block = panel("replay", theme, theme.secondary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = app.rows();
+    let focused = focused_total(rows);
+    let open = open_total(rows);
+    let top = rows
+        .first()
+        .map(|row| short_app(&row.app_class, inner.width.saturating_sub(12) as usize))
+        .unwrap_or_else(|| "no signal".to_string());
+    let best = best_focus_day(&app.days)
+        .map(|day| format!("{} {}", day.label, duration_compact(day.focused_seconds)))
+        .unwrap_or_else(|| "no focus".to_string());
+    let meter_width = inner.width.saturating_sub(13).max(4) as usize;
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format_duration(focused),
+            Style::default()
+                .fg(theme.warn)
+                .bg(theme.panel)
+                .add_modifier(Modifier::BOLD),
+        )),
+        meter_line(
+            "focus",
+            ratio(focused, open.max(focused)),
+            meter_width,
+            theme.warn,
+            theme,
+        ),
+        meter_line(
+            "dense",
+            ratio(focused, open),
+            meter_width,
+            theme.tertiary,
+            theme,
+        ),
+        metric_line("open", &format_duration(open), theme.secondary, theme),
+        metric_line("top", top.trim(), theme.primary, theme),
+        metric_line("best", &best, theme.success, theme),
+        metric_line(
+            "active",
+            &format!("{}/{} days", active_days(&app.days), app.days.len().max(1)),
+            theme.tertiary,
+            theme,
+        ),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn render_apps(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.panel);
+
+    let block = panel("apps", theme, theme.warn);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = app.rows();
+    if rows.is_empty() {
+        let mut lines = vec![Line::from(Span::styled(
+            "waiting for app intervals",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ))];
+        lines.extend(texture_lines(
+            inner.width as usize,
+            inner.height.saturating_sub(1) as usize,
+            theme,
+        ));
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme.panel))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let width = inner.width as usize;
+    let total = focused_total(rows).max(1);
+    let max_focus = rows
+        .first()
+        .map(|row| row.focused_seconds.max(1))
+        .unwrap_or(1);
+    let expanded = inner.height >= 14 && width >= 58;
+    let mut lines = vec![apps_header(width, theme)];
+
+    for (index, row) in rows.iter().enumerate() {
+        if lines.len() >= inner.height as usize {
+            break;
+        }
+
+        let selected = index == app.selected;
+        lines.push(app_main_line(
+            index, row, selected, max_focus, total, width, theme,
+        ));
+        if expanded && lines.len() < inner.height as usize {
+            lines.push(app_detail_line(row, selected, max_focus, width, theme));
+        }
+    }
+
+    if lines.len() < inner.height as usize {
+        lines.extend(texture_lines(
+            width,
+            inner.height as usize - lines.len(),
+            theme,
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_side(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    if area.width < 20 || area.height < 8 {
+        return;
+    }
+
+    if area.height < 16 {
+        let [mix, lenses] = *Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area)
+        else {
+            return;
+        };
+        render_mix(frame, mix, app, theme);
+        render_lenses(frame, lenses, app, theme);
+        return;
+    }
+
+    let [mix, lenses, days] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(11),
+            Constraint::Length(8),
+            Constraint::Min(5),
+        ])
+        .split(area)
+    else {
+        return;
+    };
+
+    render_mix(frame, mix, app, theme);
+    render_lenses(frame, lenses, app, theme);
+    render_days(frame, days, app, theme);
+}
+
+fn render_mix(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.panel);
+
+    let block = panel("mix", theme, theme.tertiary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = focus_mix_lines(
+        app.rows(),
+        app.selected,
+        inner.width as usize,
+        inner.height as usize,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_lenses(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.panel);
+
+    let block = panel("lenses", theme, theme.primary);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -399,20 +649,35 @@ fn render_mode_rail(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .max()
         .unwrap_or(1)
         .max(1);
+    let width = inner.width as usize;
+    let bar_width = width.saturating_sub(14).max(3);
     let mut lines = Vec::new();
 
-    for (index, label) in LENSES.iter().enumerate() {
+    for (index, label) in LENSES.iter().enumerate().take(inner.height as usize) {
         let selected = index == app.lens;
-        let color = lens_color(index);
-        let bg = if selected { SELECTED } else { PANEL };
-        let marker = if selected { "▶" } else { " " };
-        lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(color).bg(bg)),
-            Span::styled(format!("{} ", index + 1), Style::default().fg(DIM).bg(bg)),
+        let bg = if selected {
+            theme.selection
+        } else {
+            theme.panel
+        };
+        let color = lens_color(index, theme);
+        let mut spans = vec![
             Span::styled(
-                *label,
+                if selected { ">" } else { " " },
+                Style::default().fg(color).bg(bg).add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+            ),
+            Span::styled(
+                format!("{} ", index + 1),
+                Style::default().fg(theme.dim).bg(bg),
+            ),
+            Span::styled(
+                fit_text(label, 5),
                 Style::default()
-                    .fg(if selected { TEXT } else { MUTED })
+                    .fg(if selected { theme.text } else { color })
                     .bg(bg)
                     .add_modifier(if selected {
                         Modifier::BOLD
@@ -420,359 +685,219 @@ fn render_mode_rail(frame: &mut Frame<'_>, area: Rect, app: &App) {
                         Modifier::empty()
                     }),
             ),
-        ]));
-        lines.push(Line::from(Span::styled(
-            mini_bar(
-                ratio(app.lens_total(index), max_total),
-                inner.width as usize,
-                color,
-            ),
-            Style::default().fg(color).bg(bg),
-        )));
-        lines.push(Line::from(Span::styled(
-            format_duration(app.lens_total(index)),
-            Style::default().fg(DIM).bg(PANEL),
-        )));
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(PANEL))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
-}
-
-fn render_mode_strip(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let block = panel("LENS", CYAN);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut spans = Vec::new();
-    for (index, label) in LENSES.iter().enumerate() {
-        let selected = index == app.lens;
-        spans.push(Span::styled(
-            format!(" {}:{} ", index + 1, label),
-            Style::default()
-                .fg(if selected { TEXT } else { MUTED })
-                .bg(if selected { SELECTED } else { PANEL })
-                .add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ));
-    }
-
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL)),
-        inner,
-    );
-}
-
-fn render_timeflow(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let block = panel("BRAILLE FLOW", GREEN);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let graph_height = inner.height.saturating_sub(1).max(1) as usize;
-    let mut lines = day_graph(&app.days, inner.width as usize, graph_height, app.tick);
-    let latest = app
-        .days
-        .last()
-        .map(|day| {
-            format!(
-                " {} {} focused / {} open",
-                day.label,
-                format_duration(day.focused_seconds),
-                format_duration(day.open_seconds)
-            )
-        })
-        .unwrap_or_else(|| " no daily samples".to_string());
-    lines.push(Line::from(vec![
-        Span::styled("braille 14d", Style::default().fg(DIM).bg(PANEL)),
-        Span::styled(latest, Style::default().fg(MUTED).bg(PANEL)),
-    ]));
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(PANEL))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
-}
-
-fn render_core(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let rows = app.rows();
-    let focused = focused_total(rows);
-    let open = open_total(rows);
-    let density = ratio(focused, open);
-    let top = rows
-        .first()
-        .map(|row| short_app(&row.app_class, area.width.saturating_sub(8) as usize))
-        .unwrap_or_else(|| "no signal".to_string());
-    let best = best_focus_day(&app.days)
-        .map(|day| format!("{} {}", day.label, duration_compact(day.focused_seconds)))
-        .unwrap_or_else(|| "no focus yet".to_string());
-    let active = active_days(&app.days);
-    let block = panel("REPLAY", pulse_color(app.tick));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let meter_width = inner.width.saturating_sub(12).max(3) as usize;
-    let lines = vec![
-        Line::from(Span::styled(
-            "FOCUS REPLAY",
-            Style::default()
-                .fg(DIM)
-                .bg(PANEL)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format_duration(focused),
-            Style::default()
-                .fg(YELLOW)
-                .bg(PANEL)
-                .add_modifier(Modifier::BOLD),
-        )),
-        meter_line("dense", density, meter_width, MAGENTA, app.tick, PANEL),
-        meter_line(
-            "apps",
-            ratio(rows.len() as i64, 24),
-            meter_width,
-            CYAN,
-            app.tick + 8,
-            PANEL,
-        ),
-        Line::from(vec![
-            Span::styled("top ", Style::default().fg(DIM).bg(PANEL)),
-            Span::styled(top, Style::default().fg(TEXT).bg(PANEL)),
-        ]),
-        Line::from(vec![
-            Span::styled("best ", Style::default().fg(DIM).bg(PANEL)),
-            Span::styled(best, Style::default().fg(GREEN).bg(PANEL)),
-        ]),
-        Line::from(vec![
-            Span::styled("days ", Style::default().fg(DIM).bg(PANEL)),
-            Span::styled(
-                format!("{active}/{} active", app.days.len().max(1)),
-                Style::default().fg(CYAN).bg(PANEL),
-            ),
-        ]),
-        Line::from(Span::styled(
-            scan_rail(inner.width as usize, app.tick + 9),
-            Style::default().fg(DIM).bg(PANEL),
-        )),
-    ];
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(PANEL))
-            .wrap(Wrap { trim: true }),
-        inner,
-    );
-}
-
-fn render_app_stack(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
-
-    let block = panel("APP STACK", BLUE);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let rows = app.rows();
-    if rows.is_empty() {
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "waiting for app intervals",
-                Style::default().fg(MUTED).bg(PANEL),
-            )),
-            Line::from(Span::styled(
-                scan_rail(inner.width as usize, app.tick),
-                Style::default().fg(DIM).bg(PANEL),
-            )),
-        ];
-        lines.extend(empty_matrix(
-            inner.width as usize,
-            inner.height.saturating_sub(2) as usize,
-        ));
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(PANEL))
-                .wrap(Wrap { trim: false }),
-            inner,
-        );
-        return;
-    }
-
-    let max = rows
-        .first()
-        .map(|row| row.focused_seconds.max(1))
-        .unwrap_or(1);
-    let focused = focused_total(rows).max(1);
-    let visible = inner.height.saturating_sub(1) as usize;
-    let width = inner.width as usize;
-    let name_width = width.saturating_sub(27).clamp(8, 22);
-    let bar_width = width.saturating_sub(name_width + 20).clamp(5, 30);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(" #  ", Style::default().fg(DIM).bg(PANEL_2)),
-        Span::styled(
-            fit_text("process", name_width),
-            Style::default().fg(MUTED).bg(PANEL_2),
-        ),
-        Span::styled(" focus map", Style::default().fg(MUTED).bg(PANEL_2)),
-    ])];
-
-    for (index, row) in rows.iter().take(visible.max(1)).enumerate() {
-        let row_bg = if index == app.selected {
-            SELECTED
-        } else {
-            PANEL
-        };
-        let color = rank_color(index);
-        let marker = if index == app.selected { "▸" } else { " " };
-        let mut spans = vec![
-            Span::styled(marker, Style::default().fg(color).bg(row_bg)),
-            Span::styled(
-                format!("{:>2} ", index + 1),
-                Style::default().fg(DIM).bg(row_bg),
-            ),
-            Span::styled(
-                fit_text(&short_app(&row.app_class, name_width), name_width),
-                Style::default()
-                    .fg(if index == app.selected { TEXT } else { color })
-                    .bg(row_bg)
-                    .add_modifier(if index == app.selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
-            Span::styled(" ", Style::default().bg(row_bg)),
+            Span::styled(" ", Style::default().bg(bg)),
         ];
         spans.extend(bar_spans(
-            ratio(row.focused_seconds, max),
+            ratio(app.lens_total(index), max_total),
             bar_width,
             color,
-            app.tick + index as u64 * 2,
-            row_bg,
+            bg,
+            theme,
         ));
         spans.push(Span::styled(
-            format!(" {} ", duration_compact(row.focused_seconds)),
-            Style::default().fg(YELLOW).bg(row_bg),
-        ));
-        spans.push(Span::styled(
-            percent(ratio(row.focused_seconds, focused)),
-            Style::default().fg(MAGENTA).bg(row_bg),
+            format!(" {}", duration_compact(app.lens_total(index))),
+            Style::default().fg(theme.muted).bg(bg),
         ));
         lines.push(Line::from(spans));
     }
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().bg(PANEL))
+            .style(Style::default().bg(theme.panel))
             .wrap(Wrap { trim: false }),
         inner,
     );
 }
 
-fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    fill_area(frame, area, PANEL);
+fn render_days(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.panel);
 
-    let block = panel("INSPECT", ORANGE);
+    let block = panel("days", theme, theme.success);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rows = app.rows();
-    let total_focus = focused_total(rows).max(1);
-    let Some(row) = app.selected_row() else {
-        let lines = vec![
-            Line::from(Span::styled(
-                "no app selected",
-                Style::default().fg(MUTED).bg(PANEL),
-            )),
-            Line::from(Span::styled(
-                scan_rail(inner.width as usize, app.tick),
-                Style::default().fg(DIM).bg(PANEL),
-            )),
-        ];
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(PANEL))
-                .alignment(Alignment::Center),
-            inner,
-        );
-        return;
-    };
-
+    let max = app
+        .days
+        .iter()
+        .map(|day| day.focused_seconds)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let width = inner.width as usize;
-    let density = ratio(row.focused_seconds, row.open_seconds);
-    let share = ratio(row.focused_seconds, total_focus);
-    let name = fit_text(&row.app_class, width);
-    let meter_width = width.saturating_sub(12).max(3);
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("#{:02}", app.selected + 1),
-            Style::default().fg(DIM).bg(PANEL),
-        )),
-        Line::from(Span::styled(
-            name,
-            Style::default()
-                .fg(TEXT)
-                .bg(PANEL)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled("focus ", Style::default().fg(DIM).bg(PANEL)),
+    let bar_width = width.saturating_sub(12).max(3);
+    let mut lines = Vec::new();
+
+    for day in app.days.iter().rev().take(inner.height as usize).rev() {
+        let mut spans = vec![
             Span::styled(
-                format_duration(row.focused_seconds),
-                Style::default().fg(YELLOW).bg(PANEL),
+                fit_text(&day.label, 3),
+                Style::default().fg(theme.dim).bg(theme.panel),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("open  ", Style::default().fg(DIM).bg(PANEL)),
-            Span::styled(
-                format_duration(row.open_seconds),
-                Style::default().fg(BLUE).bg(PANEL),
-            ),
-        ]),
-        meter_line("dense", density, meter_width, MAGENTA, app.tick, PANEL),
-        meter_line("share", share, meter_width, GREEN, app.tick + 11, PANEL),
-    ];
-    let remaining = inner.height.saturating_sub(lines.len() as u16) as usize;
-    lines.extend(focus_mix_lines(
-        rows,
-        app.selected,
-        width,
-        remaining,
-        app.tick + 5,
-    ));
+            Span::styled(" ", Style::default().bg(theme.panel)),
+        ];
+        spans.extend(bar_spans(
+            ratio(day.focused_seconds, max),
+            bar_width,
+            theme.success,
+            theme.panel,
+            theme,
+        ));
+        spans.push(Span::styled(
+            format!(" {}", duration_compact(day.focused_seconds)),
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ));
+        lines.push(Line::from(spans));
+    }
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().bg(PANEL))
-            .wrap(Wrap { trim: true }),
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
         inner,
     );
 }
 
-fn day_graph(days: &[DayTotals], width: usize, height: usize, tick: u64) -> Vec<Line<'static>> {
+fn apps_header(width: usize, theme: &Theme) -> Line<'static> {
+    let name_width = width.saturating_sub(42).clamp(12, 28);
+    let bar_width = width.saturating_sub(name_width + 31).max(8);
+    Line::from(vec![
+        Span::styled(" #  ", Style::default().fg(theme.dim).bg(theme.panel_alt)),
+        Span::styled(
+            fit_text("application", name_width),
+            Style::default().fg(theme.muted).bg(theme.panel_alt),
+        ),
+        Span::styled(" ", Style::default().bg(theme.panel_alt)),
+        Span::styled(
+            fit_text("focus map", bar_width),
+            Style::default().fg(theme.muted).bg(theme.panel_alt),
+        ),
+        Span::styled(
+            " focus share dense",
+            Style::default().fg(theme.muted).bg(theme.panel_alt),
+        ),
+    ])
+}
+
+fn app_main_line(
+    index: usize,
+    row: &AppTotals,
+    selected: bool,
+    max_focus: i64,
+    total: i64,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let bg = if selected {
+        theme.selection
+    } else {
+        theme.panel
+    };
+    let color = rank_color(index, theme);
+    let name_width = width.saturating_sub(42).clamp(12, 28);
+    let bar_width = width.saturating_sub(name_width + 31).max(8);
+    let mut spans = vec![
+        Span::styled(
+            if selected { ">" } else { " " },
+            Style::default().fg(color).bg(bg).add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+        ),
+        Span::styled(
+            format!("{:>2} ", index + 1),
+            Style::default().fg(theme.dim).bg(bg),
+        ),
+        Span::styled(
+            fit_text(&short_app(&row.app_class, name_width), name_width),
+            Style::default()
+                .fg(if selected { theme.text } else { color })
+                .bg(bg)
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        Span::styled(" ", Style::default().bg(bg)),
+    ];
+    spans.extend(bar_spans(
+        ratio(row.focused_seconds, max_focus),
+        bar_width,
+        color,
+        bg,
+        theme,
+    ));
+    spans.push(Span::styled(
+        format!(" {:>6}", duration_compact(row.focused_seconds)),
+        Style::default().fg(theme.warn).bg(bg),
+    ));
+    spans.push(Span::styled(
+        format!(" {}", percent(ratio(row.focused_seconds, total))),
+        Style::default().fg(theme.tertiary).bg(bg),
+    ));
+    spans.push(Span::styled(
+        format!(" {}", percent(ratio(row.focused_seconds, row.open_seconds))),
+        Style::default().fg(theme.success).bg(bg),
+    ));
+    Line::from(spans)
+}
+
+fn app_detail_line(
+    row: &AppTotals,
+    selected: bool,
+    max_focus: i64,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let bg = if selected {
+        theme.selection
+    } else {
+        theme.panel
+    };
+    let prefix = "    ";
+    let graph_width = width.saturating_sub(prefix.chars().count() + 23).max(10);
+    Line::from(vec![
+        Span::styled(prefix, Style::default().bg(bg)),
+        Span::styled(
+            braille_meter(ratio(row.focused_seconds, max_focus), graph_width),
+            Style::default().fg(theme.dim).bg(bg),
+        ),
+        Span::styled(
+            format!(" open {}", duration_compact(row.open_seconds)),
+            Style::default().fg(theme.muted).bg(bg),
+        ),
+    ])
+}
+
+fn day_footer(days: &[DayTotals], width: usize, theme: &Theme) -> Line<'static> {
+    let latest = days
+        .last()
+        .map(|day| {
+            format!(
+                "{}  {} focused / {} open",
+                day.label,
+                format_duration(day.focused_seconds),
+                format_duration(day.open_seconds)
+            )
+        })
+        .unwrap_or_else(|| "no daily samples".to_string());
+    Line::from(vec![
+        Span::styled(" 14d ", Style::default().fg(theme.bg).bg(theme.primary)),
+        Span::styled(
+            fit_text(&format!(" {latest}"), width.saturating_sub(5)),
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ),
+    ])
+}
+
+fn day_graph(days: &[DayTotals], width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
         return Vec::new();
     }
 
     if days.is_empty() {
-        return empty_matrix(width, height);
+        return texture_lines(width, height, theme);
     }
 
     let focus_max = days
@@ -789,7 +914,6 @@ fn day_graph(days: &[DayTotals], width: usize, height: usize, tick: u64) -> Vec<
         .max(1);
     let virtual_width = width * 2;
     let virtual_height = height * 4;
-    let scan_x = (tick as usize / 2) % width;
     let mut lines = Vec::with_capacity(height);
 
     for row in 0..height {
@@ -797,46 +921,115 @@ fn day_graph(days: &[DayTotals], width: usize, height: usize, tick: u64) -> Vec<
         for col in 0..width {
             let mut focus_mask = 0u16;
             let mut open_mask = 0u16;
-            let mut color = DIM;
+            let mut color = theme.primary;
 
             for dot_y in 0..4 {
                 for dot_x in 0..2 {
                     let virtual_x = (col * 2 + dot_x).min(virtual_width.saturating_sub(1));
-                    let index = ((virtual_x * days.len()) / virtual_width).min(days.len() - 1);
-                    let day = &days[index];
+                    let position = if virtual_width <= 1 {
+                        0.0
+                    } else {
+                        virtual_x as f64 / (virtual_width - 1) as f64
+                    };
+                    let focus = interpolated_day_ratio(days, position, focus_max, true);
+                    let open = interpolated_day_ratio(days, position, open_max, false);
                     let virtual_y = row * 4 + dot_y;
                     let from_bottom = virtual_height.saturating_sub(virtual_y);
-                    let focus_level = (ratio(day.focused_seconds, focus_max)
-                        * virtual_height as f64)
-                        .ceil() as usize;
-                    let open_level =
-                        (ratio(day.open_seconds, open_max) * virtual_height as f64).ceil() as usize;
+                    let focus_level = (focus * virtual_height as f64).round() as usize;
+                    let open_level = (open * virtual_height as f64).round() as usize;
                     let bit = braille_bit(dot_x, dot_y);
 
                     if focus_level > 0 && from_bottom <= focus_level {
                         focus_mask |= bit;
-                        color = heat_color(index, ratio(day.focused_seconds, focus_max));
+                        color = heat_color(focus, theme);
                     } else if open_level > 0 && from_bottom <= open_level {
                         open_mask |= bit;
                     }
                 }
             }
 
-            let sweep = col == scan_x || col.abs_diff(scan_x) <= 1;
             let (glyph, fg) = if focus_mask != 0 {
-                (braille_char(focus_mask), if sweep { TEXT } else { color })
+                (braille_char(focus_mask), color)
             } else if open_mask != 0 {
-                (braille_char(open_mask), DIM)
-            } else if sweep && (row + col + tick as usize) % 4 == 0 {
-                ("⠂".to_string(), DIM)
+                (braille_char(open_mask), theme.dim)
+            } else if row + 1 == height && col % 8 == 0 {
+                ("⠄".to_string(), theme.dim)
             } else {
-                (" ".to_string(), DIM)
+                (" ".to_string(), theme.dim)
             };
-            spans.push(Span::styled(glyph, Style::default().fg(fg).bg(PANEL)));
+            spans.push(Span::styled(glyph, Style::default().fg(fg).bg(theme.panel)));
         }
         lines.push(Line::from(spans));
     }
 
+    lines
+}
+
+fn focus_mix_lines(
+    rows: &[AppTotals],
+    selected: usize,
+    width: usize,
+    height: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let segments = pie_segments(rows, selected, theme);
+    if segments.is_empty() {
+        return vec![Line::from(Span::styled(
+            "no focus signal",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ))];
+    }
+
+    let chart_width = width.min(15);
+    let chart_height = height.min(7);
+    let active = segments
+        .iter()
+        .position(|segment| segment.selected)
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+
+    if width >= 44 {
+        let legend_width = width.saturating_sub(chart_width + 1);
+        for y in 0..chart_height {
+            let mut spans = pie_row(&segments, active, chart_width, chart_height, y, theme);
+            spans.push(Span::styled(" ", Style::default().bg(theme.panel)));
+            if let Some(segment) = segments.get(y) {
+                spans.extend(segment_legend(segment, legend_width, theme));
+            }
+            lines.push(Line::from(spans));
+        }
+    } else {
+        let left_padding = width.saturating_sub(chart_width) / 2;
+        let right_padding = width.saturating_sub(chart_width + left_padding);
+        for y in 0..chart_height {
+            let mut spans = vec![Span::styled(
+                " ".repeat(left_padding),
+                Style::default().bg(theme.panel),
+            )];
+            spans.extend(pie_row(
+                &segments,
+                active,
+                chart_width,
+                chart_height,
+                y,
+                theme,
+            ));
+            spans.push(Span::styled(
+                " ".repeat(right_padding),
+                Style::default().bg(theme.panel),
+            ));
+            lines.push(Line::from(spans));
+        }
+        for segment in segments.iter().take(height.saturating_sub(lines.len())) {
+            lines.push(Line::from(segment_legend(segment, width, theme)));
+        }
+    }
+
+    lines.truncate(height);
     lines
 }
 
@@ -848,259 +1041,7 @@ struct PieSegment {
     selected: bool,
 }
 
-fn focus_mix_lines(
-    rows: &[AppTotals],
-    selected: usize,
-    width: usize,
-    height: usize,
-    tick: u64,
-) -> Vec<Line<'static>> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
-
-    let segments = pie_segments(rows, selected);
-    if segments.is_empty() {
-        return vec![Line::from(Span::styled(
-            "mix no focus signal",
-            Style::default().fg(MUTED).bg(PANEL),
-        ))];
-    }
-
-    if height < 3 || width < 14 {
-        return segments
-            .iter()
-            .take(height)
-            .map(|segment| {
-                Line::from(vec![
-                    Span::styled("mix ", Style::default().fg(DIM).bg(PANEL)),
-                    Span::styled(
-                        percent(segment.share),
-                        Style::default().fg(segment.color).bg(PANEL),
-                    ),
-                    Span::styled(
-                        format!(" {}", fit_text(&segment.label, width.saturating_sub(9))),
-                        Style::default().fg(MUTED).bg(PANEL),
-                    ),
-                ])
-            })
-            .collect();
-    }
-
-    if width < 30 {
-        let chart_width = width.min(13);
-        let chart_height = height.min(7);
-        let left_padding = width.saturating_sub(chart_width) / 2;
-        let right_padding = width.saturating_sub(chart_width + left_padding);
-        let active = segments
-            .iter()
-            .position(|segment| segment.selected)
-            .unwrap_or_else(|| ((tick / 18) as usize) % segments.len());
-
-        return (0..chart_height)
-            .map(|y| {
-                let mut spans = vec![Span::styled(
-                    " ".repeat(left_padding),
-                    Style::default().bg(PANEL),
-                )];
-                spans.extend(pie_row(
-                    &segments,
-                    active,
-                    chart_width,
-                    chart_height,
-                    y,
-                    tick,
-                ));
-                spans.push(Span::styled(
-                    " ".repeat(right_padding),
-                    Style::default().bg(PANEL),
-                ));
-                Line::from(spans)
-            })
-            .collect();
-    }
-
-    let chart_width = width.min(15);
-    let chart_height = height.min(7);
-    let legend_width = width.saturating_sub(chart_width + 1);
-    let active = segments
-        .iter()
-        .position(|segment| segment.selected)
-        .unwrap_or_else(|| ((tick / 18) as usize) % segments.len());
-    let mut lines = Vec::with_capacity(chart_height);
-
-    for y in 0..chart_height {
-        let mut spans = pie_row(&segments, active, chart_width, chart_height, y, tick);
-        spans.push(Span::styled(" ", Style::default().bg(PANEL)));
-
-        if legend_width > 0 {
-            if let Some(segment) = segments.get(y) {
-                let marker = if segment.selected { "▸" } else { " " };
-                let label_width = legend_width.saturating_sub(8);
-                spans.push(Span::styled(
-                    marker,
-                    Style::default()
-                        .fg(if segment.selected {
-                            TEXT
-                        } else {
-                            segment.color
-                        })
-                        .bg(PANEL),
-                ));
-                spans.push(Span::styled(
-                    "●",
-                    Style::default().fg(segment.color).bg(PANEL),
-                ));
-                spans.push(Span::styled(
-                    format!(" {}", percent(segment.share)),
-                    Style::default().fg(TEXT).bg(PANEL),
-                ));
-                spans.push(Span::styled(
-                    format!(" {}", fit_text(&segment.label, label_width)),
-                    Style::default().fg(MUTED).bg(PANEL),
-                ));
-            } else if y + 1 == chart_height {
-                spans.push(Span::styled(
-                    scan_rail(legend_width, tick + 13),
-                    Style::default().fg(DIM).bg(PANEL),
-                ));
-            }
-        }
-
-        lines.push(Line::from(spans));
-    }
-
-    lines.truncate(height);
-    lines
-}
-
-fn empty_matrix(width: usize, height: usize) -> Vec<Line<'static>> {
-    (0..height)
-        .map(|row| {
-            let text = (0..width)
-                .map(|col| {
-                    if (row * 7 + col * 3) % 31 == 0 {
-                        '·'
-                    } else {
-                        ' '
-                    }
-                })
-                .collect::<String>();
-            Line::from(Span::styled(text, Style::default().fg(DIM).bg(PANEL)))
-        })
-        .collect()
-}
-
-fn panel(title: &'static str, accent: Color) -> Block<'static> {
-    Block::default()
-        .title(format!(" {title} "))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(accent).bg(PANEL))
-        .style(Style::default().bg(PANEL))
-}
-
-fn fill_area(frame: &mut Frame<'_>, area: Rect, color: Color) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let line = " ".repeat(area.width as usize);
-    let lines = (0..area.height)
-        .map(|_| Line::from(Span::styled(line.clone(), Style::default().bg(color))))
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(color)),
-        area,
-    );
-}
-
-fn meter_line(
-    label: &str,
-    value: f64,
-    width: usize,
-    color: Color,
-    tick: u64,
-    background: Color,
-) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!("{label:<5} "),
-        Style::default().fg(MUTED).bg(background),
-    )];
-    spans.extend(bar_spans(value, width, color, tick, background));
-    spans.push(Span::styled(
-        format!(" {}", percent(value)),
-        Style::default().fg(TEXT).bg(background),
-    ));
-    Line::from(spans)
-}
-
-fn bar_spans(
-    value: f64,
-    width: usize,
-    color: Color,
-    tick: u64,
-    background: Color,
-) -> Vec<Span<'static>> {
-    let width = width.max(1);
-    let filled = ((value.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
-    let sweep = if filled == 0 {
-        usize::MAX
-    } else {
-        (tick as usize / 2) % filled.max(1)
-    };
-    (0..width)
-        .map(|index| {
-            if index < filled {
-                let style = if index == sweep {
-                    Style::default()
-                        .fg(TEXT)
-                        .bg(background)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(color).bg(background)
-                };
-                Span::styled(if index == sweep { "▓" } else { "█" }, style)
-            } else {
-                Span::styled("░", Style::default().fg(DIM).bg(background))
-            }
-        })
-        .collect()
-}
-
-fn mini_bar(value: f64, width: usize, _color: Color) -> String {
-    let width = width.max(1);
-    let filled = ((value.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
-    format!(
-        "{}{}",
-        "▀".repeat(filled),
-        "˙".repeat(width.saturating_sub(filled))
-    )
-}
-
-fn scan_rail(width: usize, tick: u64) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let head = (tick as usize / 2) % width;
-    (0..width)
-        .map(|index| {
-            let distance = index.abs_diff(head);
-            if distance == 0 {
-                '█'
-            } else if distance <= 2 {
-                '━'
-            } else if index % 8 == 0 {
-                '╴'
-            } else {
-                '─'
-            }
-        })
-        .collect()
-}
-
-fn pie_segments(rows: &[AppTotals], selected: usize) -> Vec<PieSegment> {
+fn pie_segments(rows: &[AppTotals], selected: usize, theme: &Theme) -> Vec<PieSegment> {
     let total = focused_total(rows).max(1) as f64;
     let top_count = rows.len().min(5);
     let mut segments = Vec::new();
@@ -1113,7 +1054,7 @@ fn pie_segments(rows: &[AppTotals], selected: usize) -> Vec<PieSegment> {
         segments.push(PieSegment {
             label: short_app(&row.app_class, 18).trim().to_string(),
             share: row.focused_seconds as f64 / total,
-            color: rank_color(index),
+            color: rank_color(index, theme),
             selected: index == selected,
         });
     }
@@ -1127,7 +1068,7 @@ fn pie_segments(rows: &[AppTotals], selected: usize) -> Vec<PieSegment> {
         segments.push(PieSegment {
             label: "other".to_string(),
             share: other_seconds as f64 / total,
-            color: MUTED,
+            color: theme.muted,
             selected: selected >= top_count,
         });
     }
@@ -1141,13 +1082,12 @@ fn pie_row(
     width: usize,
     height: usize,
     row: usize,
-    tick: u64,
+    theme: &Theme,
 ) -> Vec<Span<'static>> {
     let center_x = (width as f64 - 1.0) / 2.0;
     let center_y = (height as f64 - 1.0) / 2.0;
     let outer_x = (width as f64 / 2.0).max(1.0);
     let outer_y = (height as f64 / 2.0).max(1.0);
-    let rotation = (tick % 240) as f64 / 240.0 * PI * 0.35;
 
     (0..width)
         .map(|col| {
@@ -1155,26 +1095,24 @@ fn pie_row(
             let dy = (row as f64 - center_y) / outer_y;
             let radius = (dx * dx + dy * dy).sqrt();
 
-            if !(0.38..=1.0).contains(&radius) {
-                return Span::styled(" ", Style::default().bg(PANEL));
+            if !(0.39..=1.0).contains(&radius) {
+                return Span::styled(" ", Style::default().bg(theme.panel));
             }
 
-            let angle = (dy.atan2(dx) + PI * 2.5 + rotation) % (PI * 2.0);
+            let angle = (dy.atan2(dx) + PI * 2.5) % (PI * 2.0);
             let segment_index = pie_segment_index(segments, angle / (PI * 2.0));
             let segment = &segments[segment_index];
             let highlighted = segment.selected || segment_index == active;
-            let glyph = if highlighted && tick % 20 < 10 {
-                "█"
-            } else if radius > 0.82 {
-                "▓"
-            } else {
-                "■"
-            };
+            let glyph = if radius > 0.84 { "▓" } else { "█" };
             Span::styled(
                 glyph,
                 Style::default()
-                    .fg(if highlighted { TEXT } else { segment.color })
-                    .bg(PANEL)
+                    .fg(if highlighted {
+                        theme.text
+                    } else {
+                        segment.color
+                    })
+                    .bg(theme.panel)
                     .add_modifier(if highlighted {
                         Modifier::BOLD
                     } else {
@@ -1183,6 +1121,31 @@ fn pie_row(
             )
         })
         .collect()
+}
+
+fn segment_legend(segment: &PieSegment, width: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let label_width = width.saturating_sub(9);
+    vec![
+        Span::styled(
+            if segment.selected { ">" } else { " " },
+            Style::default()
+                .fg(if segment.selected {
+                    theme.text
+                } else {
+                    segment.color
+                })
+                .bg(theme.panel),
+        ),
+        Span::styled("●", Style::default().fg(segment.color).bg(theme.panel)),
+        Span::styled(
+            format!(" {}", percent(segment.share)),
+            Style::default().fg(theme.text).bg(theme.panel),
+        ),
+        Span::styled(
+            format!(" {}", fit_text(&segment.label, label_width)),
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ),
+    ]
 }
 
 fn pie_segment_index(segments: &[PieSegment], position: f64) -> usize {
@@ -1200,24 +1163,108 @@ fn pie_segment_index(segments: &[PieSegment], position: f64) -> usize {
     segments.len().saturating_sub(1)
 }
 
-fn braille_bit(x: usize, y: usize) -> u16 {
-    match (x, y) {
-        (0, 0) => 0x01,
-        (0, 1) => 0x02,
-        (0, 2) => 0x04,
-        (0, 3) => 0x40,
-        (1, 0) => 0x08,
-        (1, 1) => 0x10,
-        (1, 2) => 0x20,
-        (1, 3) => 0x80,
-        _ => 0,
-    }
+fn panel(title: &str, theme: &Theme, accent: Color) -> Block<'static> {
+    Block::default()
+        .title(format!(" {title} "))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(accent).bg(theme.panel))
+        .style(Style::default().bg(theme.panel))
 }
 
-fn braille_char(mask: u16) -> String {
-    char::from_u32(0x2800 + mask as u32)
-        .unwrap_or(' ')
-        .to_string()
+fn fill_area(frame: &mut Frame<'_>, area: Rect, color: Color) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let line = " ".repeat(area.width as usize);
+    let lines = (0..area.height)
+        .map(|_| Line::from(Span::styled(line.clone(), Style::default().bg(color))))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(color)),
+        area,
+    );
+}
+
+fn metric_line(label: &str, value: &str, color: Color, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<7}"),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        ),
+        Span::styled(
+            value.to_string(),
+            Style::default().fg(color).bg(theme.panel),
+        ),
+    ])
+}
+
+fn meter_line(label: &str, value: f64, width: usize, color: Color, theme: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{label:<7}"),
+        Style::default().fg(theme.dim).bg(theme.panel),
+    )];
+    spans.extend(bar_spans(value, width, color, theme.panel, theme));
+    spans.push(Span::styled(
+        format!(" {}", percent(value)),
+        Style::default().fg(theme.text).bg(theme.panel),
+    ));
+    Line::from(spans)
+}
+
+fn bar_spans(
+    value: f64,
+    width: usize,
+    color: Color,
+    background: Color,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let width = width.max(1);
+    let filled = ((value.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
+    (0..width)
+        .map(|index| {
+            if index < filled {
+                Span::styled("█", Style::default().fg(color).bg(background))
+            } else {
+                Span::styled("░", Style::default().fg(theme.dim).bg(background))
+            }
+        })
+        .collect()
+}
+
+fn braille_meter(value: f64, width: usize) -> String {
+    let width = width.max(1);
+    let filled = ((value.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
+    format!(
+        "{}{}",
+        "⣿".repeat(filled),
+        "⠄".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn texture_lines(width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
+    (0..height)
+        .map(|row| {
+            let text = (0..width)
+                .map(|col| {
+                    if (row * 11 + col * 5) % 47 == 0 {
+                        '·'
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>();
+            Line::from(Span::styled(
+                text,
+                Style::default().fg(theme.dim).bg(theme.panel),
+            ))
+        })
+        .collect()
+}
+
+fn rule(width: usize) -> String {
+    "─".repeat(width)
 }
 
 fn focused_total(rows: &[AppTotals]) -> i64 {
@@ -1240,6 +1287,29 @@ fn best_focus_day(days: &[DayTotals]) -> Option<&DayTotals> {
         .max_by_key(|day| day.focused_seconds)
 }
 
+fn interpolated_day_ratio(days: &[DayTotals], position: f64, max: i64, focused: bool) -> f64 {
+    if days.is_empty() {
+        return 0.0;
+    }
+
+    let scaled = position.clamp(0.0, 1.0) * days.len().saturating_sub(1) as f64;
+    let left = scaled.floor() as usize;
+    let right = scaled.ceil() as usize;
+    let t = scaled - left as f64;
+    let left_value = if focused {
+        days[left].focused_seconds
+    } else {
+        days[left].open_seconds
+    };
+    let right_value = if focused {
+        days[right].focused_seconds
+    } else {
+        days[right].open_seconds
+    };
+    let value = left_value as f64 + (right_value - left_value) as f64 * t;
+    (value.max(0.0) / max.max(1) as f64).clamp(0.0, 1.0)
+}
+
 fn ratio(numerator: i64, denominator: i64) -> f64 {
     if denominator <= 0 {
         0.0
@@ -1248,50 +1318,58 @@ fn ratio(numerator: i64, denominator: i64) -> f64 {
     }
 }
 
-fn lens_color(index: usize) -> Color {
+fn lens_color(index: usize, theme: &Theme) -> Color {
     match index {
-        0 => CYAN,
-        1 => GREEN,
-        2 => YELLOW,
-        3 => MAGENTA,
-        _ => ORANGE,
+        0 => theme.primary,
+        1 => theme.success,
+        2 => theme.warn,
+        3 => theme.tertiary,
+        _ => theme.secondary,
     }
 }
 
-fn pulse_color(tick: u64) -> Color {
-    match tick % 40 {
-        0..=9 => CYAN,
-        10..=19 => GREEN,
-        20..=29 => YELLOW,
-        _ => MAGENTA,
-    }
-}
-
-fn rank_color(index: usize) -> Color {
+fn rank_color(index: usize, theme: &Theme) -> Color {
     match index {
-        0 => YELLOW,
-        1 => CYAN,
-        2 => GREEN,
-        3 => MAGENTA,
-        4 => ORANGE,
-        5 => RED,
-        _ => MUTED,
+        0 => theme.warn,
+        1 => theme.primary,
+        2 => theme.success,
+        3 => theme.tertiary,
+        4 => theme.secondary,
+        5 => theme.danger,
+        _ => theme.muted,
     }
 }
 
-fn heat_color(index: usize, share: f64) -> Color {
-    if share <= 0.0 {
-        DIM
+fn heat_color(share: f64, theme: &Theme) -> Color {
+    if share > 0.72 {
+        theme.warn
+    } else if share > 0.45 {
+        theme.primary
+    } else if share > 0.18 {
+        theme.success
     } else {
-        match index % 6 {
-            0 => CYAN,
-            1 => GREEN,
-            2 => YELLOW,
-            3 => MAGENTA,
-            4 => BLUE,
-            _ => ORANGE,
-        }
+        theme.dim
     }
+}
+
+fn braille_bit(x: usize, y: usize) -> u16 {
+    match (x, y) {
+        (0, 0) => 0x01,
+        (0, 1) => 0x02,
+        (0, 2) => 0x04,
+        (0, 3) => 0x40,
+        (1, 0) => 0x08,
+        (1, 1) => 0x10,
+        (1, 2) => 0x20,
+        (1, 3) => 0x80,
+        _ => 0,
+    }
+}
+
+fn braille_char(mask: u16) -> String {
+    char::from_u32(0x2800 + mask as u32)
+        .unwrap_or(' ')
+        .to_string()
 }
 
 fn short_app(value: &str, width: usize) -> String {
@@ -1351,4 +1429,197 @@ fn duration_compact(seconds: i64) -> String {
     } else {
         format!("{seconds:>2}s")
     }
+}
+
+#[derive(Debug, Clone)]
+struct Theme {
+    bg: Color,
+    panel: Color,
+    panel_alt: Color,
+    selection: Color,
+    text: Color,
+    muted: Color,
+    dim: Color,
+    border: Color,
+    primary: Color,
+    secondary: Color,
+    tertiary: Color,
+    success: Color,
+    warn: Color,
+    danger: Color,
+}
+
+impl Theme {
+    fn load() -> Self {
+        read_noctalia_theme()
+            .or_else(read_omarchy_theme)
+            .unwrap_or_else(Self::fallback)
+    }
+
+    fn fallback() -> Self {
+        Self::from_palette(
+            Rgb::new(5, 8, 14),
+            Rgb::new(232, 245, 255),
+            Rgb::new(34, 211, 238),
+            Rgb::new(167, 139, 250),
+            Rgb::new(255, 73, 198),
+            Rgb::new(255, 83, 112),
+            Rgb::new(88, 110, 130),
+        )
+    }
+
+    fn from_palette(
+        bg: Rgb,
+        text: Rgb,
+        primary: Rgb,
+        secondary: Rgb,
+        tertiary: Rgb,
+        danger: Rgb,
+        outline: Rgb,
+    ) -> Self {
+        let fallback = Self::fallback_accents();
+        let primary = if primary.saturation() < 0.08 {
+            fallback.0
+        } else {
+            primary
+        };
+        let secondary = if secondary.saturation() < 0.08 {
+            fallback.1
+        } else {
+            secondary
+        };
+        let tertiary = if tertiary.saturation() < 0.08 {
+            fallback.2
+        } else {
+            tertiary
+        };
+
+        Self {
+            bg: bg.color(),
+            panel: bg.mix(text, 0.035).color(),
+            panel_alt: bg.mix(primary, 0.14).color(),
+            selection: bg.mix(primary, 0.26).color(),
+            text: text.color(),
+            muted: bg.mix(text, 0.62).color(),
+            dim: bg.mix(text, 0.28).color(),
+            border: bg.mix(outline, 0.72).color(),
+            primary: primary.color(),
+            secondary: secondary.color(),
+            tertiary: tertiary.color(),
+            success: Rgb::new(89, 255, 184).mix(secondary, 0.35).color(),
+            warn: Rgb::new(255, 220, 92).mix(tertiary, 0.25).color(),
+            danger: danger.color(),
+        }
+    }
+
+    fn fallback_accents() -> (Rgb, Rgb, Rgb) {
+        (
+            Rgb::new(34, 211, 238),
+            Rgb::new(167, 139, 250),
+            Rgb::new(255, 73, 198),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Rgb {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+impl Rgb {
+    const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let value = value.trim().strip_prefix('#').unwrap_or(value.trim());
+        if value.len() != 6 {
+            return None;
+        }
+
+        Some(Self {
+            r: u8::from_str_radix(&value[0..2], 16).ok()?,
+            g: u8::from_str_radix(&value[2..4], 16).ok()?,
+            b: u8::from_str_radix(&value[4..6], 16).ok()?,
+        })
+    }
+
+    fn color(self) -> Color {
+        Color::Rgb(self.r, self.g, self.b)
+    }
+
+    fn mix(self, other: Self, amount: f64) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let inv = 1.0 - amount;
+        Self {
+            r: (self.r as f64 * inv + other.r as f64 * amount).round() as u8,
+            g: (self.g as f64 * inv + other.g as f64 * amount).round() as u8,
+            b: (self.b as f64 * inv + other.b as f64 * amount).round() as u8,
+        }
+    }
+
+    fn saturation(self) -> f64 {
+        let r = self.r as f64 / 255.0;
+        let g = self.g as f64 / 255.0;
+        let b = self.b as f64 / 255.0;
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        if max <= f64::EPSILON {
+            0.0
+        } else {
+            (max - min) / max
+        }
+    }
+}
+
+fn read_noctalia_theme() -> Option<Theme> {
+    let path = dirs::config_dir()?.join("noctalia/colors.json");
+    let contents = fs::read_to_string(path).ok()?;
+    let value: JsonValue = serde_json::from_str(&contents).ok()?;
+    Some(Theme::from_palette(
+        json_color(&value, &["dark", "mSurface"])?,
+        json_color(&value, &["dark", "mOnSurface"])?,
+        json_color(&value, &["dark", "mPrimary"])?,
+        json_color(&value, &["dark", "mSecondary"])?,
+        json_color(&value, &["dark", "mTertiary"])?,
+        json_color(&value, &["dark", "mError"])?,
+        json_color(&value, &["dark", "mOutline"])?,
+    ))
+}
+
+fn read_omarchy_theme() -> Option<Theme> {
+    let path = dirs::state_dir()?.join("omarchy/current/theme/colors.toml");
+    let contents = fs::read_to_string(path).ok()?;
+    let value: TomlValue = toml::from_str(&contents).ok()?;
+    Some(Theme::from_palette(
+        toml_color(&value, &["background"])?,
+        toml_color(&value, &["foreground"])?,
+        toml_color(&value, &["accent"])?,
+        toml_color(&value, &["blue"])
+            .or_else(|| toml_color(&value, &["cyan"]))
+            .unwrap_or_else(|| Rgb::new(167, 139, 250)),
+        toml_color(&value, &["magenta"])
+            .or_else(|| toml_color(&value, &["yellow"]))
+            .unwrap_or_else(|| Rgb::new(255, 73, 198)),
+        toml_color(&value, &["red"]).unwrap_or_else(|| Rgb::new(255, 83, 112)),
+        toml_color(&value, &["muted"]).unwrap_or_else(|| Rgb::new(88, 110, 130)),
+    ))
+}
+
+fn json_color(value: &JsonValue, path: &[&str]) -> Option<Rgb> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str().and_then(Rgb::parse)
+}
+
+fn toml_color(value: &TomlValue, path: &[&str]) -> Option<Rgb> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str().and_then(Rgb::parse)
 }
