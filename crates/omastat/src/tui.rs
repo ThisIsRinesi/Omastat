@@ -1,4 +1,7 @@
-use crate::storage::{AppTotals, DayTotals, Storage};
+use crate::{
+    steam::SteamResolver,
+    storage::{AppTotals, DayTotals, Storage},
+};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -94,15 +97,16 @@ struct App {
 
 impl App {
     fn load(storage: &Storage) -> Result<Self> {
+        let mut steam = SteamResolver::default();
         Ok(Self {
             tab: 0,
             tick: 0,
             last_refresh: Instant::now(),
-            today: storage.totals_for_today()?,
-            week: storage.totals_for_week()?,
-            month: storage.totals_for_month()?,
-            year: storage.totals_for_year()?,
-            all_time: storage.totals_all_time()?,
+            today: steam.resolve_totals(storage.totals_for_today()?),
+            week: steam.resolve_totals(storage.totals_for_week()?),
+            month: steam.resolve_totals(storage.totals_for_month()?),
+            year: steam.resolve_totals(storage.totals_for_year()?),
+            all_time: steam.resolve_totals(storage.totals_all_time()?),
             days: storage.daily_totals(14)?,
         })
     }

@@ -2,6 +2,7 @@ use crate::{
     config::Config,
     hyprland::{self, Event, EventStream, Snapshot, Window},
     session,
+    steam::SteamResolver,
     storage::{IntervalKind, Storage},
 };
 use anyhow::Result;
@@ -12,6 +13,7 @@ use tracing::{debug, info, warn};
 pub struct Tracker {
     storage: Storage,
     config: Config,
+    steam: SteamResolver,
     state: TrackerState,
 }
 
@@ -36,6 +38,7 @@ impl Tracker {
         Self {
             storage,
             config,
+            steam: SteamResolver::default(),
             state: TrackerState::default(),
         }
     }
@@ -152,7 +155,8 @@ impl Tracker {
             }
         }
 
-        for window in snapshot.windows {
+        for mut window in snapshot.windows {
+            window.class = self.steam.resolve_class(&window.class);
             if !self.state.windows.contains_key(&window.address) {
                 self.open_window(window)?;
             } else {
@@ -164,7 +168,9 @@ impl Tracker {
         Ok(())
     }
 
-    fn open_window(&mut self, window: Window) -> Result<()> {
+    fn open_window(&mut self, mut window: Window) -> Result<()> {
+        window.class = self.steam.resolve_class(&window.class);
+
         if self
             .state
             .windows
@@ -428,6 +434,29 @@ mod tests {
             Some("0x1")
         );
         assert_eq!(tracker.state.app_open_counts.get("firefox"), Some(&1));
+    }
+
+    #[test]
+    fn steam_app_classes_use_readable_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .open_window(window("0x1", "steam_app_999999999"))
+            .unwrap();
+
+        assert_eq!(
+            tracker.state.app_open_counts.get("Steam App 999999999"),
+            Some(&1)
+        );
+        assert!(
+            !tracker
+                .state
+                .app_open_counts
+                .contains_key("steam_app_999999999")
+        );
     }
 
     #[test]
