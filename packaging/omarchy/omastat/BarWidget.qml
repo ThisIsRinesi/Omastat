@@ -64,7 +64,7 @@ BarWidget {
 
   function refresh() {
     if (reportProcess.running) return
-    reportProcess.command = splitCommand(String(root.setting("command", "omastat --json today")))
+    reportProcess.command = shellCommand(String(root.setting("command", "omastat --json today")))
     reportProcess.running = true
   }
 
@@ -94,8 +94,10 @@ BarWidget {
       + " (" + formatDuration(Number(top.focused_seconds || 0)) + ")"
   }
 
-  function splitCommand(command) {
-    return String(command || "").trim().split(/\\s+/).filter(function(part) { return part.length > 0 })
+  function shellCommand(command) {
+    var value = String(command || "").trim()
+    if (value.length === 0) value = "omastat --json today"
+    return ["/bin/sh", "-lc", value]
   }
 
   function shortApp(app) {

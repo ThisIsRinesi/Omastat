@@ -26,7 +26,7 @@ use std::{
 use toml::Value as TomlValue;
 
 const LENSES: [&str; 5] = ["DAY", "WEEK", "MONTH", "YEAR", "LIFE"];
-const FRAME_TIME: Duration = Duration::from_millis(250);
+const CLOCK_REFRESH: Duration = Duration::from_secs(1);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
 
 pub fn run(storage: Storage) -> Result<()> {
@@ -46,16 +46,19 @@ pub fn run(storage: Storage) -> Result<()> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Storage) -> Result<()> {
     let mut app = App::load(storage)?;
+    let mut next_clock = Instant::now() + CLOCK_REFRESH;
 
     loop {
         terminal.draw(|frame| render(frame, &app))?;
 
-        if app.last_refresh.elapsed() >= AUTO_REFRESH {
-            app.refresh(storage)?;
-        }
-        app.tick = app.tick.wrapping_add(1);
+        let refresh_deadline = app.last_refresh + AUTO_REFRESH;
+        let deadline = if refresh_deadline <= next_clock {
+            refresh_deadline
+        } else {
+            next_clock
+        };
 
-        if event::poll(FRAME_TIME)? {
+        if event::poll(deadline.saturating_duration_since(Instant::now()))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
@@ -78,6 +81,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
                 Event::Resize(_, _) => {}
                 _ => {}
             }
+            continue;
+        }
+
+        let now = Instant::now();
+        if app.last_refresh.elapsed() >= AUTO_REFRESH {
+            app.refresh(storage)?;
+        }
+        while next_clock <= now {
+            next_clock += CLOCK_REFRESH;
         }
     }
 }
@@ -86,7 +98,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
 struct App {
     lens: usize,
     selected: usize,
-    tick: u64,
     last_refresh: Instant,
     loaded_at: DateTime<Local>,
     theme: Theme,
@@ -104,7 +115,6 @@ impl App {
         Ok(Self {
             lens: 0,
             selected: 0,
-            tick: 0,
             last_refresh: Instant::now(),
             loaded_at: Local::now(),
             theme: Theme::load(),
@@ -120,11 +130,9 @@ impl App {
     fn refresh(&mut self, storage: &Storage) -> Result<()> {
         let lens = self.lens;
         let selected = self.selected;
-        let tick = self.tick;
         *self = Self::load(storage)?;
         self.lens = lens;
         self.selected = selected;
-        self.tick = tick;
         self.clamp_selection();
         Ok(())
     }
@@ -285,13 +293,25 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
 }
 
 fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let [top, apps] = *Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(8)])
-        .split(area)
-    else {
-        return;
+    let show_bottom_strip = area.height >= 20;
+    let chunks = if show_bottom_strip {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Min(8),
+                Constraint::Length(6),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(8), Constraint::Min(8)])
+            .split(area)
     };
+    let top = chunks[0];
+    let apps = chunks[1];
+
     let [flow, replay] = *Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -303,6 +323,18 @@ fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     render_flow(frame, flow, app, theme);
     render_replay(frame, replay, app, theme);
     render_apps(frame, apps, app, theme);
+
+    if show_bottom_strip {
+        let [mix, lenses] = *Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(chunks[2])
+        else {
+            return;
+        };
+        render_mix(frame, mix, app, theme);
+        render_lenses(frame, lenses, app, theme);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -1622,4 +1654,72 @@ fn toml_color(value: &TomlValue, path: &[&str]) -> Option<Rgb> {
         current = current.get(*key)?;
     }
     current.as_str().and_then(Rgb::parse)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn compact_80_column_layout_keeps_core_panels() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = sample_app();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        for label in ["timeline", "replay", "apps", "mix", "lenses"] {
+            assert!(rendered.contains(label), "missing compact panel {label}");
+        }
+    }
+
+    fn sample_app() -> App {
+        let rows = vec![
+            AppTotals {
+                app_class: "com.mitchellh.ghostty".to_string(),
+                focused_seconds: 8 * 3600,
+                open_seconds: 12 * 3600,
+            },
+            AppTotals {
+                app_class: "steam_app_1675200".to_string(),
+                focused_seconds: 2 * 3600,
+                open_seconds: 5 * 3600,
+            },
+            AppTotals {
+                app_class: "discord".to_string(),
+                focused_seconds: 900,
+                open_seconds: 4 * 3600,
+            },
+        ];
+        let days = (0..14)
+            .map(|index| DayTotals {
+                label: format!("D{index}"),
+                focused_seconds: (index as i64 + 1) * 300,
+                open_seconds: (index as i64 + 2) * 500,
+            })
+            .collect();
+
+        App {
+            lens: 1,
+            selected: 0,
+            last_refresh: Instant::now(),
+            loaded_at: Local::now(),
+            theme: Theme::fallback(),
+            today: rows.clone(),
+            week: rows.clone(),
+            month: rows.clone(),
+            year: rows.clone(),
+            all_time: rows,
+            days,
+        }
+    }
 }

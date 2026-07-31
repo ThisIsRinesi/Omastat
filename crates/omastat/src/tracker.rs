@@ -3,10 +3,10 @@ use crate::{
     hyprland::{self, Event, EventStream, Snapshot, Window},
     session,
     steam::SteamResolver,
-    storage::{IntervalKind, Storage},
+    storage::{ActiveInterval, IntervalKind, Storage},
 };
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
@@ -44,12 +44,13 @@ impl Tracker {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let now = unix_now();
-        self.storage.close_open_intervals(now)?;
-        self.reconcile().await?;
+        self.recover_startup_state().await?;
 
         let mut reconnect_backoff = Duration::from_secs(1);
         self.refresh_session_status().await?;
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        let mut terminate = terminate_signal();
 
         let mut reconcile_timer = time::interval(Duration::from_secs(
             self.config.tracking.reconcile_seconds.max(30),
@@ -100,15 +101,27 @@ impl Tracker {
                     _ = session_timer.tick() => {
                         self.refresh_session_status().await?;
                     }
-                    _ = tokio::signal::ctrl_c() => {
+                    _ = &mut ctrl_c => {
                         self.shutdown()?;
                         return Ok(());
                     }
-                    _ = terminate_signal() => {
+                    _ = recv_terminate_signal(&mut terminate) => {
                         self.shutdown()?;
                         return Ok(());
                     }
                 }
+            }
+        }
+    }
+
+    async fn recover_startup_state(&mut self) -> Result<()> {
+        let now = unix_now();
+        match hyprland::snapshot().await {
+            Ok(snapshot) => self.apply_startup_snapshot(snapshot, now),
+            Err(error) => {
+                warn!("startup snapshot failed; closing unverified intervals: {error:#}");
+                self.storage.close_open_intervals(now)?;
+                Ok(())
             }
         }
     }
@@ -147,7 +160,7 @@ impl Tracker {
             .windows
             .iter()
             .map(|window| window.address.clone())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
 
         for address in self.state.windows.keys().cloned().collect::<Vec<_>>() {
             if !live_addresses.contains(&address) {
@@ -165,6 +178,107 @@ impl Tracker {
         }
 
         self.set_active_window(snapshot.active_address.as_deref())?;
+        Ok(())
+    }
+
+    fn apply_startup_snapshot(&mut self, snapshot: Snapshot, now: i64) -> Result<()> {
+        let stored = self.storage.unclosed_intervals()?;
+        let mut windows = HashMap::new();
+        let mut app_open_counts = HashMap::<String, usize>::new();
+
+        for mut window in snapshot.windows {
+            window.class = self.steam.resolve_class(&window.class);
+            *app_open_counts.entry(window.class.clone()).or_default() += 1;
+            windows.insert(window.address.clone(), window);
+        }
+
+        let active_address = snapshot
+            .active_address
+            .filter(|address| windows.contains_key(address));
+        let mut stored_open = HashMap::<String, Vec<i64>>::new();
+        let mut stored_focused = Vec::new();
+
+        for interval in stored {
+            match interval.kind {
+                IntervalKind::Open => {
+                    stored_open
+                        .entry(interval.app_class)
+                        .or_default()
+                        .push(interval.id);
+                }
+                IntervalKind::Focused => stored_focused.push(interval),
+            }
+        }
+
+        self.state = TrackerState::default();
+        self.state.windows = windows;
+        self.state.app_open_counts = app_open_counts;
+        self.state.active_address = active_address;
+
+        let live_app_classes = self
+            .state
+            .app_open_counts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for app_class in live_app_classes {
+            let Some(ids) = stored_open.remove(&app_class) else {
+                let id =
+                    self.storage
+                        .start_interval(IntervalKind::Open, &app_class, None, None, now)?;
+                self.state.open_interval_ids.insert(app_class.clone(), id);
+                continue;
+            };
+
+            if let Some((keep, stale)) = ids.split_first() {
+                self.state
+                    .open_interval_ids
+                    .insert(app_class.clone(), *keep);
+                for id in stale {
+                    self.storage.close_interval(*id, now)?;
+                }
+            }
+        }
+
+        for ids in stored_open.into_values() {
+            for id in ids {
+                self.storage.close_interval(id, now)?;
+            }
+        }
+
+        self.restore_focused_interval(stored_focused, now)?;
+        self.sync_focused_interval()
+    }
+
+    fn restore_focused_interval(&mut self, stored: Vec<ActiveInterval>, now: i64) -> Result<()> {
+        let active = self
+            .state
+            .active_address
+            .as_ref()
+            .and_then(|address| self.state.windows.get(address))
+            .map(|window| (window.address.clone(), window.class.clone()));
+        let mut restored = false;
+
+        for interval in stored {
+            let matches_active = !restored
+                && active.as_ref().is_some_and(|(address, app_class)| {
+                    interval.window_address.as_deref() == Some(address.as_str())
+                        && interval.app_class == *app_class
+                });
+
+            if matches_active {
+                let (address, app_class) = active.as_ref().expect("active window checked above");
+                self.state.focused = Some(FocusedInterval {
+                    address: address.clone(),
+                    app_class: app_class.clone(),
+                    interval_id: interval.id,
+                });
+                restored = true;
+            } else {
+                self.storage.close_interval(interval.id, now)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -332,18 +446,35 @@ fn unix_now() -> i64 {
 }
 
 #[cfg(unix)]
-async fn terminate_signal() {
-    let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    signal.recv().await;
+type TerminateSignal = tokio::signal::unix::Signal;
+
+#[cfg(not(unix))]
+struct TerminateSignal;
+
+#[cfg(unix)]
+fn terminate_signal() -> Option<TerminateSignal> {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(signal) => Some(signal),
+        Err(error) => {
+            warn!("failed to install SIGTERM handler: {error}");
+            None
+        }
+    }
 }
 
 #[cfg(not(unix))]
-async fn terminate_signal() {
-    std::future::pending::<()>().await
+fn terminate_signal() -> Option<TerminateSignal> {
+    None
+}
+
+async fn recv_terminate_signal(signal: &mut Option<TerminateSignal>) {
+    #[cfg(unix)]
+    if let Some(signal) = signal {
+        signal.recv().await;
+        return;
+    }
+
+    std::future::pending::<()>().await;
 }
 
 #[cfg(test)]
@@ -352,7 +483,7 @@ mod tests {
     use crate::{
         config::Config,
         hyprland::{Snapshot, Window},
-        storage::Storage,
+        storage::{IntervalKind, Storage},
     };
 
     #[test]
@@ -376,6 +507,68 @@ mod tests {
         assert_eq!(tracker.state.app_open_counts.get("firefox"), Some(&2));
         assert_eq!(tracker.state.app_open_counts.get("code"), Some(&1));
         assert_eq!(tracker.state.open_interval_ids.len(), 2);
+    }
+
+    #[test]
+    fn startup_snapshot_reuses_live_intervals_and_closes_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let live_open = storage
+            .start_interval(IntervalKind::Open, "firefox", None, None, 100)
+            .unwrap();
+        let stale_open = storage
+            .start_interval(IntervalKind::Open, "code", None, None, 100)
+            .unwrap();
+        let live_focus = storage
+            .start_interval(
+                IntervalKind::Focused,
+                "firefox",
+                Some("0x1"),
+                Some("title"),
+                100,
+            )
+            .unwrap();
+        let stale_focus = storage
+            .start_interval(IntervalKind::Focused, "code", Some("0x2"), None, 100)
+            .unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .apply_startup_snapshot(
+                Snapshot {
+                    active_address: Some("0x1".to_string()),
+                    windows: vec![window("0x1", "firefox")],
+                },
+                200,
+            )
+            .unwrap();
+
+        assert_eq!(
+            tracker.state.open_interval_ids.get("firefox"),
+            Some(&live_open)
+        );
+        assert_eq!(
+            tracker
+                .state
+                .focused
+                .as_ref()
+                .map(|focused| focused.interval_id),
+            Some(live_focus)
+        );
+
+        let unclosed_ids = tracker
+            .storage
+            .unclosed_intervals()
+            .unwrap()
+            .into_iter()
+            .map(|interval| interval.id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(unclosed_ids.contains(&live_open));
+        assert!(unclosed_ids.contains(&live_focus));
+        assert!(!unclosed_ids.contains(&stale_open));
+        assert!(!unclosed_ids.contains(&stale_focus));
+        assert_eq!(unclosed_ids.len(), 2);
     }
 
     #[test]

@@ -28,6 +28,14 @@ pub struct DayTotals {
     pub open_seconds: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActiveInterval {
+    pub id: i64,
+    pub kind: IntervalKind,
+    pub app_class: String,
+    pub window_address: Option<String>,
+}
+
 pub struct Storage {
     conn: Connection,
     path: PathBuf,
@@ -94,6 +102,40 @@ impl Storage {
             params![ended_at],
         )?;
         Ok(())
+    }
+
+    pub fn unclosed_intervals(&self) -> Result<Vec<ActiveInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT id, kind, app_class, window_address
+            FROM intervals
+            WHERE ended_at IS NULL
+            ORDER BY started_at ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(id, kind, app_class, window_address)| {
+                let kind = IntervalKind::from_str(&kind)
+                    .with_context(|| format!("unknown interval kind {kind:?} for row {id}"))?;
+                Ok(ActiveInterval {
+                    id,
+                    kind,
+                    app_class,
+                    window_address,
+                })
+            })
+            .collect()
     }
 
     pub fn totals_for_today(&self) -> Result<Vec<AppTotals>> {
@@ -338,6 +380,14 @@ impl IntervalKind {
         match self {
             Self::Focused => "focused",
             Self::Open => "open",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "focused" => Some(Self::Focused),
+            "open" => Some(Self::Open),
+            _ => None,
         }
     }
 }
