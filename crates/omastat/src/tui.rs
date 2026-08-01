@@ -1,11 +1,13 @@
 use crate::{
+    hyprland,
     steam::SteamResolver,
-    storage::{AppTotals, DayTotals, Storage},
+    storage::{AppTotals, DayTotals, IntervalKind, Storage, StorageStatus, TimelineInterval},
 };
 use anyhow::Result;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local, TimeZone};
 use crossterm::{
-    event::{self, Event, KeyCode},
+    cursor,
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -21,11 +23,13 @@ use serde_json::Value as JsonValue;
 use std::{
     f64::consts::PI,
     fs, io,
+    process::Command,
     time::{Duration, Instant},
 };
 use toml::Value as TomlValue;
 
 const LENSES: [&str; 5] = ["DAY", "WEEK", "MONTH", "YEAR", "LIFE"];
+const LENS_COUNT: usize = LENSES.len();
 const CLOCK_REFRESH: Duration = Duration::from_secs(1);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
 
@@ -33,15 +37,21 @@ pub fn run(storage: Storage) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let _cleanup = TerminalCleanup;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let result = run_app(&mut terminal, &storage);
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    run_app(&mut terminal, &storage)
+}
 
-    result
+struct TerminalCleanup;
+
+impl Drop for TerminalCleanup {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen, cursor::Show);
+    }
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Storage) -> Result<()> {
@@ -62,20 +72,23 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(());
+                    }
                     KeyCode::Char('r') => app.refresh(storage)?,
-                    KeyCode::Left | KeyCode::Char('h') => app.previous_lens(),
-                    KeyCode::Right | KeyCode::Char('l') => app.next_lens(),
+                    KeyCode::Left | KeyCode::Char('h') => app.previous_lens(storage)?,
+                    KeyCode::Right | KeyCode::Char('l') => app.next_lens(storage)?,
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
                     KeyCode::PageUp => app.move_selection(-6),
                     KeyCode::PageDown => app.move_selection(6),
                     KeyCode::Home => app.select_first(),
                     KeyCode::End => app.select_last(),
-                    KeyCode::Char('1') => app.set_lens(0),
-                    KeyCode::Char('2') => app.set_lens(1),
-                    KeyCode::Char('3') => app.set_lens(2),
-                    KeyCode::Char('4') => app.set_lens(3),
-                    KeyCode::Char('5') => app.set_lens(4),
+                    KeyCode::Char('1') => app.set_lens(storage, 0)?,
+                    KeyCode::Char('2') => app.set_lens(storage, 1)?,
+                    KeyCode::Char('3') => app.set_lens(storage, 2)?,
+                    KeyCode::Char('4') => app.set_lens(storage, 3)?,
+                    KeyCode::Char('5') => app.set_lens(storage, 4)?,
                     _ => {}
                 },
                 Event::Resize(_, _) => {}
@@ -101,81 +114,104 @@ struct App {
     last_refresh: Instant,
     loaded_at: DateTime<Local>,
     theme: Theme,
-    today: Vec<AppTotals>,
-    week: Vec<AppTotals>,
-    month: Vec<AppTotals>,
-    year: Vec<AppTotals>,
-    all_time: Vec<AppTotals>,
+    steam: SteamResolver,
+    totals: [Option<Vec<AppTotals>>; LENS_COUNT],
     days: Vec<DayTotals>,
+    today_intervals: Vec<TimelineInterval>,
+    health: HealthSnapshot,
 }
 
 impl App {
     fn load(storage: &Storage) -> Result<Self> {
-        let mut steam = SteamResolver::default();
-        Ok(Self {
+        let mut app = Self {
             lens: 0,
             selected: 0,
             last_refresh: Instant::now(),
             loaded_at: Local::now(),
             theme: Theme::load(),
-            today: steam.resolve_totals(storage.totals_for_today()?),
-            week: steam.resolve_totals(storage.totals_for_week()?),
-            month: steam.resolve_totals(storage.totals_for_month()?),
-            year: steam.resolve_totals(storage.totals_for_year()?),
-            all_time: steam.resolve_totals(storage.totals_all_time()?),
-            days: storage.daily_totals(14)?,
-        })
+            steam: SteamResolver::default(),
+            totals: std::array::from_fn(|_| None),
+            days: Vec::new(),
+            today_intervals: Vec::new(),
+            health: HealthSnapshot::default(),
+        };
+        app.load_lens(storage, 0)?;
+        app.refresh_supplemental(storage)?;
+        Ok(app)
     }
 
     fn refresh(&mut self, storage: &Storage) -> Result<()> {
-        let lens = self.lens;
-        let selected = self.selected;
-        *self = Self::load(storage)?;
-        self.lens = lens;
-        self.selected = selected;
+        self.load_lens(storage, self.lens)?;
+        self.refresh_supplemental(storage)?;
         self.clamp_selection();
         Ok(())
     }
 
     fn rows(&self) -> &[AppTotals] {
-        match self.lens {
-            0 => &self.today,
-            1 => &self.week,
-            2 => &self.month,
-            3 => &self.year,
-            _ => &self.all_time,
-        }
+        self.totals[self.lens].as_deref().unwrap_or(&[])
     }
 
     fn lens_label(&self) -> &'static str {
         LENSES[self.lens]
     }
 
-    fn lens_total(&self, lens: usize) -> i64 {
-        focused_total(match lens {
-            0 => &self.today,
-            1 => &self.week,
-            2 => &self.month,
-            3 => &self.year,
-            _ => &self.all_time,
-        })
+    fn lens_total(&self, lens: usize) -> Option<i64> {
+        self.totals
+            .get(lens)
+            .and_then(|rows| rows.as_ref())
+            .map(|rows| focused_total(rows))
     }
 
-    fn previous_lens(&mut self) {
-        self.set_lens(if self.lens == 0 {
+    fn previous_lens(&mut self, storage: &Storage) -> Result<()> {
+        let lens = if self.lens == 0 {
             LENSES.len() - 1
         } else {
             self.lens - 1
-        });
+        };
+        self.set_lens(storage, lens)
     }
 
-    fn next_lens(&mut self) {
-        self.set_lens((self.lens + 1) % LENSES.len());
+    fn next_lens(&mut self, storage: &Storage) -> Result<()> {
+        self.set_lens(storage, (self.lens + 1) % LENSES.len())
     }
 
-    fn set_lens(&mut self, lens: usize) {
+    fn set_lens(&mut self, storage: &Storage, lens: usize) -> Result<()> {
         self.lens = lens.min(LENSES.len() - 1);
+        if self.totals[self.lens].is_none() {
+            self.load_lens(storage, self.lens)?;
+        }
         self.clamp_selection();
+        Ok(())
+    }
+
+    fn load_lens(&mut self, storage: &Storage, lens: usize) -> Result<()> {
+        let rows = match lens {
+            0 => storage.totals_for_today()?,
+            1 => storage.totals_for_week()?,
+            2 => storage.totals_for_month()?,
+            3 => storage.totals_for_year()?,
+            _ => storage.totals_all_time()?,
+        };
+        self.totals[lens] = Some(self.steam.resolve_totals(rows));
+        self.loaded_at = Local::now();
+        self.last_refresh = Instant::now();
+        Ok(())
+    }
+
+    fn refresh_supplemental(&mut self, storage: &Storage) -> Result<()> {
+        self.days = storage.daily_totals(14)?;
+        self.today_intervals = storage
+            .timeline_for_today()?
+            .into_iter()
+            .map(|mut interval| {
+                interval.app_class = self.steam.resolve_class(&interval.app_class);
+                interval
+            })
+            .collect();
+        self.health = HealthSnapshot::load(storage);
+        self.loaded_at = Local::now();
+        self.last_refresh = Instant::now();
+        Ok(())
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -198,6 +234,85 @@ impl App {
 
     fn clamp_selection(&mut self) {
         self.selected = self.selected.min(self.rows().len().saturating_sub(1));
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct HealthSnapshot {
+    storage: StorageStatus,
+    service_state: String,
+    socket_state: String,
+}
+
+impl HealthSnapshot {
+    fn load(storage: &Storage) -> Self {
+        Self {
+            storage: storage.usage_status().unwrap_or_default(),
+            service_state: omastatd_state(),
+            socket_state: hyprland_socket_state(),
+        }
+    }
+
+    fn service_color(&self, theme: &Theme) -> Color {
+        if self.service_state == "active" {
+            theme.success
+        } else if self.service_state == "unknown" {
+            theme.muted
+        } else {
+            theme.danger
+        }
+    }
+
+    fn socket_color(&self, theme: &Theme) -> Color {
+        if self.socket_state == "ipc ok" {
+            theme.success
+        } else {
+            theme.warn
+        }
+    }
+
+    fn last_event_label(&self) -> String {
+        match self.storage.last_event_at {
+            Some(timestamp) => format!(
+                "{} ago",
+                duration_compact(Local::now().timestamp() - timestamp)
+            ),
+            None => "never".to_string(),
+        }
+    }
+
+    fn live_label(&self) -> String {
+        if self.storage.interval_count == 0 {
+            return "empty db".to_string();
+        }
+        format!(
+            "{} focus / {} open",
+            self.storage.focused_active, self.storage.open_active
+        )
+    }
+}
+
+fn omastatd_state() -> String {
+    let Ok(output) = Command::new("systemctl")
+        .args(["--user", "is-active", "omastat.service"])
+        .output()
+    else {
+        return "unknown".to_string();
+    };
+
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if state.is_empty() {
+        "unknown".to_string()
+    } else {
+        state
+    }
+}
+
+fn hyprland_socket_state() -> String {
+    match hyprland::socket_paths() {
+        Ok(paths) if paths.request.exists() && paths.event.exists() => "ipc ok".to_string(),
+        Ok(_) => "ipc missing".to_string(),
+        Err(_) => "env missing".to_string(),
     }
 }
 
@@ -344,7 +459,11 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let focused = focused_total(rows);
     let open = open_total(rows);
     let density = ratio(focused, open);
-    let clock = Local::now().format("%H:%M:%S").to_string();
+    let clock = if area.width < 72 {
+        Local::now().format("%H:%M").to_string()
+    } else {
+        Local::now().format("%H:%M:%S").to_string()
+    };
     let mut spans = vec![
         Span::styled(
             " OMASTAT",
@@ -356,7 +475,25 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         Span::styled(" :: ", Style::default().fg(theme.dim).bg(theme.bg)),
     ];
 
-    if area.width < 96 {
+    if area.width < 72 {
+        spans.extend([
+            Span::styled(" ", Style::default().bg(theme.bg)),
+            Span::styled(
+                app.lens_label(),
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(lens_color(app.lens, theme))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default().bg(theme.bg)),
+            Span::styled(
+                duration_compact(focused),
+                Style::default().fg(theme.warn).bg(theme.bg),
+            ),
+            Span::styled("  ", Style::default().bg(theme.bg)),
+            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
+        ]);
+    } else if area.width < 96 {
         spans.extend([
             Span::styled(" lens ", Style::default().fg(theme.dim).bg(theme.bg)),
             Span::styled(
@@ -366,6 +503,18 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
                     .bg(lens_color(app.lens, theme))
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(
+                format_duration(focused),
+                Style::default().fg(theme.warn).bg(theme.bg),
+            ),
+            Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(
+                format_duration(open),
+                Style::default().fg(theme.secondary).bg(theme.bg),
+            ),
+            Span::styled("  ", Style::default().bg(theme.bg)),
+            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
         ]);
     } else {
         for (index, label) in LENSES.iter().enumerate() {
@@ -390,39 +539,28 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
                     }),
             ));
         }
-    }
-
-    spans.extend([
-        Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
-        Span::styled(
-            format_duration(focused),
-            Style::default().fg(theme.warn).bg(theme.bg),
-        ),
-        Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
-        Span::styled(
-            format_duration(open),
-            Style::default().fg(theme.secondary).bg(theme.bg),
-        ),
-        Span::styled("  density ", Style::default().fg(theme.dim).bg(theme.bg)),
-        Span::styled(
-            percent(density),
-            Style::default().fg(theme.tertiary).bg(theme.bg),
-        ),
-    ]);
-
-    if area.width >= 96 {
         spans.extend([
+            Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(
+                format_duration(focused),
+                Style::default().fg(theme.warn).bg(theme.bg),
+            ),
+            Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(
+                format_duration(open),
+                Style::default().fg(theme.secondary).bg(theme.bg),
+            ),
+            Span::styled("  density ", Style::default().fg(theme.dim).bg(theme.bg)),
+            Span::styled(
+                percent(density),
+                Style::default().fg(theme.tertiary).bg(theme.bg),
+            ),
             Span::styled("  updated ", Style::default().fg(theme.dim).bg(theme.bg)),
             Span::styled(
                 app.loaded_at.format("%H:%M:%S").to_string(),
                 Style::default().fg(theme.muted).bg(theme.bg),
             ),
             Span::styled("  now ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
-        ]);
-    } else {
-        spans.extend([
-            Span::styled("  ", Style::default().bg(theme.bg)),
             Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
         ]);
     }
@@ -444,18 +582,43 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     fill_area(frame, area, theme.bg);
 
     let mode = format!("{} {}", app.lens + 1, app.lens_label());
-    let left = format!(" h/l lens  j/k select  pg jump  r refresh  q quit  [{mode}]");
+    let full_left = format!(" h/l lens  j/k select  pg jump  r refresh  q quit  [{mode}]");
+    let compact_left = format!(" h/l lens  j/k select  r refresh  q quit  [{mode}]");
+    let tiny_left = format!(" {mode}  r refresh  q quit");
     let right = format!("{}s refresh", AUTO_REFRESH.as_secs());
-    let padding =
-        area.width
-            .saturating_sub((left.chars().count() + right.chars().count()) as u16) as usize;
+    let width = area.width as usize;
+    let left = if full_left.chars().count() + right.chars().count() <= width {
+        full_left
+    } else if compact_left.chars().count() + right.chars().count() <= width {
+        compact_left
+    } else {
+        tiny_left
+    };
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+    let mut spans = Vec::new();
+    if left_len + right_len < width {
+        spans.push(Span::styled(
+            left,
+            Style::default().fg(theme.muted).bg(theme.bg),
+        ));
+        spans.push(Span::styled(
+            " ".repeat(width - left_len - right_len),
+            Style::default().bg(theme.bg),
+        ));
+        spans.push(Span::styled(
+            right,
+            Style::default().fg(theme.dim).bg(theme.bg),
+        ));
+    } else {
+        spans.push(Span::styled(
+            fit_text(&left, width),
+            Style::default().fg(theme.muted).bg(theme.bg),
+        ));
+    }
+
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(left, Style::default().fg(theme.muted).bg(theme.bg)),
-            Span::styled(" ".repeat(padding), Style::default().bg(theme.bg)),
-            Span::styled(right, Style::default().fg(theme.dim).bg(theme.bg)),
-        ]))
-        .style(Style::default().bg(theme.bg)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
         area,
     );
 }
@@ -504,8 +667,10 @@ fn render_replay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         .map(|day| format!("{} {}", day.label, duration_compact(day.focused_seconds)))
         .unwrap_or_else(|| "no focus".to_string());
     let meter_width = inner.width.saturating_sub(13).max(4) as usize;
+    let selected_app = rows.get(app.selected).map(|row| row.app_class.as_str());
+    let width = inner.width as usize;
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             format_duration(focused),
             Style::default()
@@ -513,6 +678,14 @@ fn render_replay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
                 .bg(theme.panel)
                 .add_modifier(Modifier::BOLD),
         )),
+        timeline_line(
+            "today",
+            &app.today_intervals,
+            rows,
+            selected_app,
+            width,
+            theme,
+        ),
         meter_line(
             "focus",
             ratio(focused, open.max(focused)),
@@ -530,13 +703,45 @@ fn render_replay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         metric_line("open", &format_duration(open), theme.secondary, theme),
         metric_line("top", top.trim(), theme.primary, theme),
         metric_line("best", &best, theme.success, theme),
-        metric_line(
-            "active",
+    ];
+
+    lines.extend([
+        metric_line_fit(
+            "days",
             &format!("{}/{} days", active_days(&app.days), app.days.len().max(1)),
+            width,
             theme.tertiary,
             theme,
         ),
-    ];
+        metric_line_fit(
+            "daemon",
+            &app.health.service_state,
+            width,
+            app.health.service_color(theme),
+            theme,
+        ),
+        metric_line_fit(
+            "db",
+            &app.health.last_event_label(),
+            width,
+            theme.muted,
+            theme,
+        ),
+        metric_line_fit(
+            "live",
+            &app.health.live_label(),
+            width,
+            theme.primary,
+            theme,
+        ),
+        metric_line_fit(
+            "hypr",
+            &app.health.socket_state,
+            width,
+            app.health.socket_color(theme),
+            theme,
+        ),
+    ]);
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -559,9 +764,39 @@ fn render_apps(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
             "waiting for app intervals",
             Style::default().fg(theme.muted).bg(theme.panel),
         ))];
+        lines.extend([
+            metric_line_fit(
+                "daemon",
+                &app.health.service_state,
+                inner.width as usize,
+                app.health.service_color(theme),
+                theme,
+            ),
+            metric_line_fit(
+                "db",
+                &app.health.last_event_label(),
+                inner.width as usize,
+                theme.muted,
+                theme,
+            ),
+            metric_line_fit(
+                "live",
+                &app.health.live_label(),
+                inner.width as usize,
+                theme.primary,
+                theme,
+            ),
+            metric_line_fit(
+                "hypr",
+                &app.health.socket_state,
+                inner.width as usize,
+                app.health.socket_color(theme),
+                theme,
+            ),
+        ]);
         lines.extend(texture_lines(
             inner.width as usize,
-            inner.height.saturating_sub(1) as usize,
+            inner.height.saturating_sub(lines.len() as u16) as usize,
             theme,
         ));
         frame.render_widget(
@@ -580,9 +815,17 @@ fn render_apps(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         .map(|row| row.focused_seconds.max(1))
         .unwrap_or(1);
     let expanded = inner.height >= 14 && width >= 58;
+    let row_height = if expanded { 2 } else { 1 };
+    let visible_rows = inner.height.saturating_sub(1).max(1) as usize / row_height.max(1);
+    let visible_rows = visible_rows.max(1);
+    let start_index = if app.selected >= visible_rows {
+        app.selected + 1 - visible_rows
+    } else {
+        0
+    };
     let mut lines = vec![apps_header(width, theme)];
 
-    for (index, row) in rows.iter().enumerate() {
+    for (index, row) in rows.iter().enumerate().skip(start_index) {
         if lines.len() >= inner.height as usize {
             break;
         }
@@ -677,9 +920,9 @@ fn render_lenses(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(block, area);
 
     let max_total = (0..LENSES.len())
-        .map(|index| app.lens_total(index))
+        .filter_map(|index| app.lens_total(index))
         .max()
-        .unwrap_or(1)
+        .unwrap_or(0)
         .max(1);
     let width = inner.width as usize;
     let bar_width = width.saturating_sub(14).max(3);
@@ -719,15 +962,21 @@ fn render_lenses(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
             ),
             Span::styled(" ", Style::default().bg(bg)),
         ];
+        let total = app.lens_total(index);
         spans.extend(bar_spans(
-            ratio(app.lens_total(index), max_total),
+            ratio(total.unwrap_or(0), max_total),
             bar_width,
             color,
             bg,
             theme,
         ));
         spans.push(Span::styled(
-            format!(" {}", duration_compact(app.lens_total(index))),
+            format!(
+                " {}",
+                total
+                    .map(duration_compact)
+                    .unwrap_or_else(|| " --".to_string())
+            ),
             Style::default().fg(theme.muted).bg(bg),
         ));
         lines.push(Line::from(spans));
@@ -1232,6 +1481,26 @@ fn metric_line(label: &str, value: &str, color: Color, theme: &Theme) -> Line<'s
     ])
 }
 
+fn metric_line_fit(
+    label: &str,
+    value: &str,
+    width: usize,
+    color: Color,
+    theme: &Theme,
+) -> Line<'static> {
+    let label_width = 7;
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<label_width$}"),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        ),
+        Span::styled(
+            fit_text(value, width.saturating_sub(label_width)),
+            Style::default().fg(color).bg(theme.panel),
+        ),
+    ])
+}
+
 fn meter_line(label: &str, value: f64, width: usize, color: Color, theme: &Theme) -> Line<'static> {
     let mut spans = vec![Span::styled(
         format!("{label:<7}"),
@@ -1243,6 +1512,79 @@ fn meter_line(label: &str, value: f64, width: usize, color: Color, theme: &Theme
         Style::default().fg(theme.text).bg(theme.panel),
     ));
     Line::from(spans)
+}
+
+fn timeline_line(
+    label: &str,
+    intervals: &[TimelineInterval],
+    rows: &[AppTotals],
+    selected_app: Option<&str>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let label_width = 7;
+    let graph_width = width.saturating_sub(label_width).max(1);
+    let Some((start, end)) = today_bounds() else {
+        return metric_line_fit(label, "timeline unavailable", width, theme.muted, theme);
+    };
+    if intervals.is_empty() || end <= start {
+        return metric_line_fit(label, "no intervals today", width, theme.muted, theme);
+    }
+
+    let mut spans = vec![Span::styled(
+        format!("{label:<label_width$}"),
+        Style::default().fg(theme.dim).bg(theme.panel),
+    )];
+
+    for col in 0..graph_width {
+        let position = (col as f64 + 0.5) / graph_width as f64;
+        let timestamp = start + ((end - start) as f64 * position).round() as i64;
+        let focused = intervals.iter().find(|interval| {
+            interval.kind == IntervalKind::Focused
+                && interval.started_at <= timestamp
+                && interval.ended_at >= timestamp
+        });
+        let open = intervals.iter().find(|interval| {
+            interval.kind == IntervalKind::Open
+                && interval.started_at <= timestamp
+                && interval.ended_at >= timestamp
+        });
+
+        let (glyph, color) = if let Some(interval) = focused {
+            let selected = selected_app == Some(interval.app_class.as_str());
+            let rank = rows
+                .iter()
+                .position(|row| row.app_class == interval.app_class)
+                .unwrap_or(usize::MAX);
+            (
+                if selected { "▓" } else { "█" },
+                if selected {
+                    theme.text
+                } else {
+                    rank_color(rank, theme)
+                },
+            )
+        } else if open.is_some() {
+            ("░", theme.dim)
+        } else {
+            ("·", theme.dim)
+        };
+        spans.push(Span::styled(
+            glyph,
+            Style::default().fg(color).bg(theme.panel),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+fn today_bounds() -> Option<(i64, i64)> {
+    let now = Local::now();
+    let start = Local
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+        .single()?
+        .timestamp();
+    Some((start, now.timestamp()))
 }
 
 fn bar_spans(
@@ -1682,6 +2024,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selected_row_stays_visible_when_list_is_longer_than_viewport() {
+        let backend = TestBackend::new(90, 22);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = sample_app();
+        let rows = (0..30)
+            .map(|index| AppTotals {
+                app_class: format!("app-{index:02}"),
+                focused_seconds: 3600 - index as i64,
+                open_seconds: 7200,
+            })
+            .collect::<Vec<_>>();
+        app.totals[0] = Some(rows);
+        app.lens = 0;
+        app.selected = 29;
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            rendered.contains(">30 app-29"),
+            "selected row was not visible"
+        );
+    }
+
     fn sample_app() -> App {
         let rows = vec![
             AppTotals {
@@ -1714,12 +2088,17 @@ mod tests {
             last_refresh: Instant::now(),
             loaded_at: Local::now(),
             theme: Theme::fallback(),
-            today: rows.clone(),
-            week: rows.clone(),
-            month: rows.clone(),
-            year: rows.clone(),
-            all_time: rows,
+            steam: SteamResolver::default(),
+            totals: [
+                Some(rows.clone()),
+                Some(rows.clone()),
+                Some(rows.clone()),
+                Some(rows.clone()),
+                Some(rows),
+            ],
             days,
+            today_intervals: Vec::new(),
+            health: HealthSnapshot::default(),
         }
     }
 }

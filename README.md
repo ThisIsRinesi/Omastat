@@ -115,16 +115,17 @@ packaging/arch/PKGBUILD
 
 It expects a release tarball named `omastat-0.1.0.tar.gz`.
 
-## Omarchy Widget
+## Omarchy Quattro Plugin
 
-A repository-contained Omarchy shell plugin lives at:
+A repository-contained Omarchy Quattro/Quickshell plugin lives at:
 
 ```text
 packaging/omarchy/omastat/
 ```
 
 It reads `omastat --json today`, shows the top focused app and today's total
-focused time, and opens `omastat today` in a terminal on click.
+focused time, and opens a native Omarchy popup on click. Middle-click opens the
+TUI in a held terminal; right-click refreshes.
 
 Install it into your user plugin directory when you want to try it:
 
@@ -132,4 +133,6 @@ Install it into your user plugin directory when you want to try it:
 mkdir -p ~/.config/omarchy/plugins/local.omastat
 cp packaging/omarchy/omastat/* ~/.config/omarchy/plugins/local.omastat/
 omarchy plugin rescan
+omarchy plugin enable local.omastat
+omarchy bar plugin add local.omastat right
 ```

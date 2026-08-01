@@ -29,6 +29,22 @@ pub struct DayTotals {
 }
 
 #[derive(Debug, Clone)]
+pub struct TimelineInterval {
+    pub kind: IntervalKind,
+    pub app_class: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StorageStatus {
+    pub interval_count: i64,
+    pub last_event_at: Option<i64>,
+    pub focused_active: i64,
+    pub open_active: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ActiveInterval {
     pub id: i64,
     pub kind: IntervalKind,
@@ -255,6 +271,40 @@ impl Storage {
         Ok(output)
     }
 
+    pub fn timeline_for_today(&self) -> Result<Vec<TimelineInterval>> {
+        let now = Local::now();
+        let start = Local
+            .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+            .single()
+            .context("failed to compute local day start")?
+            .timestamp();
+        self.timeline_between(start, now.timestamp())
+    }
+
+    pub fn usage_status(&self) -> Result<StorageStatus> {
+        self.conn
+            .query_row(
+                "
+                SELECT
+                    COUNT(*),
+                    MAX(COALESCE(ended_at, started_at)),
+                    SUM(CASE WHEN ended_at IS NULL AND kind = 'focused' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN ended_at IS NULL AND kind = 'open' THEN 1 ELSE 0 END)
+                FROM intervals
+                ",
+                [],
+                |row| {
+                    Ok(StorageStatus {
+                        interval_count: row.get(0)?,
+                        last_event_at: row.get(1)?,
+                        focused_active: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        open_active: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    })
+                },
+            )
+            .context("failed to read storage status")
+    }
+
     pub fn total_duration(&self) -> Result<i64> {
         let now = Local::now().timestamp();
         let start: i64 = self
@@ -368,6 +418,42 @@ impl Storage {
                     app_class: row.get(0)?,
                     focused_seconds: row.get(1)?,
                     open_seconds: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn timeline_between(&self, start: i64, end: i64) -> Result<Vec<TimelineInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                kind,
+                app_class,
+                MAX(started_at, ?1) AS bounded_start,
+                MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
+            FROM intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY bounded_start ASC, bounded_end ASC, id ASC
+            ",
+        )?;
+
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                let kind = row.get::<_, String>(0)?;
+                let kind = IntervalKind::from_str(&kind).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "kind".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                Ok(TimelineInterval {
+                    kind,
+                    app_class: row.get(1)?,
+                    started_at: row.get(2)?,
+                    ended_at: row.get(3)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

@@ -1,5 +1,7 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
+import qs.Commons
 import qs.Ui
 
 BarWidget {
@@ -8,13 +10,28 @@ BarWidget {
 
   property string displayText: "Oma"
   property string tooltip: "Omastat"
+  property string statusText: "Not loaded"
+  property string errorText: ""
+  property string updatedText: ""
   property bool refreshRunning: false
+  property bool refreshQueued: false
   property var rows: []
+  property int totalFocused: 0
+  property int totalOpen: 0
+
+  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  readonly property real openPanelIndicatorWidth: button.labelWidth
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   Component.onCompleted: refresh()
+
+  onBarChanged: injectPanel()
+  onSettingsChanged: injectPanel()
+  onRowsChanged: injectPanel()
+  onStatusTextChanged: injectPanel()
+  onErrorTextChanged: injectPanel()
 
   Timer {
     interval: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 1000
@@ -30,8 +47,14 @@ BarWidget {
     onRunningChanged: root.refreshRunning = running
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        root.displayText = "Oma"
+        root.errorText = "Report command failed"
+        root.statusText = "Command failed"
+        root.displayText = "Oma !"
         root.tooltip = "Omastat report failed"
+      }
+      if (root.refreshQueued) {
+        root.refreshQueued = false
+        root.refresh()
       }
     }
 
@@ -46,62 +69,147 @@ BarWidget {
     }
   }
 
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("Panel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
+  }
+
+  IpcHandler {
+    target: "local.omastat"
+
+    function refresh(): void { root.broadcast("refresh") }
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.displayText
+    text: root.vertical ? "O" : root.displayText
     fontSize: 12
     horizontalMargin: 8
     tooltipText: root.tooltip
-    active: root.refreshRunning
+    active: root.refreshRunning || root.errorText !== ""
+
     onPressed: function(button) {
-      if (!root.bar) return
       if (button === Qt.RightButton) root.refresh()
-      else root.bar.run("xdg-terminal-exec omastat today")
+      else if (button === Qt.MiddleButton) root.openTerminalReport()
+      else root.togglePanel()
     }
   }
 
   function refresh() {
-    if (reportProcess.running) return
+    if (reportProcess.running) {
+      refreshQueued = true
+      return
+    }
+    errorText = ""
+    statusText = "Refreshing"
     reportProcess.command = shellCommand(String(root.setting("command", "omastat --json today")))
     reportProcess.running = true
   }
 
   function parseReport(text) {
+    var parsed = []
     try {
-      rows = JSON.parse(String(text || "[]"))
+      parsed = JSON.parse(String(text || "[]"))
+      if (!Array.isArray(parsed)) throw new Error("report was not an array")
     } catch (error) {
       rows = []
-      displayText = "Oma"
+      totalFocused = 0
+      totalOpen = 0
+      displayText = "Oma !"
       tooltip = "Omastat report parse failed"
+      errorText = "Report JSON parse failed"
+      statusText = "Parse failed"
       return
     }
 
-    var totalFocused = 0
-    for (var i = 0; i < rows.length; i++) totalFocused += Number(rows[i].focused_seconds || 0)
+    rows = parsed
+    totalFocused = sumSeconds(rows, "focused_seconds")
+    totalOpen = sumSeconds(rows, "open_seconds")
+    updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
 
     if (rows.length === 0 || totalFocused <= 0) {
       displayText = "Oma 0s"
       tooltip = "No focused time today"
+      statusText = "No focused time today"
+      errorText = ""
       return
     }
 
     var top = rows[0]
     displayText = shortApp(String(top.app_class || "App")) + " " + formatDuration(Number(top.focused_seconds || 0))
     tooltip = "Today: " + formatDuration(totalFocused) + " focused"
-      + "\\nTop: " + String(top.app_class || "App")
+      + "\nOpen: " + formatDuration(totalOpen)
+      + "\nTop: " + String(top.app_class || "App")
       + " (" + formatDuration(Number(top.focused_seconds || 0)) + ")"
+    statusText = rows.length + " apps tracked"
+    errorText = ""
+  }
+
+  function injectPanel() {
+    var target = panelLoader.item
+    if (!target) return
+    if ("bar" in target) target.bar = root.bar
+    if ("settings" in target) target.settings = root.settings
+    if ("anchorItem" in target) target.anchorItem = button
+    if ("hostWidget" in target) target.hostWidget = root
+    if ("rows" in target) target.rows = root.rows
+    if ("totalFocused" in target) target.totalFocused = root.totalFocused
+    if ("totalOpen" in target) target.totalOpen = root.totalOpen
+    if ("statusText" in target) target.statusText = root.statusText
+    if ("errorText" in target) target.errorText = root.errorText
+    if ("updatedText" in target) target.updatedText = root.updatedText
+  }
+
+  function open() {
+    if (panelLoader.item) panelLoader.item.open()
+  }
+
+  function close() {
+    if (panelLoader.item) panelLoader.item.close()
+  }
+
+  function togglePanel() {
+    if (panelLoader.item) panelLoader.item.toggle()
+  }
+
+  readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
+
+  function closeForPopoutSwitch() {
+    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+  }
+
+  function openTerminalReport() {
+    if (!root.bar) return
+    root.bar.run(String(root.setting("terminalCommand", "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'")))
   }
 
   function shellCommand(command) {
     var value = String(command || "").trim()
     if (value.length === 0) value = "omastat --json today"
-    return ["/bin/sh", "-lc", value]
+    return ["bash", "-lc", "PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; " + value]
+  }
+
+  function sumSeconds(list, key) {
+    var total = 0
+    for (var i = 0; i < list.length; i++) total += Number(list[i][key] || 0)
+    return Math.max(0, Math.floor(total))
   }
 
   function shortApp(app) {
-    var value = app.replace(/^com\\./, "").replace(/^org\\./, "")
+    var value = app.replace(/^com\./, "").replace(/^org\./, "")
     var parts = value.split(".")
     value = parts[parts.length - 1] || value
     return value.length > 10 ? value.substring(0, 9) + "." : value

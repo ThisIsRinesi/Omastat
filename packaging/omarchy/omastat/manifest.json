@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "rinesi",
   "license": "MIT",
-  "description": "Today focused/open app usage from local Omastat data.",
+  "description": "Native Omarchy Quattro bar widget and popup for local Omastat usage data.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
@@ -13,13 +13,14 @@
   },
   "barWidget": {
     "displayName": "Omastat",
-    "description": "Shows today's top focused app and total focused time.",
+    "description": "Shows today's top focused app, focused/open totals, and a popup with the leading apps.",
     "category": "Utilities",
-    "aliases": ["omastat", "usage"],
+    "aliases": ["omastat", "usage", "time"],
     "allowMultiple": false,
     "defaults": {
       "refreshIntervalSec": 60,
-      "command": "omastat --json today"
+      "command": "omastat --json today",
+      "terminalCommand": "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'"
     },
     "schema": [
       {
@@ -36,6 +37,12 @@
         "type": "string",
         "label": "Report command",
         "defaultValue": "omastat --json today"
+      },
+      {
+        "key": "terminalCommand",
+        "type": "string",
+        "label": "Terminal command",
+        "defaultValue": "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'"
       }
     ]
   }
