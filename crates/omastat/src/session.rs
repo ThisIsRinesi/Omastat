@@ -11,6 +11,7 @@ pub struct SessionStatus {
     pub idle: bool,
     pub locked: bool,
     pub stay_awake: bool,
+    pub audio_playing: bool,
     pub source: &'static str,
 }
 
@@ -20,6 +21,7 @@ impl Default for SessionStatus {
             idle: false,
             locked: false,
             stay_awake: false,
+            audio_playing: false,
             source: "default",
         }
     }
@@ -27,7 +29,8 @@ impl Default for SessionStatus {
 
 impl SessionStatus {
     pub fn should_pause(&self, pause_on_session_idle: bool, pause_on_session_locked: bool) -> bool {
-        (pause_on_session_idle && self.idle) || (pause_on_session_locked && self.locked)
+        (pause_on_session_locked && self.locked)
+            || (pause_on_session_idle && self.idle && !self.audio_playing)
     }
 }
 
@@ -47,11 +50,13 @@ async fn omarchy_status() -> Result<SessionStatus> {
     let idle_output = command_output("omarchy-shell", &["idle", "status"]).await?;
     let idle = parse_omarchy_idle_status(&idle_output)?;
     let locked = omarchy_locked().await.unwrap_or(false);
+    let audio_playing = audio_playing().await.unwrap_or(false);
 
     Ok(SessionStatus {
         idle: idle.idle || idle.in_idle_cycle || idle.screensaver_started,
         locked,
         stay_awake: idle.stay_awake,
+        audio_playing,
         source: "omarchy-shell",
     })
 }
@@ -77,7 +82,13 @@ async fn loginctl_status() -> Result<SessionStatus> {
     .await?;
     let mut status = parse_loginctl_status(&output);
     status.stay_awake = stay_awake_state_path().is_file();
+    status.audio_playing = audio_playing().await.unwrap_or(false);
     Ok(status)
+}
+
+async fn audio_playing() -> Result<bool> {
+    let output = command_output("pactl", &["list", "sink-inputs"]).await?;
+    Ok(parse_pactl_sink_inputs_playing(&output))
 }
 
 async fn command_output(program: &str, args: &[&str]) -> Result<String> {
@@ -125,6 +136,15 @@ fn parse_omarchy_idle_status(output: &str) -> Result<OmarchyIdleStatus> {
     serde_json::from_str(output).context("failed to parse omarchy-shell idle status JSON")
 }
 
+fn parse_pactl_sink_inputs_playing(output: &str) -> bool {
+    output.lines().any(|line| {
+        let Some((key, value)) = line.trim().split_once(':') else {
+            return false;
+        };
+        key.trim().eq_ignore_ascii_case("State") && value.trim().eq_ignore_ascii_case("RUNNING")
+    })
+}
+
 fn stay_awake_state_path() -> PathBuf {
     dirs::state_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
@@ -148,7 +168,10 @@ struct OmarchyIdleStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionStatus, parse_loginctl_status, parse_omarchy_idle_status};
+    use super::{
+        SessionStatus, parse_loginctl_status, parse_omarchy_idle_status,
+        parse_pactl_sink_inputs_playing,
+    };
 
     #[test]
     fn parses_loginctl_session_status() {
@@ -158,6 +181,7 @@ mod tests {
                 idle: true,
                 locked: false,
                 stay_awake: false,
+                audio_playing: false,
                 source: "loginctl",
             }
         );
@@ -180,9 +204,35 @@ mod tests {
             idle: true,
             locked: false,
             stay_awake: false,
+            audio_playing: false,
             source: "test",
         };
         assert!(status.should_pause(true, true));
         assert!(!status.should_pause(false, true));
+    }
+
+    #[test]
+    fn active_audio_suppresses_idle_pause_but_not_lock_pause() {
+        let mut status = SessionStatus {
+            idle: true,
+            locked: false,
+            stay_awake: false,
+            audio_playing: true,
+            source: "test",
+        };
+        assert!(!status.should_pause(true, true));
+
+        status.locked = true;
+        assert!(status.should_pause(true, true));
+    }
+
+    #[test]
+    fn parses_running_pactl_sink_inputs_as_audio_playback() {
+        assert!(parse_pactl_sink_inputs_playing(
+            "Sink Input #42\n\tState: RUNNING\n\tMute: no\n"
+        ));
+        assert!(!parse_pactl_sink_inputs_playing(
+            "Sink Input #42\n\tState: CORKED\n"
+        ));
     }
 }

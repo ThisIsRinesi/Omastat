@@ -1,5 +1,6 @@
 use crate::{
     hyprland,
+    report::{self, AppBreakdown, Lens, UsageReport},
     steam::SteamResolver,
     storage::{AppTotals, DayTotals, IntervalKind, Storage, StorageStatus, TimelineInterval},
 };
@@ -21,15 +22,12 @@ use ratatui::{
 };
 use serde_json::Value as JsonValue;
 use std::{
-    f64::consts::PI,
     fs, io,
     process::Command,
     time::{Duration, Instant},
 };
 use toml::Value as TomlValue;
 
-const LENSES: [&str; 5] = ["DAY", "WEEK", "MONTH", "YEAR", "LIFE"];
-const LENS_COUNT: usize = LENSES.len();
 const CLOCK_REFRESH: Duration = Duration::from_secs(1);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
 
@@ -62,11 +60,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
         terminal.draw(|frame| render(frame, &app))?;
 
         let refresh_deadline = app.last_refresh + AUTO_REFRESH;
-        let deadline = if refresh_deadline <= next_clock {
-            refresh_deadline
-        } else {
-            next_clock
-        };
+        let deadline = refresh_deadline.min(next_clock);
 
         if event::poll(deadline.saturating_duration_since(Instant::now()))? {
             match event::read()? {
@@ -76,19 +70,24 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
                         return Ok(());
                     }
                     KeyCode::Char('r') => app.refresh(storage)?,
+                    KeyCode::Tab => app.next_view(),
+                    KeyCode::BackTab => app.previous_view(),
+                    KeyCode::Char('p') => app.show_patterns = !app.show_patterns,
+                    KeyCode::Char('[') => app.previous_period(storage)?,
+                    KeyCode::Char(']') => app.next_period(storage)?,
                     KeyCode::Left | KeyCode::Char('h') => app.previous_lens(storage)?,
                     KeyCode::Right | KeyCode::Char('l') => app.next_lens(storage)?,
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-                    KeyCode::PageUp => app.move_selection(-6),
-                    KeyCode::PageDown => app.move_selection(6),
+                    KeyCode::PageUp => app.move_selection(-8),
+                    KeyCode::PageDown => app.move_selection(8),
                     KeyCode::Home => app.select_first(),
                     KeyCode::End => app.select_last(),
-                    KeyCode::Char('1') => app.set_lens(storage, 0)?,
-                    KeyCode::Char('2') => app.set_lens(storage, 1)?,
-                    KeyCode::Char('3') => app.set_lens(storage, 2)?,
-                    KeyCode::Char('4') => app.set_lens(storage, 3)?,
-                    KeyCode::Char('5') => app.set_lens(storage, 4)?,
+                    KeyCode::Char('1') => app.set_lens(storage, Lens::Day)?,
+                    KeyCode::Char('2') => app.set_lens(storage, Lens::Week)?,
+                    KeyCode::Char('3') => app.set_lens(storage, Lens::Month)?,
+                    KeyCode::Char('4') => app.set_lens(storage, Lens::Year)?,
+                    KeyCode::Char('5') => app.set_lens(storage, Lens::Life)?,
                     _ => {}
                 },
                 Event::Resize(_, _) => {}
@@ -107,110 +106,176 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    Overview,
+    Apps,
+    Timeline,
+    System,
+}
+
+impl View {
+    const ALL: [Self; 4] = [Self::Overview, Self::Apps, Self::Timeline, Self::System];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Apps => "Apps",
+            Self::Timeline => "Timeline",
+            Self::System => "System",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Overview => 0,
+            Self::Apps => 1,
+            Self::Timeline => 2,
+            Self::System => 3,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len() - 1)]
+    }
+
+    fn next(self) -> Self {
+        Self::from_index((self.index() + 1) % Self::ALL.len())
+    }
+
+    fn previous(self) -> Self {
+        if self.index() == 0 {
+            Self::System
+        } else {
+            Self::from_index(self.index() - 1)
+        }
+    }
+}
+
 #[derive(Debug)]
 struct App {
-    lens: usize,
+    view: View,
+    lens: Lens,
+    period_offset: i32,
     selected: usize,
+    show_patterns: bool,
     last_refresh: Instant,
     loaded_at: DateTime<Local>,
     theme: Theme,
     steam: SteamResolver,
-    totals: [Option<Vec<AppTotals>>; LENS_COUNT],
-    days: Vec<DayTotals>,
+    report: UsageReport,
+    lens_totals: [Option<(i64, i64)>; 5],
     today_intervals: Vec<TimelineInterval>,
     health: HealthSnapshot,
 }
 
 impl App {
     fn load(storage: &Storage) -> Result<Self> {
-        let mut app = Self {
-            lens: 0,
+        let mut steam = SteamResolver::default();
+        let lens = Lens::Day;
+        let report = report::usage_report_for_period(storage, &mut steam, lens, 0)?;
+        let lens_totals = load_lens_totals(storage, &mut steam);
+        let today_intervals = resolve_today_intervals(storage, &mut steam)?;
+
+        Ok(Self {
+            view: View::Overview,
+            lens,
+            period_offset: 0,
             selected: 0,
+            show_patterns: false,
             last_refresh: Instant::now(),
             loaded_at: Local::now(),
             theme: Theme::load(),
-            steam: SteamResolver::default(),
-            totals: std::array::from_fn(|_| None),
-            days: Vec::new(),
-            today_intervals: Vec::new(),
-            health: HealthSnapshot::default(),
-        };
-        app.load_lens(storage, 0)?;
-        app.refresh_supplemental(storage)?;
-        Ok(app)
+            steam,
+            report,
+            lens_totals,
+            today_intervals,
+            health: HealthSnapshot::load(storage),
+        })
     }
 
     fn refresh(&mut self, storage: &Storage) -> Result<()> {
-        self.load_lens(storage, self.lens)?;
-        self.refresh_supplemental(storage)?;
+        self.report = report::usage_report_for_period(
+            storage,
+            &mut self.steam,
+            self.lens,
+            self.period_offset,
+        )?;
+        self.lens_totals = load_lens_totals(storage, &mut self.steam);
+        self.today_intervals = resolve_today_intervals(storage, &mut self.steam)?;
+        self.health = HealthSnapshot::load(storage);
+        self.loaded_at = Local::now();
+        self.last_refresh = Instant::now();
         self.clamp_selection();
         Ok(())
     }
 
     fn rows(&self) -> &[AppTotals] {
-        self.totals[self.lens].as_deref().unwrap_or(&[])
+        &self.report.rows
     }
 
-    fn lens_label(&self) -> &'static str {
-        LENSES[self.lens]
+    fn next_view(&mut self) {
+        self.view = self.view.next();
     }
 
-    fn lens_total(&self, lens: usize) -> Option<i64> {
-        self.totals
-            .get(lens)
-            .and_then(|rows| rows.as_ref())
-            .map(|rows| focused_total(rows))
+    fn previous_view(&mut self) {
+        self.view = self.view.previous();
     }
 
     fn previous_lens(&mut self, storage: &Storage) -> Result<()> {
-        let lens = if self.lens == 0 {
-            LENSES.len() - 1
-        } else {
-            self.lens - 1
-        };
-        self.set_lens(storage, lens)
+        self.set_lens(storage, self.lens.previous())
     }
 
     fn next_lens(&mut self, storage: &Storage) -> Result<()> {
-        self.set_lens(storage, (self.lens + 1) % LENSES.len())
+        self.set_lens(storage, self.lens.next())
     }
 
-    fn set_lens(&mut self, storage: &Storage, lens: usize) -> Result<()> {
-        self.lens = lens.min(LENSES.len() - 1);
-        if self.totals[self.lens].is_none() {
-            self.load_lens(storage, self.lens)?;
+    fn previous_period(&mut self, storage: &Storage) -> Result<()> {
+        if self.lens == Lens::Life {
+            return Ok(());
         }
+        self.period_offset -= 1;
+        self.report = report::usage_report_for_period(
+            storage,
+            &mut self.steam,
+            self.lens,
+            self.period_offset,
+        )?;
+        self.loaded_at = Local::now();
+        self.last_refresh = Instant::now();
         self.clamp_selection();
         Ok(())
     }
 
-    fn load_lens(&mut self, storage: &Storage, lens: usize) -> Result<()> {
-        let rows = match lens {
-            0 => storage.totals_for_today()?,
-            1 => storage.totals_for_week()?,
-            2 => storage.totals_for_month()?,
-            3 => storage.totals_for_year()?,
-            _ => storage.totals_all_time()?,
-        };
-        self.totals[lens] = Some(self.steam.resolve_totals(rows));
+    fn next_period(&mut self, storage: &Storage) -> Result<()> {
+        if self.lens == Lens::Life || self.period_offset >= 0 {
+            return Ok(());
+        }
+        self.period_offset += 1;
+        self.report = report::usage_report_for_period(
+            storage,
+            &mut self.steam,
+            self.lens,
+            self.period_offset,
+        )?;
         self.loaded_at = Local::now();
         self.last_refresh = Instant::now();
+        self.clamp_selection();
         Ok(())
     }
 
-    fn refresh_supplemental(&mut self, storage: &Storage) -> Result<()> {
-        self.days = storage.daily_totals(14)?;
-        self.today_intervals = storage
-            .timeline_for_today()?
-            .into_iter()
-            .map(|mut interval| {
-                interval.app_class = self.steam.resolve_class(&interval.app_class);
-                interval
-            })
-            .collect();
-        self.health = HealthSnapshot::load(storage);
+    fn set_lens(&mut self, storage: &Storage, lens: Lens) -> Result<()> {
+        self.lens = lens;
+        self.period_offset = 0;
+        self.report = report::usage_report_for_period(
+            storage,
+            &mut self.steam,
+            self.lens,
+            self.period_offset,
+        )?;
         self.loaded_at = Local::now();
         self.last_refresh = Instant::now();
+        self.clamp_selection();
         Ok(())
     }
 
@@ -220,7 +285,6 @@ impl App {
             self.selected = 0;
             return;
         }
-
         self.selected = (self.selected as isize + delta).clamp(0, len as isize - 1) as usize;
     }
 
@@ -235,6 +299,31 @@ impl App {
     fn clamp_selection(&mut self) {
         self.selected = self.selected.min(self.rows().len().saturating_sub(1));
     }
+}
+
+fn load_lens_totals(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+) -> [Option<(i64, i64)>; Lens::ALL.len()] {
+    std::array::from_fn(|index| {
+        let rows = report::rows_for_lens(storage, Lens::from_index(index)).ok()?;
+        let rows = steam.resolve_totals(rows);
+        Some((report::focused_total(&rows), report::open_total(&rows)))
+    })
+}
+
+fn resolve_today_intervals(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+) -> Result<Vec<TimelineInterval>> {
+    storage
+        .timeline_for_today()?
+        .into_iter()
+        .map(|mut interval| {
+            interval.app_class = steam.resolve_class(&interval.app_class);
+            Ok(interval)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -275,7 +364,7 @@ impl HealthSnapshot {
         match self.storage.last_event_at {
             Some(timestamp) => format!(
                 "{} ago",
-                duration_compact(Local::now().timestamp() - timestamp)
+                compact_duration(Local::now().timestamp() - timestamp)
             ),
             None => "never".to_string(),
         }
@@ -286,8 +375,11 @@ impl HealthSnapshot {
             return "empty db".to_string();
         }
         format!(
-            "{} focus / {} open",
-            self.storage.focused_active, self.storage.open_active
+            "{} focus / {} open / {} idle / {} locked",
+            self.storage.focused_active,
+            self.storage.open_active,
+            self.storage.idle_active,
+            self.storage.locked_active
         )
     }
 }
@@ -329,7 +421,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     let [header, body, footer] = *Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Min(12),
             Constraint::Length(1),
         ])
@@ -339,10 +431,11 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     };
 
     render_header(frame, header, app, theme);
-    if area.width < 82 {
-        render_compact(frame, body, app, theme);
-    } else {
-        render_dashboard(frame, body, app, theme);
+    match app.view {
+        View::Overview => render_overview(frame, body, app, theme),
+        View::Apps => render_apps_view(frame, body, app, theme),
+        View::Timeline => render_timeline_view(frame, body, app, theme),
+        View::System => render_system_view(frame, body, app, theme),
     }
     render_footer(frame, footer, app, theme);
 }
@@ -351,11 +444,15 @@ fn render_tiny(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let lines = vec![
         Line::from(vec![
             Span::styled("omastat ", Style::default().fg(theme.primary)),
-            Span::styled(
-                app.lens_label(),
-                Style::default().fg(lens_color(app.lens, theme)),
-            ),
+            Span::styled(app.view.label(), Style::default().fg(theme.text)),
         ]),
+        Line::from(Span::styled(
+            app.lens.label(),
+            Style::default()
+                .fg(theme.bg)
+                .bg(lens_color(app.lens, theme))
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(Span::styled(
             "terminal too small",
             Style::default().fg(theme.muted),
@@ -365,209 +462,96 @@ fn render_tiny(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
-            .block(panel("MONITOR", theme, theme.primary))
-            .style(Style::default().bg(theme.panel)),
+            .block(panel("OMASTAT", theme, theme.primary)),
         area,
     );
 }
 
-fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    fill_area(frame, area, theme.bg);
-
-    let top_height = if area.height < 25 {
-        8
-    } else {
-        (area.height / 3).clamp(9, 12)
-    };
-    let [top, bottom] = *Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(top_height), Constraint::Min(10)])
-        .split(area)
-    else {
-        return;
-    };
-    let [flow, summary] = *Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
-        .split(top)
-    else {
-        return;
-    };
-    let [apps, side] = *Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
-        .split(bottom)
-    else {
-        return;
-    };
-
-    render_flow(frame, flow, app, theme);
-    render_replay(frame, summary, app, theme);
-    render_apps(frame, apps, app, theme);
-    render_side(frame, side, app, theme);
-}
-
-fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let show_bottom_strip = area.height >= 20;
-    let chunks = if show_bottom_strip {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(7),
-                Constraint::Min(8),
-                Constraint::Length(6),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(8), Constraint::Min(8)])
-            .split(area)
-    };
-    let top = chunks[0];
-    let apps = chunks[1];
-
-    let [flow, replay] = *Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(top)
-    else {
-        return;
-    };
-
-    render_flow(frame, flow, app, theme);
-    render_replay(frame, replay, app, theme);
-    render_apps(frame, apps, app, theme);
-
-    if show_bottom_strip {
-        let [mix, lenses] = *Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(chunks[2])
-        else {
-            return;
-        };
-        render_mix(frame, mix, app, theme);
-        render_lenses(frame, lenses, app, theme);
-    }
-}
-
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     fill_area(frame, area, theme.bg);
-
-    let rows = app.rows();
-    let focused = focused_total(rows);
-    let open = open_total(rows);
-    let density = ratio(focused, open);
-    let clock = if area.width < 72 {
+    let clock = if area.width < 86 {
         Local::now().format("%H:%M").to_string()
     } else {
         Local::now().format("%H:%M:%S").to_string()
     };
-    let mut spans = vec![
-        Span::styled(
-            " OMASTAT",
-            Style::default()
-                .fg(theme.primary)
-                .bg(theme.bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" :: ", Style::default().fg(theme.dim).bg(theme.bg)),
-    ];
 
-    if area.width < 72 {
-        spans.extend([
-            Span::styled(" ", Style::default().bg(theme.bg)),
-            Span::styled(
-                app.lens_label(),
-                Style::default()
-                    .fg(theme.bg)
-                    .bg(lens_color(app.lens, theme))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default().bg(theme.bg)),
-            Span::styled(
-                duration_compact(focused),
-                Style::default().fg(theme.warn).bg(theme.bg),
-            ),
-            Span::styled("  ", Style::default().bg(theme.bg)),
-            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
-        ]);
-    } else if area.width < 96 {
-        spans.extend([
-            Span::styled(" lens ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(
-                format!(" {} ", app.lens_label()),
-                Style::default()
-                    .fg(theme.bg)
-                    .bg(lens_color(app.lens, theme))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(
-                format_duration(focused),
-                Style::default().fg(theme.warn).bg(theme.bg),
-            ),
-            Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(
-                format_duration(open),
-                Style::default().fg(theme.secondary).bg(theme.bg),
-            ),
-            Span::styled("  ", Style::default().bg(theme.bg)),
-            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
-        ]);
-    } else {
-        for (index, label) in LENSES.iter().enumerate() {
-            let selected = index == app.lens;
-            spans.push(Span::styled(
-                format!(" {label} "),
-                Style::default()
-                    .fg(if selected {
-                        theme.bg
-                    } else {
-                        lens_color(index, theme)
-                    })
-                    .bg(if selected {
-                        lens_color(index, theme)
-                    } else {
-                        theme.bg
-                    })
-                    .add_modifier(if selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ));
-        }
-        spans.extend([
-            Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(
-                format_duration(focused),
-                Style::default().fg(theme.warn).bg(theme.bg),
-            ),
-            Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(
-                format_duration(open),
-                Style::default().fg(theme.secondary).bg(theme.bg),
-            ),
-            Span::styled("  density ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(
-                percent(density),
-                Style::default().fg(theme.tertiary).bg(theme.bg),
-            ),
-            Span::styled("  updated ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(
-                app.loaded_at.format("%H:%M:%S").to_string(),
-                Style::default().fg(theme.muted).bg(theme.bg),
-            ),
-            Span::styled("  now ", Style::default().fg(theme.dim).bg(theme.bg)),
-            Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
-        ]);
+    let mut first = vec![Span::styled(
+        " 󰔟 OMASTAT ",
+        Style::default()
+            .fg(theme.primary)
+            .bg(theme.bg)
+            .add_modifier(Modifier::BOLD),
+    )];
+    first.push(Span::styled(" ", Style::default().bg(theme.bg)));
+    for view in View::ALL {
+        let selected = view == app.view;
+        first.push(Span::styled(
+            format!(" {} ", view.label()),
+            Style::default()
+                .fg(if selected { theme.bg } else { theme.muted })
+                .bg(if selected { theme.primary } else { theme.bg })
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
     }
+
+    let mut second = Vec::new();
+    second.push(Span::styled(" ", Style::default().bg(theme.bg)));
+    for lens in Lens::ALL {
+        let selected = lens == app.lens;
+        let color = lens_color(lens, theme);
+        second.push(Span::styled(
+            format!(" {} ", lens.label()),
+            Style::default()
+                .fg(if selected { theme.bg } else { color })
+                .bg(if selected { color } else { theme.bg })
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+    }
+    second.extend([
+        Span::styled("  period ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(
+            fit_text(&app.report.period.label, 22),
+            Style::default().fg(theme.text).bg(theme.bg),
+        ),
+        Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(
+            report::format_duration(app.report.total_focused_seconds),
+            Style::default().fg(theme.warn).bg(theme.bg),
+        ),
+        Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(
+            report::format_duration(app.report.total_open_seconds),
+            Style::default().fg(theme.secondary).bg(theme.bg),
+        ),
+        Span::styled("  density ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(
+            report::percent(ratio(
+                app.report.total_focused_seconds,
+                app.report.total_open_seconds,
+            )),
+            Style::default().fg(theme.tertiary).bg(theme.bg),
+        ),
+        Span::styled("  updated ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(
+            app.loaded_at.format("%H:%M:%S").to_string(),
+            Style::default().fg(theme.muted).bg(theme.bg),
+        ),
+        Span::styled("  now ", Style::default().fg(theme.dim).bg(theme.bg)),
+        Span::styled(clock, Style::default().fg(theme.text).bg(theme.bg)),
+    ]);
 
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(spans),
+            Line::from(first),
+            Line::from(second),
             Line::from(Span::styled(
                 rule(area.width as usize),
                 Style::default().fg(theme.border).bg(theme.bg),
@@ -580,20 +564,21 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     fill_area(frame, area, theme.bg);
-
-    let mode = format!("{} {}", app.lens + 1, app.lens_label());
-    let full_left = format!(" h/l lens  j/k select  pg jump  r refresh  q quit  [{mode}]");
-    let compact_left = format!(" h/l lens  j/k select  r refresh  q quit  [{mode}]");
-    let tiny_left = format!(" {mode}  r refresh  q quit");
-    let right = format!("{}s refresh", AUTO_REFRESH.as_secs());
-    let width = area.width as usize;
-    let left = if full_left.chars().count() + right.chars().count() <= width {
-        full_left
-    } else if compact_left.chars().count() + right.chars().count() <= width {
-        compact_left
+    let period_hint = if app.lens == Lens::Life {
+        "life".to_string()
+    } else if app.period_offset == 0 {
+        "current".to_string()
     } else {
-        tiny_left
+        format!("{} back", app.period_offset.abs())
     };
+    let left = format!(
+        " Tab view  h/l lens  [/] period  1-5 lens  j/k select  p patterns  r refresh  q quit  [{} / {} / {}]",
+        app.view.label(),
+        app.lens.label(),
+        period_hint
+    );
+    let right = format!("{}s auto", AUTO_REFRESH.as_secs());
+    let width = area.width as usize;
     let left_len = left.chars().count();
     let right_len = right.chars().count();
     let mut spans = Vec::new();
@@ -617,132 +602,119 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         ));
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_flow(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    fill_area(frame, area, theme.panel);
-
-    let block = panel("timeline", theme, theme.primary);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    fill_area(frame, area, theme.bg);
+    if area.width < 86 {
+        let [hero, apps, trend] = *Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Min(8),
+                Constraint::Length(7),
+            ])
+            .split(area)
+        else {
+            return;
+        };
+        render_hero(frame, hero, app, theme);
+        render_breakdown(frame, apps, app, theme);
+        render_trend(frame, trend, app, theme);
         return;
     }
 
-    let graph_height = inner.height.saturating_sub(2).max(1) as usize;
-    let mut lines = day_graph(&app.days, inner.width as usize, graph_height, theme);
-    lines.push(day_footer(&app.days, inner.width as usize, theme));
-    lines.push(Line::from(Span::styled(
-        rule(inner.width as usize),
-        Style::default().fg(theme.dim).bg(theme.panel),
-    )));
+    let [hero, rest] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(10)])
+        .split(area)
+    else {
+        return;
+    };
+    let [left, right] = *Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(rest)
+    else {
+        return;
+    };
+    let [breakdown, trend] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(left)
+    else {
+        return;
+    };
+    let [insights, lenses] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(right)
+    else {
+        return;
+    };
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(theme.panel))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    render_hero(frame, hero, app, theme);
+    render_breakdown(frame, breakdown, app, theme);
+    render_trend(frame, trend, app, theme);
+    render_insights(frame, insights, app, theme);
+    render_lens_totals(frame, lenses, app, theme);
 }
 
-fn render_replay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    fill_area(frame, area, theme.panel);
-
-    let block = panel("replay", theme, theme.secondary);
+fn render_hero(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel(&app.report.period.label, theme, lens_color(app.lens, theme));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let rows = app.rows();
-    let focused = focused_total(rows);
-    let open = open_total(rows);
-    let top = rows
+    let density = ratio(
+        app.report.total_focused_seconds,
+        app.report.total_open_seconds,
+    );
+    let top = app
+        .report
+        .apps
         .first()
-        .map(|row| short_app(&row.app_class, inner.width.saturating_sub(12) as usize))
-        .unwrap_or_else(|| "no signal".to_string());
-    let best = best_focus_day(&app.days)
-        .map(|day| format!("{} {}", day.label, duration_compact(day.focused_seconds)))
-        .unwrap_or_else(|| "no focus".to_string());
-    let meter_width = inner.width.saturating_sub(13).max(4) as usize;
-    let selected_app = rows.get(app.selected).map(|row| row.app_class.as_str());
-    let width = inner.width as usize;
-
-    let mut lines = vec![
+        .map(|app| app.label.clone())
+        .unwrap_or_else(|| "no app focus yet".to_string());
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "󰔟 {}",
+                    report::format_duration(app.report.total_focused_seconds)
+                ),
+                Style::default()
+                    .fg(theme.warn)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" focused", Style::default().fg(theme.dim).bg(theme.panel)),
+        ]),
+        Line::from(vec![
+            Span::styled("open ", Style::default().fg(theme.dim).bg(theme.panel)),
+            Span::styled(
+                report::format_duration(app.report.total_open_seconds),
+                Style::default().fg(theme.secondary).bg(theme.panel),
+            ),
+            Span::styled("  density ", Style::default().fg(theme.dim).bg(theme.panel)),
+            Span::styled(
+                report::percent(density),
+                Style::default().fg(theme.tertiary).bg(theme.panel),
+            ),
+            Span::styled("  top ", Style::default().fg(theme.dim).bg(theme.panel)),
+            Span::styled(top, Style::default().fg(theme.primary).bg(theme.panel)),
+        ]),
         Line::from(Span::styled(
-            format_duration(focused),
-            Style::default()
-                .fg(theme.warn)
-                .bg(theme.panel)
-                .add_modifier(Modifier::BOLD),
+            fit_text(
+                &format!(
+                    "{} apps tracked across {}",
+                    app.report.rows.len(),
+                    app.report.period.label
+                ),
+                inner.width as usize,
+            ),
+            Style::default().fg(theme.muted).bg(theme.panel),
         )),
-        timeline_line(
-            "today",
-            &app.today_intervals,
-            rows,
-            selected_app,
-            width,
-            theme,
-        ),
-        meter_line(
-            "focus",
-            ratio(focused, open.max(focused)),
-            meter_width,
-            theme.warn,
-            theme,
-        ),
-        meter_line(
-            "dense",
-            ratio(focused, open),
-            meter_width,
-            theme.tertiary,
-            theme,
-        ),
-        metric_line("open", &format_duration(open), theme.secondary, theme),
-        metric_line("top", top.trim(), theme.primary, theme),
-        metric_line("best", &best, theme.success, theme),
     ];
-
-    lines.extend([
-        metric_line_fit(
-            "days",
-            &format!("{}/{} days", active_days(&app.days), app.days.len().max(1)),
-            width,
-            theme.tertiary,
-            theme,
-        ),
-        metric_line_fit(
-            "daemon",
-            &app.health.service_state,
-            width,
-            app.health.service_color(theme),
-            theme,
-        ),
-        metric_line_fit(
-            "db",
-            &app.health.last_event_label(),
-            width,
-            theme.muted,
-            theme,
-        ),
-        metric_line_fit(
-            "live",
-            &app.health.live_label(),
-            width,
-            theme.primary,
-            theme,
-        ),
-        metric_line_fit(
-            "hypr",
-            &app.health.socket_state,
-            width,
-            app.health.socket_color(theme),
-            theme,
-        ),
-    ]);
-
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(theme.panel))
@@ -751,155 +723,44 @@ fn render_replay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-fn render_apps(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    fill_area(frame, area, theme.panel);
-
-    let block = panel("apps", theme, theme.warn);
+fn render_breakdown(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("app breakdown", theme, theme.warn);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
 
-    let rows = app.rows();
-    if rows.is_empty() {
-        let mut lines = vec![Line::from(Span::styled(
-            "waiting for app intervals",
+    let mut lines = Vec::new();
+    if app.report.apps.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "waiting for focused app time",
             Style::default().fg(theme.muted).bg(theme.panel),
-        ))];
-        lines.extend([
-            metric_line_fit(
-                "daemon",
-                &app.health.service_state,
-                inner.width as usize,
-                app.health.service_color(theme),
-                theme,
-            ),
-            metric_line_fit(
-                "db",
-                &app.health.last_event_label(),
-                inner.width as usize,
-                theme.muted,
-                theme,
-            ),
-            metric_line_fit(
-                "live",
-                &app.health.live_label(),
-                inner.width as usize,
-                theme.primary,
-                theme,
-            ),
-            metric_line_fit(
-                "hypr",
-                &app.health.socket_state,
-                inner.width as usize,
-                app.health.socket_color(theme),
-                theme,
-            ),
-        ]);
-        lines.extend(texture_lines(
-            inner.width as usize,
-            inner.height.saturating_sub(lines.len() as u16) as usize,
-            theme,
-        ));
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(theme.panel))
-                .wrap(Wrap { trim: false }),
-            inner,
-        );
-        return;
-    }
-
-    let width = inner.width as usize;
-    let total = focused_total(rows).max(1);
-    let max_focus = rows
-        .first()
-        .map(|row| row.focused_seconds.max(1))
-        .unwrap_or(1);
-    let expanded = inner.height >= 14 && width >= 58;
-    let row_height = if expanded { 2 } else { 1 };
-    let visible_rows = inner.height.saturating_sub(1).max(1) as usize / row_height.max(1);
-    let visible_rows = visible_rows.max(1);
-    let start_index = if app.selected >= visible_rows {
-        app.selected + 1 - visible_rows
+        )));
     } else {
-        0
-    };
-    let mut lines = vec![apps_header(width, theme)];
-
-    for (index, row) in rows.iter().enumerate().skip(start_index) {
-        if lines.len() >= inner.height as usize {
-            break;
-        }
-
-        let selected = index == app.selected;
-        lines.push(app_main_line(
-            index, row, selected, max_focus, total, width, theme,
-        ));
-        if expanded && lines.len() < inner.height as usize {
-            lines.push(app_detail_line(row, selected, max_focus, width, theme));
-        }
-    }
-
-    if lines.len() < inner.height as usize {
-        lines.extend(texture_lines(
-            width,
-            inner.height as usize - lines.len(),
+        lines.push(share_bar(
+            &app.report.apps,
+            inner.width as usize,
+            theme.panel,
             theme,
         ));
+        lines.push(Line::from(Span::styled(
+            rule(inner.width as usize),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        )));
+        for (index, app) in app
+            .report
+            .apps
+            .iter()
+            .take(inner.height.saturating_sub(2) as usize)
+            .enumerate()
+        {
+            lines.push(app_breakdown_line(index, app, inner.width as usize, theme));
+        }
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(theme.panel))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
-}
-
-fn render_side(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    if area.width < 20 || area.height < 8 {
-        return;
-    }
-
-    if area.height < 16 {
-        let [mix, lenses] = *Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(area)
-        else {
-            return;
-        };
-        render_mix(frame, mix, app, theme);
-        render_lenses(frame, lenses, app, theme);
-        return;
-    }
-
-    let [mix, lenses, days] = *Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(11),
-            Constraint::Length(8),
-            Constraint::Min(5),
-        ])
-        .split(area)
-    else {
-        return;
-    };
-
-    render_mix(frame, mix, app, theme);
-    render_lenses(frame, lenses, app, theme);
-    render_days(frame, days, app, theme);
-}
-
-fn render_mix(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    fill_area(frame, area, theme.panel);
-
-    let block = panel("mix", theme, theme.tertiary);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let lines = focus_mix_lines(
-        app.rows(),
-        app.selected,
+    pad_lines(
+        &mut lines,
         inner.width as usize,
         inner.height as usize,
         theme,
@@ -912,45 +773,118 @@ fn render_mix(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-fn render_lenses(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    fill_area(frame, area, theme.panel);
-
-    let block = panel("lenses", theme, theme.primary);
+fn render_trend(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel(
+        if app.show_patterns {
+            "patterns"
+        } else {
+            "trend"
+        },
+        theme,
+        theme.success,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let max_total = (0..LENSES.len())
-        .filter_map(|index| app.lens_total(index))
+    let mut lines = daily_bar_lines(&app.report.daily, inner.width as usize, theme);
+    if app.show_patterns {
+        for row in &app.report.insights {
+            lines.push(metric_line(
+                &row.label,
+                &row.value,
+                inner.width as usize,
+                theme.primary,
+                theme,
+            ));
+        }
+    }
+    pad_lines(
+        &mut lines,
+        inner.width as usize,
+        inner.height as usize,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_insights(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("insights", theme, theme.primary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = if app.report.insights.is_empty() {
+        vec![Line::from(Span::styled(
+            "No patterns yet for this lens",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ))]
+    } else {
+        app.report
+            .insights
+            .iter()
+            .map(|row| {
+                metric_line(
+                    &row.label,
+                    &row.value,
+                    inner.width as usize,
+                    theme.text,
+                    theme,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    pad_lines(
+        &mut lines,
+        inner.width as usize,
+        inner.height as usize,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+}
+
+fn render_lens_totals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("lenses", theme, theme.secondary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let max = app
+        .lens_totals
+        .iter()
+        .filter_map(|total| total.map(|(focused, _)| focused))
         .max()
-        .unwrap_or(0)
+        .unwrap_or(1)
         .max(1);
     let width = inner.width as usize;
-    let bar_width = width.saturating_sub(14).max(3);
+    let bar_width = width.saturating_sub(20).max(4);
     let mut lines = Vec::new();
 
-    for (index, label) in LENSES.iter().enumerate().take(inner.height as usize) {
-        let selected = index == app.lens;
+    for lens in Lens::ALL.into_iter().take(inner.height as usize) {
+        let index = lens.index();
+        let selected = lens == app.lens;
         let bg = if selected {
             theme.selection
         } else {
             theme.panel
         };
-        let color = lens_color(index, theme);
+        let color = lens_color(lens, theme);
+        let focused = app.lens_totals[index].map(|total| total.0).unwrap_or(0);
         let mut spans = vec![
             Span::styled(
                 if selected { ">" } else { " " },
-                Style::default().fg(color).bg(bg).add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+                Style::default().fg(color).bg(bg),
             ),
             Span::styled(
                 format!("{} ", index + 1),
                 Style::default().fg(theme.dim).bg(bg),
             ),
             Span::styled(
-                fit_text(label, 5),
+                fit_text(lens.label(), 5),
                 Style::default()
                     .fg(if selected { theme.text } else { color })
                     .bg(bg)
@@ -962,26 +896,20 @@ fn render_lenses(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
             ),
             Span::styled(" ", Style::default().bg(bg)),
         ];
-        let total = app.lens_total(index);
-        spans.extend(bar_spans(
-            ratio(total.unwrap_or(0), max_total),
-            bar_width,
-            color,
-            bg,
-            theme,
-        ));
+        spans.extend(bar_spans(ratio(focused, max), bar_width, color, bg, theme));
         spans.push(Span::styled(
-            format!(
-                " {}",
-                total
-                    .map(duration_compact)
-                    .unwrap_or_else(|| " --".to_string())
-            ),
+            format!(" {}", compact_duration(focused)),
             Style::default().fg(theme.muted).bg(bg),
         ));
         lines.push(Line::from(spans));
     }
 
+    pad_lines(
+        &mut lines,
+        inner.width as usize,
+        inner.height as usize,
+        theme,
+    );
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(theme.panel))
@@ -990,57 +918,438 @@ fn render_lenses(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-fn render_days(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    fill_area(frame, area, theme.panel);
+fn render_apps_view(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    if area.width < 96 {
+        render_app_table(frame, area, app, theme);
+        return;
+    }
+    let [table, detail] = *Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area)
+    else {
+        return;
+    };
+    render_app_table(frame, table, app, theme);
+    render_app_detail(frame, detail, app, theme);
+}
 
-    let block = panel("days", theme, theme.success);
+fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("apps", theme, theme.warn);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let rows = app.rows();
+    let width = inner.width as usize;
+    let total = app.report.total_focused_seconds.max(1);
+    let max_focus = rows
+        .iter()
+        .map(|row| row.focused_seconds)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut lines = vec![apps_header(width, theme)];
 
-    let max = app
-        .days
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No focused app time for this lens",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        )));
+    } else {
+        let visible = inner.height.saturating_sub(1).max(1) as usize;
+        let start = if app.selected >= visible {
+            app.selected + 1 - visible
+        } else {
+            0
+        };
+        for (index, row) in rows.iter().enumerate().skip(start) {
+            if lines.len() >= inner.height as usize {
+                break;
+            }
+            lines.push(app_row_line(
+                index,
+                row,
+                index == app.selected,
+                max_focus,
+                total,
+                width,
+                theme,
+            ));
+        }
+    }
+
+    pad_lines(&mut lines, width, inner.height as usize, theme);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("selected", theme, theme.primary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let row = app.rows().get(app.selected);
+    let mut lines = Vec::new();
+    if let Some(row) = row {
+        let share = ratio(row.focused_seconds, app.report.total_focused_seconds.max(1));
+        let density = ratio(row.focused_seconds, row.open_seconds);
+        lines.extend([
+            Line::from(Span::styled(
+                fit_text(&report::app_label(&row.app_class), inner.width as usize),
+                Style::default()
+                    .fg(theme.primary)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            metric_line(
+                "Focused",
+                &report::format_duration(row.focused_seconds),
+                inner.width as usize,
+                theme.warn,
+                theme,
+            ),
+            metric_line(
+                "Open",
+                &report::format_duration(row.open_seconds),
+                inner.width as usize,
+                theme.secondary,
+                theme,
+            ),
+            metric_line(
+                "Share",
+                &report::percent(share),
+                inner.width as usize,
+                theme.tertiary,
+                theme,
+            ),
+            metric_line(
+                "Density",
+                &report::percent(density),
+                inner.width as usize,
+                theme.success,
+                theme,
+            ),
+            Line::from(Span::styled(
+                rule(inner.width as usize),
+                Style::default().fg(theme.dim).bg(theme.panel),
+            )),
+            timeline_line(
+                &app.today_intervals,
+                app.rows(),
+                Some(row.app_class.as_str()),
+                inner.width as usize,
+                theme,
+            ),
+        ]);
+    } else {
+        lines.push(Line::from(Span::styled(
+            "No selected app",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        )));
+    }
+
+    pad_lines(
+        &mut lines,
+        inner.width as usize,
+        inner.height as usize,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn render_timeline_view(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let [map, list] = *Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(8)])
+        .split(area)
+    else {
+        return;
+    };
+    render_timeline_map(frame, map, app, theme);
+    render_interval_list(frame, list, app, theme);
+}
+
+fn render_timeline_map(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("today timeline", theme, theme.primary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let selected = app
+        .rows()
+        .get(app.selected)
+        .map(|row| row.app_class.as_str());
+    let lines = vec![
+        timeline_line(
+            &app.today_intervals,
+            app.rows(),
+            selected,
+            inner.width as usize,
+            theme,
+        ),
+        Line::from(Span::styled(
+            "focused blocks use app color; open-only time is dim",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        )),
+        Line::from(Span::styled(
+            fit_text(
+                &format!(
+                    "{} intervals today, {} selected",
+                    app.today_intervals.len(),
+                    app.rows()
+                        .get(app.selected)
+                        .map(|row| report::app_label(&row.app_class))
+                        .unwrap_or_else(|| "none".to_string())
+                ),
+                inner.width as usize,
+            ),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+}
+
+fn render_interval_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("intervals", theme, theme.secondary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut intervals = app.today_intervals.clone();
+    intervals.sort_by_key(|interval| interval.started_at);
+    let width = inner.width as usize;
+    let mut lines = Vec::new();
+
+    if intervals.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No intervals recorded today",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        )));
+    } else {
+        for interval in intervals.into_iter().rev().take(inner.height as usize) {
+            lines.push(interval_line(&interval, width, app.rows(), theme));
+        }
+    }
+
+    pad_lines(&mut lines, width, inner.height as usize, theme);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_system_view(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let [left, right] = *Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(area)
+    else {
+        return;
+    };
+    render_system_health(frame, left, app, theme);
+    render_lens_totals(frame, right, app, theme);
+}
+
+fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = panel("system", theme, theme.success);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = inner.width as usize;
+    let mut lines = vec![
+        metric_line(
+            "Daemon",
+            &app.health.service_state,
+            width,
+            app.health.service_color(theme),
+            theme,
+        ),
+        metric_line(
+            "Hyprland",
+            &app.health.socket_state,
+            width,
+            app.health.socket_color(theme),
+            theme,
+        ),
+        metric_line(
+            "Last event",
+            &app.health.last_event_label(),
+            width,
+            theme.muted,
+            theme,
+        ),
+        metric_line(
+            "Live",
+            &app.health.live_label(),
+            width,
+            theme.primary,
+            theme,
+        ),
+        metric_line(
+            "Intervals",
+            &app.health.storage.interval_count.to_string(),
+            width,
+            theme.text,
+            theme,
+        ),
+        metric_line(
+            "Active",
+            &format!(
+                "{} focused / {} open / {} idle / {} locked",
+                app.health.storage.focused_active,
+                app.health.storage.open_active,
+                app.health.storage.idle_active,
+                app.health.storage.locked_active
+            ),
+            width,
+            theme.secondary,
+            theme,
+        ),
+        Line::from(Span::styled(
+            rule(width),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        )),
+        metric_line("View", app.view.label(), width, theme.primary, theme),
+        metric_line(
+            "Lens",
+            app.lens.title(),
+            width,
+            lens_color(app.lens, theme),
+            theme,
+        ),
+        metric_line("Period", &app.report.period.label, width, theme.warn, theme),
+        metric_line(
+            "Rows",
+            &app.report.rows.len().to_string(),
+            width,
+            theme.text,
+            theme,
+        ),
+        metric_line(
+            "Loaded",
+            &app.loaded_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            width,
+            theme.muted,
+            theme,
+        ),
+    ];
+    pad_lines(&mut lines, width, inner.height as usize, theme);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+}
+
+fn share_bar(
+    apps: &[AppBreakdown],
+    width: usize,
+    background: Color,
+    theme: &Theme,
+) -> Line<'static> {
+    let width = width.max(1);
+    if apps.is_empty() {
+        return Line::from(Span::styled(
+            " ".repeat(width),
+            Style::default().bg(background),
+        ));
+    }
+
+    let mut remaining = width;
+    let mut spans = Vec::new();
+    for (index, app) in apps.iter().enumerate() {
+        let last = index + 1 == apps.len();
+        let len = if last {
+            remaining
+        } else {
+            ((app.share * width as f64).round() as usize)
+                .clamp(1, remaining.saturating_sub(apps.len() - index - 1))
+        };
+        remaining = remaining.saturating_sub(len);
+        spans.push(Span::styled(
+            "█".repeat(len),
+            Style::default().fg(rank_color(index, theme)).bg(background),
+        ));
+    }
+    if remaining > 0 {
+        spans.push(Span::styled(
+            "░".repeat(remaining),
+            Style::default().fg(theme.dim).bg(background),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn app_breakdown_line(
+    index: usize,
+    app: &AppBreakdown,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let color = rank_color(index, theme);
+    let name_width = width.saturating_sub(24).max(8);
+    Line::from(vec![
+        Span::styled("● ", Style::default().fg(color).bg(theme.panel)),
+        Span::styled(
+            fit_text(&app.label, name_width),
+            Style::default().fg(theme.text).bg(theme.panel),
+        ),
+        Span::styled(
+            format!(" {:>7}", report::format_duration(app.focused_seconds)),
+            Style::default().fg(theme.warn).bg(theme.panel),
+        ),
+        Span::styled(
+            format!(" {:>4}", report::percent(app.share)),
+            Style::default().fg(theme.tertiary).bg(theme.panel),
+        ),
+    ])
+}
+
+fn daily_bar_lines(days: &[DayTotals], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let max = days
         .iter()
         .map(|day| day.focused_seconds)
         .max()
         .unwrap_or(1)
         .max(1);
-    let width = inner.width as usize;
-    let bar_width = width.saturating_sub(12).max(3);
-    let mut lines = Vec::new();
-
-    for day in app.days.iter().rev().take(inner.height as usize).rev() {
-        let mut spans = vec![
-            Span::styled(
-                fit_text(&day.label, 3),
-                Style::default().fg(theme.dim).bg(theme.panel),
-            ),
-            Span::styled(" ", Style::default().bg(theme.panel)),
-        ];
-        spans.extend(bar_spans(
-            ratio(day.focused_seconds, max),
-            bar_width,
-            theme.success,
-            theme.panel,
-            theme,
-        ));
-        spans.push(Span::styled(
-            format!(" {}", duration_compact(day.focused_seconds)),
-            Style::default().fg(theme.muted).bg(theme.panel),
-        ));
-        lines.push(Line::from(spans));
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(theme.panel))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    let bar_width = width.saturating_sub(16).max(4);
+    days.iter()
+        .rev()
+        .take(7)
+        .rev()
+        .map(|day| {
+            let mut spans = vec![
+                Span::styled(
+                    fit_text(&day.label, 3),
+                    Style::default().fg(theme.dim).bg(theme.panel),
+                ),
+                Span::styled(" ", Style::default().bg(theme.panel)),
+            ];
+            spans.extend(bar_spans(
+                ratio(day.focused_seconds, max),
+                bar_width,
+                theme.success,
+                theme.panel,
+                theme,
+            ));
+            spans.push(Span::styled(
+                format!(" {}", compact_duration(day.focused_seconds)),
+                Style::default().fg(theme.muted).bg(theme.panel),
+            ));
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn apps_header(width: usize, theme: &Theme) -> Line<'static> {
-    let name_width = width.saturating_sub(42).clamp(12, 28);
-    let bar_width = width.saturating_sub(name_width + 31).max(8);
+    let name_width = width.saturating_sub(46).clamp(12, 34);
+    let bar_width = width.saturating_sub(name_width + 34).max(6);
     Line::from(vec![
         Span::styled(" #  ", Style::default().fg(theme.dim).bg(theme.panel_alt)),
         Span::styled(
@@ -1049,17 +1358,17 @@ fn apps_header(width: usize, theme: &Theme) -> Line<'static> {
         ),
         Span::styled(" ", Style::default().bg(theme.panel_alt)),
         Span::styled(
-            fit_text("focus map", bar_width),
+            fit_text("focus", bar_width),
             Style::default().fg(theme.muted).bg(theme.panel_alt),
         ),
         Span::styled(
-            " focus share dense",
+            " focused share dense",
             Style::default().fg(theme.muted).bg(theme.panel_alt),
         ),
     ])
 }
 
-fn app_main_line(
+fn app_row_line(
     index: usize,
     row: &AppTotals,
     selected: bool,
@@ -1074,23 +1383,19 @@ fn app_main_line(
         theme.panel
     };
     let color = rank_color(index, theme);
-    let name_width = width.saturating_sub(42).clamp(12, 28);
-    let bar_width = width.saturating_sub(name_width + 31).max(8);
+    let name_width = width.saturating_sub(46).clamp(12, 34);
+    let bar_width = width.saturating_sub(name_width + 34).max(6);
     let mut spans = vec![
         Span::styled(
             if selected { ">" } else { " " },
-            Style::default().fg(color).bg(bg).add_modifier(if selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
+            Style::default().fg(color).bg(bg),
         ),
         Span::styled(
             format!("{:>2} ", index + 1),
             Style::default().fg(theme.dim).bg(bg),
         ),
         Span::styled(
-            fit_text(&short_app(&row.app_class, name_width), name_width),
+            fit_text(&report::app_label(&row.app_class), name_width),
             Style::default()
                 .fg(if selected { theme.text } else { color })
                 .bg(bg)
@@ -1110,338 +1415,134 @@ fn app_main_line(
         theme,
     ));
     spans.push(Span::styled(
-        format!(" {:>6}", duration_compact(row.focused_seconds)),
+        format!(" {:>7}", compact_duration(row.focused_seconds)),
         Style::default().fg(theme.warn).bg(bg),
     ));
     spans.push(Span::styled(
-        format!(" {}", percent(ratio(row.focused_seconds, total))),
+        format!(" {:>4}", report::percent(ratio(row.focused_seconds, total))),
         Style::default().fg(theme.tertiary).bg(bg),
     ));
     spans.push(Span::styled(
-        format!(" {}", percent(ratio(row.focused_seconds, row.open_seconds))),
+        format!(
+            " {:>4}",
+            report::percent(ratio(row.focused_seconds, row.open_seconds))
+        ),
         Style::default().fg(theme.success).bg(bg),
     ));
     Line::from(spans)
 }
 
-fn app_detail_line(
-    row: &AppTotals,
-    selected: bool,
-    max_focus: i64,
+fn interval_line(
+    interval: &TimelineInterval,
     width: usize,
+    rows: &[AppTotals],
     theme: &Theme,
 ) -> Line<'static> {
-    let bg = if selected {
-        theme.selection
+    let rank = rows
+        .iter()
+        .position(|row| row.app_class == interval.app_class)
+        .unwrap_or(usize::MAX);
+    let color = if interval.kind == IntervalKind::Focused {
+        rank_color(rank, theme)
     } else {
-        theme.panel
+        theme.dim
     };
-    let prefix = "    ";
-    let graph_width = width.saturating_sub(prefix.chars().count() + 23).max(10);
+    let kind = match interval.kind {
+        IntervalKind::Focused => "focus",
+        IntervalKind::Open => "open",
+    };
+    let start = format_clock(interval.started_at);
+    let end = format_clock(interval.ended_at);
+    let duration = compact_duration(interval.ended_at.saturating_sub(interval.started_at));
+    let name_width = width.saturating_sub(27).max(8);
     Line::from(vec![
-        Span::styled(prefix, Style::default().bg(bg)),
         Span::styled(
-            braille_meter(ratio(row.focused_seconds, max_focus), graph_width),
-            Style::default().fg(theme.dim).bg(bg),
+            format!("{start}-{end} "),
+            Style::default().fg(theme.dim).bg(theme.panel),
         ),
         Span::styled(
-            format!(" open {}", duration_compact(row.open_seconds)),
-            Style::default().fg(theme.muted).bg(bg),
+            fit_text(kind, 5),
+            Style::default().fg(color).bg(theme.panel),
         ),
-    ])
-}
-
-fn day_footer(days: &[DayTotals], width: usize, theme: &Theme) -> Line<'static> {
-    let latest = days
-        .last()
-        .map(|day| {
-            format!(
-                "{}  {} focused / {} open",
-                day.label,
-                format_duration(day.focused_seconds),
-                format_duration(day.open_seconds)
-            )
-        })
-        .unwrap_or_else(|| "no daily samples".to_string());
-    Line::from(vec![
-        Span::styled(" 14d ", Style::default().fg(theme.bg).bg(theme.primary)),
+        Span::styled(" ", Style::default().bg(theme.panel)),
         Span::styled(
-            fit_text(&format!(" {latest}"), width.saturating_sub(5)),
-            Style::default().fg(theme.muted).bg(theme.panel),
-        ),
-    ])
-}
-
-fn day_graph(days: &[DayTotals], width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
-
-    if days.is_empty() {
-        return texture_lines(width, height, theme);
-    }
-
-    let focus_max = days
-        .iter()
-        .map(|day| day.focused_seconds)
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    let open_max = days
-        .iter()
-        .map(|day| day.open_seconds)
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    let virtual_width = width * 2;
-    let virtual_height = height * 4;
-    let mut lines = Vec::with_capacity(height);
-
-    for row in 0..height {
-        let mut spans = Vec::with_capacity(width);
-        for col in 0..width {
-            let mut focus_mask = 0u16;
-            let mut open_mask = 0u16;
-            let mut color = theme.primary;
-
-            for dot_y in 0..4 {
-                for dot_x in 0..2 {
-                    let virtual_x = (col * 2 + dot_x).min(virtual_width.saturating_sub(1));
-                    let position = if virtual_width <= 1 {
-                        0.0
-                    } else {
-                        virtual_x as f64 / (virtual_width - 1) as f64
-                    };
-                    let focus = interpolated_day_ratio(days, position, focus_max, true);
-                    let open = interpolated_day_ratio(days, position, open_max, false);
-                    let virtual_y = row * 4 + dot_y;
-                    let from_bottom = virtual_height.saturating_sub(virtual_y);
-                    let focus_level = (focus * virtual_height as f64).round() as usize;
-                    let open_level = (open * virtual_height as f64).round() as usize;
-                    let bit = braille_bit(dot_x, dot_y);
-
-                    if focus_level > 0 && from_bottom <= focus_level {
-                        focus_mask |= bit;
-                        color = heat_color(focus, theme);
-                    } else if open_level > 0 && from_bottom <= open_level {
-                        open_mask |= bit;
-                    }
-                }
-            }
-
-            let (glyph, fg) = if focus_mask != 0 {
-                (braille_char(focus_mask), color)
-            } else if open_mask != 0 {
-                (braille_char(open_mask), theme.dim)
-            } else if row + 1 == height && col % 8 == 0 {
-                ("⠄".to_string(), theme.dim)
-            } else {
-                (" ".to_string(), theme.dim)
-            };
-            spans.push(Span::styled(glyph, Style::default().fg(fg).bg(theme.panel)));
-        }
-        lines.push(Line::from(spans));
-    }
-
-    lines
-}
-
-fn focus_mix_lines(
-    rows: &[AppTotals],
-    selected: usize,
-    width: usize,
-    height: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
-
-    let segments = pie_segments(rows, selected, theme);
-    if segments.is_empty() {
-        return vec![Line::from(Span::styled(
-            "no focus signal",
-            Style::default().fg(theme.muted).bg(theme.panel),
-        ))];
-    }
-
-    let chart_width = width.min(15);
-    let chart_height = height.min(7);
-    let active = segments
-        .iter()
-        .position(|segment| segment.selected)
-        .unwrap_or(0);
-    let mut lines = Vec::new();
-
-    if width >= 44 {
-        let legend_width = width.saturating_sub(chart_width + 1);
-        for y in 0..chart_height {
-            let mut spans = pie_row(&segments, active, chart_width, chart_height, y, theme);
-            spans.push(Span::styled(" ", Style::default().bg(theme.panel)));
-            if let Some(segment) = segments.get(y) {
-                spans.extend(segment_legend(segment, legend_width, theme));
-            }
-            lines.push(Line::from(spans));
-        }
-    } else {
-        let left_padding = width.saturating_sub(chart_width) / 2;
-        let right_padding = width.saturating_sub(chart_width + left_padding);
-        for y in 0..chart_height {
-            let mut spans = vec![Span::styled(
-                " ".repeat(left_padding),
-                Style::default().bg(theme.panel),
-            )];
-            spans.extend(pie_row(
-                &segments,
-                active,
-                chart_width,
-                chart_height,
-                y,
-                theme,
-            ));
-            spans.push(Span::styled(
-                " ".repeat(right_padding),
-                Style::default().bg(theme.panel),
-            ));
-            lines.push(Line::from(spans));
-        }
-        for segment in segments.iter().take(height.saturating_sub(lines.len())) {
-            lines.push(Line::from(segment_legend(segment, width, theme)));
-        }
-    }
-
-    lines.truncate(height);
-    lines
-}
-
-#[derive(Clone)]
-struct PieSegment {
-    label: String,
-    share: f64,
-    color: Color,
-    selected: bool,
-}
-
-fn pie_segments(rows: &[AppTotals], selected: usize, theme: &Theme) -> Vec<PieSegment> {
-    let total = focused_total(rows).max(1) as f64;
-    let top_count = rows.len().min(5);
-    let mut segments = Vec::new();
-
-    for (index, row) in rows.iter().take(top_count).enumerate() {
-        if row.focused_seconds <= 0 {
-            continue;
-        }
-
-        segments.push(PieSegment {
-            label: short_app(&row.app_class, 18).trim().to_string(),
-            share: row.focused_seconds as f64 / total,
-            color: rank_color(index, theme),
-            selected: index == selected,
-        });
-    }
-
-    let other_seconds = rows
-        .iter()
-        .skip(top_count)
-        .map(|row| row.focused_seconds.max(0))
-        .sum::<i64>();
-    if other_seconds > 0 {
-        segments.push(PieSegment {
-            label: "other".to_string(),
-            share: other_seconds as f64 / total,
-            color: theme.muted,
-            selected: selected >= top_count,
-        });
-    }
-
-    segments
-}
-
-fn pie_row(
-    segments: &[PieSegment],
-    active: usize,
-    width: usize,
-    height: usize,
-    row: usize,
-    theme: &Theme,
-) -> Vec<Span<'static>> {
-    let center_x = (width as f64 - 1.0) / 2.0;
-    let center_y = (height as f64 - 1.0) / 2.0;
-    let outer_x = (width as f64 / 2.0).max(1.0);
-    let outer_y = (height as f64 / 2.0).max(1.0);
-
-    (0..width)
-        .map(|col| {
-            let dx = (col as f64 - center_x) / outer_x;
-            let dy = (row as f64 - center_y) / outer_y;
-            let radius = (dx * dx + dy * dy).sqrt();
-
-            if !(0.39..=1.0).contains(&radius) {
-                return Span::styled(" ", Style::default().bg(theme.panel));
-            }
-
-            let angle = (dy.atan2(dx) + PI * 2.5) % (PI * 2.0);
-            let segment_index = pie_segment_index(segments, angle / (PI * 2.0));
-            let segment = &segments[segment_index];
-            let highlighted = segment.selected || segment_index == active;
-            let glyph = if radius > 0.84 { "▓" } else { "█" };
-            Span::styled(
-                glyph,
-                Style::default()
-                    .fg(if highlighted {
-                        theme.text
-                    } else {
-                        segment.color
-                    })
-                    .bg(theme.panel)
-                    .add_modifier(if highlighted {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            )
-        })
-        .collect()
-}
-
-fn segment_legend(segment: &PieSegment, width: usize, theme: &Theme) -> Vec<Span<'static>> {
-    let label_width = width.saturating_sub(9);
-    vec![
-        Span::styled(
-            if segment.selected { ">" } else { " " },
-            Style::default()
-                .fg(if segment.selected {
-                    theme.text
-                } else {
-                    segment.color
-                })
-                .bg(theme.panel),
-        ),
-        Span::styled("●", Style::default().fg(segment.color).bg(theme.panel)),
-        Span::styled(
-            format!(" {}", percent(segment.share)),
+            fit_text(&report::app_label(&interval.app_class), name_width),
             Style::default().fg(theme.text).bg(theme.panel),
         ),
         Span::styled(
-            format!(" {}", fit_text(&segment.label, label_width)),
+            format!(" {duration:>5}"),
             Style::default().fg(theme.muted).bg(theme.panel),
         ),
-    ]
+    ])
 }
 
-fn pie_segment_index(segments: &[PieSegment], position: f64) -> usize {
-    let total = segments.iter().map(|segment| segment.share).sum::<f64>();
-    let target = position.clamp(0.0, 1.0) * total.max(f64::EPSILON);
-    let mut cumulative = 0.0;
-
-    for (index, segment) in segments.iter().enumerate() {
-        cumulative += segment.share;
-        if target <= cumulative {
-            return index;
-        }
+fn timeline_line(
+    intervals: &[TimelineInterval],
+    rows: &[AppTotals],
+    selected_app: Option<&str>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let Some((start, end)) = today_bounds() else {
+        return Line::from(Span::styled(
+            "timeline unavailable",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ));
+    };
+    let width = width.max(1);
+    if intervals.is_empty() || end <= start {
+        return Line::from(Span::styled(
+            fit_text("no intervals today", width),
+            Style::default().fg(theme.muted).bg(theme.panel),
+        ));
     }
 
-    segments.len().saturating_sub(1)
+    let spans = (0..width)
+        .map(|col| {
+            let position = (col as f64 + 0.5) / width as f64;
+            let timestamp = start + ((end - start) as f64 * position).round() as i64;
+            let focused = intervals.iter().find(|interval| {
+                interval.kind == IntervalKind::Focused
+                    && interval.started_at <= timestamp
+                    && interval.ended_at >= timestamp
+            });
+            let open = intervals.iter().find(|interval| {
+                interval.kind == IntervalKind::Open
+                    && interval.started_at <= timestamp
+                    && interval.ended_at >= timestamp
+            });
+            let (glyph, color) = if let Some(interval) = focused {
+                let selected = selected_app == Some(interval.app_class.as_str());
+                let rank = rows
+                    .iter()
+                    .position(|row| row.app_class == interval.app_class)
+                    .unwrap_or(usize::MAX);
+                (
+                    if selected { "▓" } else { "█" },
+                    if selected {
+                        theme.text
+                    } else {
+                        rank_color(rank, theme)
+                    },
+                )
+            } else if open.is_some() {
+                ("░", theme.dim)
+            } else {
+                ("·", theme.dim)
+            };
+            Span::styled(glyph, Style::default().fg(color).bg(theme.panel))
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
+fn today_bounds() -> Option<(i64, i64)> {
+    let now = Local::now();
+    let start = Local
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+        .single()?
+        .timestamp();
+    Some((start, now.timestamp()))
 }
 
 fn panel(title: &str, theme: &Theme, accent: Color) -> Block<'static> {
@@ -1453,138 +1554,25 @@ fn panel(title: &str, theme: &Theme, accent: Color) -> Block<'static> {
         .style(Style::default().bg(theme.panel))
 }
 
-fn fill_area(frame: &mut Frame<'_>, area: Rect, color: Color) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let line = " ".repeat(area.width as usize);
-    let lines = (0..area.height)
-        .map(|_| Line::from(Span::styled(line.clone(), Style::default().bg(color))))
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(color)),
-        area,
-    );
-}
-
-fn metric_line(label: &str, value: &str, color: Color, theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{label:<7}"),
-            Style::default().fg(theme.dim).bg(theme.panel),
-        ),
-        Span::styled(
-            value.to_string(),
-            Style::default().fg(color).bg(theme.panel),
-        ),
-    ])
-}
-
-fn metric_line_fit(
+fn metric_line(
     label: &str,
     value: &str,
     width: usize,
     color: Color,
     theme: &Theme,
 ) -> Line<'static> {
-    let label_width = 7;
+    let label_width = width.min(13);
     Line::from(vec![
         Span::styled(
-            format!("{label:<label_width$}"),
+            fit_text(label, label_width),
             Style::default().fg(theme.dim).bg(theme.panel),
         ),
+        Span::styled(" ", Style::default().bg(theme.panel)),
         Span::styled(
-            fit_text(value, width.saturating_sub(label_width)),
+            fit_text(value, width.saturating_sub(label_width + 1)),
             Style::default().fg(color).bg(theme.panel),
         ),
     ])
-}
-
-fn meter_line(label: &str, value: f64, width: usize, color: Color, theme: &Theme) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!("{label:<7}"),
-        Style::default().fg(theme.dim).bg(theme.panel),
-    )];
-    spans.extend(bar_spans(value, width, color, theme.panel, theme));
-    spans.push(Span::styled(
-        format!(" {}", percent(value)),
-        Style::default().fg(theme.text).bg(theme.panel),
-    ));
-    Line::from(spans)
-}
-
-fn timeline_line(
-    label: &str,
-    intervals: &[TimelineInterval],
-    rows: &[AppTotals],
-    selected_app: Option<&str>,
-    width: usize,
-    theme: &Theme,
-) -> Line<'static> {
-    let label_width = 7;
-    let graph_width = width.saturating_sub(label_width).max(1);
-    let Some((start, end)) = today_bounds() else {
-        return metric_line_fit(label, "timeline unavailable", width, theme.muted, theme);
-    };
-    if intervals.is_empty() || end <= start {
-        return metric_line_fit(label, "no intervals today", width, theme.muted, theme);
-    }
-
-    let mut spans = vec![Span::styled(
-        format!("{label:<label_width$}"),
-        Style::default().fg(theme.dim).bg(theme.panel),
-    )];
-
-    for col in 0..graph_width {
-        let position = (col as f64 + 0.5) / graph_width as f64;
-        let timestamp = start + ((end - start) as f64 * position).round() as i64;
-        let focused = intervals.iter().find(|interval| {
-            interval.kind == IntervalKind::Focused
-                && interval.started_at <= timestamp
-                && interval.ended_at >= timestamp
-        });
-        let open = intervals.iter().find(|interval| {
-            interval.kind == IntervalKind::Open
-                && interval.started_at <= timestamp
-                && interval.ended_at >= timestamp
-        });
-
-        let (glyph, color) = if let Some(interval) = focused {
-            let selected = selected_app == Some(interval.app_class.as_str());
-            let rank = rows
-                .iter()
-                .position(|row| row.app_class == interval.app_class)
-                .unwrap_or(usize::MAX);
-            (
-                if selected { "▓" } else { "█" },
-                if selected {
-                    theme.text
-                } else {
-                    rank_color(rank, theme)
-                },
-            )
-        } else if open.is_some() {
-            ("░", theme.dim)
-        } else {
-            ("·", theme.dim)
-        };
-        spans.push(Span::styled(
-            glyph,
-            Style::default().fg(color).bg(theme.panel),
-        ));
-    }
-
-    Line::from(spans)
-}
-
-fn today_bounds() -> Option<(i64, i64)> {
-    let now = Local::now();
-    let start = Local
-        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-        .single()?
-        .timestamp();
-    Some((start, now.timestamp()))
 }
 
 fn bar_spans(
@@ -1607,81 +1595,32 @@ fn bar_spans(
         .collect()
 }
 
-fn braille_meter(value: f64, width: usize) -> String {
-    let width = width.max(1);
-    let filled = ((value.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
-    format!(
-        "{}{}",
-        "⣿".repeat(filled),
-        "⠄".repeat(width.saturating_sub(filled))
-    )
+fn fill_area(frame: &mut Frame<'_>, area: Rect, color: Color) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = " ".repeat(area.width as usize);
+    let lines = (0..area.height)
+        .map(|_| Line::from(Span::styled(line.clone(), Style::default().bg(color))))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(color)),
+        area,
+    );
 }
 
-fn texture_lines(width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
-    (0..height)
-        .map(|row| {
-            let text = (0..width)
-                .map(|col| {
-                    if (row * 11 + col * 5) % 47 == 0 {
-                        '·'
-                    } else {
-                        ' '
-                    }
-                })
-                .collect::<String>();
-            Line::from(Span::styled(
-                text,
-                Style::default().fg(theme.dim).bg(theme.panel),
-            ))
-        })
-        .collect()
+fn pad_lines(lines: &mut Vec<Line<'static>>, width: usize, height: usize, theme: &Theme) {
+    lines.truncate(height);
+    while lines.len() < height {
+        lines.push(Line::from(Span::styled(
+            " ".repeat(width),
+            Style::default().bg(theme.panel),
+        )));
+    }
 }
 
 fn rule(width: usize) -> String {
     "─".repeat(width)
-}
-
-fn focused_total(rows: &[AppTotals]) -> i64 {
-    rows.iter().map(|row| row.focused_seconds).sum()
-}
-
-fn open_total(rows: &[AppTotals]) -> i64 {
-    rows.iter().map(|row| row.open_seconds).sum()
-}
-
-fn active_days(days: &[DayTotals]) -> usize {
-    days.iter()
-        .filter(|day| day.focused_seconds > 0 || day.open_seconds > 0)
-        .count()
-}
-
-fn best_focus_day(days: &[DayTotals]) -> Option<&DayTotals> {
-    days.iter()
-        .filter(|day| day.focused_seconds > 0)
-        .max_by_key(|day| day.focused_seconds)
-}
-
-fn interpolated_day_ratio(days: &[DayTotals], position: f64, max: i64, focused: bool) -> f64 {
-    if days.is_empty() {
-        return 0.0;
-    }
-
-    let scaled = position.clamp(0.0, 1.0) * days.len().saturating_sub(1) as f64;
-    let left = scaled.floor() as usize;
-    let right = scaled.ceil() as usize;
-    let t = scaled - left as f64;
-    let left_value = if focused {
-        days[left].focused_seconds
-    } else {
-        days[left].open_seconds
-    };
-    let right_value = if focused {
-        days[right].focused_seconds
-    } else {
-        days[right].open_seconds
-    };
-    let value = left_value as f64 + (right_value - left_value) as f64 * t;
-    (value.max(0.0) / max.max(1) as f64).clamp(0.0, 1.0)
 }
 
 fn ratio(numerator: i64, denominator: i64) -> f64 {
@@ -1692,13 +1631,13 @@ fn ratio(numerator: i64, denominator: i64) -> f64 {
     }
 }
 
-fn lens_color(index: usize, theme: &Theme) -> Color {
-    match index {
-        0 => theme.primary,
-        1 => theme.success,
-        2 => theme.warn,
-        3 => theme.tertiary,
-        _ => theme.secondary,
+fn lens_color(lens: Lens, theme: &Theme) -> Color {
+    match lens {
+        Lens::Day => theme.primary,
+        Lens::Week => theme.success,
+        Lens::Month => theme.warn,
+        Lens::Year => theme.tertiary,
+        Lens::Life => theme.secondary,
     }
 }
 
@@ -1714,49 +1653,6 @@ fn rank_color(index: usize, theme: &Theme) -> Color {
     }
 }
 
-fn heat_color(share: f64, theme: &Theme) -> Color {
-    if share > 0.72 {
-        theme.warn
-    } else if share > 0.45 {
-        theme.primary
-    } else if share > 0.18 {
-        theme.success
-    } else {
-        theme.dim
-    }
-}
-
-fn braille_bit(x: usize, y: usize) -> u16 {
-    match (x, y) {
-        (0, 0) => 0x01,
-        (0, 1) => 0x02,
-        (0, 2) => 0x04,
-        (0, 3) => 0x40,
-        (1, 0) => 0x08,
-        (1, 1) => 0x10,
-        (1, 2) => 0x20,
-        (1, 3) => 0x80,
-        _ => 0,
-    }
-}
-
-fn braille_char(mask: u16) -> String {
-    char::from_u32(0x2800 + mask as u32)
-        .unwrap_or(' ')
-        .to_string()
-}
-
-fn short_app(value: &str, width: usize) -> String {
-    let mut value = value
-        .trim_start_matches("com.")
-        .trim_start_matches("org.")
-        .to_string();
-    if value.contains('.') {
-        value = value.rsplit('.').next().unwrap_or(&value).to_string();
-    }
-    fit_text(&value, width)
-}
-
 fn fit_text(value: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -1764,7 +1660,6 @@ fn fit_text(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return format!("{value:<width$}");
     }
-
     let mut out = value
         .chars()
         .take(width.saturating_sub(1))
@@ -1773,36 +1668,25 @@ fn fit_text(value: &str, width: usize) -> String {
     out
 }
 
-fn percent(value: f64) -> String {
-    format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0)
-}
-
-fn format_duration(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else {
-        format!("{minutes}m")
-    }
-}
-
-fn duration_compact(seconds: i64) -> String {
+fn compact_duration(seconds: i64) -> String {
     let seconds = seconds.max(0);
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     if hours > 0 {
-        format!("{hours:>2}h")
+        format!("{hours}h")
     } else if minutes > 0 {
-        format!("{minutes:>2}m")
+        format!("{minutes}m")
     } else {
-        format!("{seconds:>2}s")
+        format!("{seconds}s")
     }
+}
+
+fn format_clock(timestamp: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|time| time.format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1912,7 +1796,6 @@ impl Rgb {
         if value.len() != 6 {
             return None;
         }
-
         Some(Self {
             r: u8::from_str_radix(&value[0..2], 16).ok()?,
             g: u8::from_str_radix(&value[2..4], 16).ok()?,
@@ -2004,59 +1887,77 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
-    fn compact_80_column_layout_keeps_core_panels() {
-        let backend = TestBackend::new(80, 24);
+    fn overview_keeps_all_lenses_visible() {
+        let backend = TestBackend::new(120, 32);
         let mut terminal = Terminal::new(backend).unwrap();
-        let app = sample_app();
+        let app = sample_app(View::Overview);
 
         terminal.draw(|frame| render(frame, &app)).unwrap();
 
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        for label in ["timeline", "replay", "apps", "mix", "lenses"] {
-            assert!(rendered.contains(label), "missing compact panel {label}");
+        let rendered = rendered_text(&terminal);
+        for label in [
+            "Overview",
+            "Apps",
+            "Timeline",
+            "System",
+            "MONTH",
+            "YEAR",
+            "LIFE",
+            "Week of Jan 12",
+        ] {
+            assert!(rendered.contains(label), "missing {label}");
         }
+        assert!(rendered.contains("app breakdown"));
+        assert!(rendered.contains("insights"));
     }
 
     #[test]
-    fn selected_row_stays_visible_when_list_is_longer_than_viewport() {
+    fn selected_app_stays_visible_when_list_is_longer_than_viewport() {
         let backend = TestBackend::new(90, 22);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = sample_app();
-        let rows = (0..30)
+        let mut app = sample_app(View::Apps);
+        app.report.rows = (0..30)
             .map(|index| AppTotals {
                 app_class: format!("app-{index:02}"),
                 focused_seconds: 3600 - index as i64,
                 open_seconds: 7200,
             })
-            .collect::<Vec<_>>();
-        app.totals[0] = Some(rows);
-        app.lens = 0;
+            .collect();
         app.selected = 29;
 
         terminal.draw(|frame| render(frame, &app)).unwrap();
 
-        let rendered = terminal
+        let rendered = rendered_text(&terminal);
+        assert!(
+            rendered.contains(">30 App 29"),
+            "selected row was not visible"
+        );
+    }
+
+    #[test]
+    fn timeline_view_renders_interval_panel() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = sample_app(View::Timeline);
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("today timeline"));
+        assert!(rendered.contains("intervals"));
+    }
+
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
             .backend()
             .buffer()
             .content()
             .iter()
             .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(
-            rendered.contains(">30 app-29"),
-            "selected row was not visible"
-        );
+            .collect::<String>()
     }
 
-    fn sample_app() -> App {
+    fn sample_app(view: View) -> App {
         let rows = vec![
             AppTotals {
                 app_class: "com.mitchellh.ghostty".to_string(),
@@ -2074,30 +1975,71 @@ mod tests {
                 open_seconds: 4 * 3600,
             },
         ];
-        let days = (0..14)
+        let daily = (0..14)
             .map(|index| DayTotals {
+                date: format!("2026-01-{:02}", index + 1),
                 label: format!("D{index}"),
                 focused_seconds: (index as i64 + 1) * 300,
                 open_seconds: (index as i64 + 2) * 500,
+                idle_seconds: index as i64 * 120,
+                locked_seconds: 0,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let apps = report::app_breakdown(&rows, 6);
+        let report = UsageReport {
+            generated_at: 0,
+            today_key: "2026-01-14".to_string(),
+            lens: Lens::Week,
+            lens_label: Lens::Week.label(),
+            period: report::Period {
+                label: "Week of Jan 12, 2026".to_string(),
+                start_date: Some("2026-01-12".to_string()),
+                end_date: Some("2026-01-18".to_string()),
+                offset: 0,
+            },
+            total_focused_seconds: report::focused_total(&rows),
+            total_open_seconds: report::open_total(&rows),
+            total_idle_seconds: daily.iter().map(|day| day.idle_seconds).sum(),
+            total_locked_seconds: 0,
+            rows,
+            apps,
+            daily,
+            insights: vec![
+                report::InsightRow {
+                    label: "Top app".to_string(),
+                    value: "ghostty - 8h".to_string(),
+                },
+                report::InsightRow {
+                    label: "Focus density".to_string(),
+                    value: "66%".to_string(),
+                },
+            ],
+        };
 
         App {
-            lens: 1,
+            view,
+            lens: Lens::Week,
+            period_offset: 0,
             selected: 0,
+            show_patterns: false,
             last_refresh: Instant::now(),
             loaded_at: Local::now(),
             theme: Theme::fallback(),
             steam: SteamResolver::default(),
-            totals: [
-                Some(rows.clone()),
-                Some(rows.clone()),
-                Some(rows.clone()),
-                Some(rows.clone()),
-                Some(rows),
+            report,
+            lens_totals: [
+                Some((8 * 3600, 12 * 3600)),
+                Some((11 * 3600, 21 * 3600)),
+                Some((40 * 3600, 80 * 3600)),
+                Some((200 * 3600, 420 * 3600)),
+                Some((500 * 3600, 900 * 3600)),
             ],
-            days,
-            today_intervals: Vec::new(),
+            today_intervals: vec![TimelineInterval {
+                kind: IntervalKind::Focused,
+                app_class: "com.mitchellh.ghostty".to_string(),
+                started_at: Local::now().timestamp() - 1200,
+                ended_at: Local::now().timestamp() - 600,
+            }],
             health: HealthSnapshot::default(),
         }
     }

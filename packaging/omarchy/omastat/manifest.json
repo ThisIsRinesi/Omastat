@@ -13,13 +13,14 @@
   },
   "barWidget": {
     "displayName": "Omastat",
-    "description": "Shows today's top focused app, focused/open totals, and a popup with the leading apps.",
+    "description": "Shows today's focused total, grouped app breakdown, and 7-day usage patterns.",
     "category": "Utilities",
     "aliases": ["omastat", "usage", "time"],
     "allowMultiple": false,
     "defaults": {
       "refreshIntervalSec": 60,
-      "command": "omastat --json today",
+      "command": "omastat summary",
+      "iconOnly": false,
       "terminalCommand": "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'"
     },
     "schema": [
@@ -36,7 +37,13 @@
         "key": "command",
         "type": "string",
         "label": "Report command",
-        "defaultValue": "omastat --json today"
+        "defaultValue": "omastat summary"
+      },
+      {
+        "key": "iconOnly",
+        "type": "boolean",
+        "label": "Icon-only mode",
+        "defaultValue": false
       },
       {
         "key": "terminalCommand",

@@ -1,9 +1,10 @@
-use crate::config::Config;
+use crate::{config::Config, identity, steam::SteamResolver};
 use anyhow::{Context, Result};
-use chrono::{Datelike, Local, TimeZone};
+use chrono::{Datelike, Local, TimeZone, Timelike};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::{
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
 };
@@ -21,11 +22,36 @@ pub struct AppTotals {
     pub open_seconds: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DayTotals {
+    pub date: String,
     pub label: String,
     pub focused_seconds: i64,
     pub open_seconds: i64,
+    pub idle_seconds: i64,
+    pub locked_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppDayTotals {
+    pub date: String,
+    pub label: String,
+    pub app_class: String,
+    pub focused_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FocusHeatCell {
+    pub weekday: u32,
+    pub hour: u32,
+    pub focused_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TitleTotals {
+    pub app_class: String,
+    pub title: String,
+    pub focused_seconds: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +68,8 @@ pub struct StorageStatus {
     pub last_event_at: Option<i64>,
     pub focused_active: i64,
     pub open_active: i64,
+    pub idle_active: i64,
+    pub locked_active: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +78,57 @@ pub struct ActiveInterval {
     pub kind: IntervalKind,
     pub app_class: String,
     pub window_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIntervalKind {
+    Idle,
+    Locked,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SessionTotals {
+    pub idle_seconds: i64,
+    pub locked_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveSessionInterval {
+    pub id: i64,
+    pub kind: SessionIntervalKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClassRepair {
+    pub from: String,
+    pub to: String,
+    pub rows: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TitleFill {
+    pub app_class: String,
+    pub title: String,
+    pub rows: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TitleNormalize {
+    pub app_class: String,
+    pub from: String,
+    pub to: String,
+    pub rows: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TitleRepair {
+    pub dry_run: bool,
+    pub class_updates: Vec<ClassRepair>,
+    pub title_updates: Vec<TitleFill>,
+    pub title_normalizations: Vec<TitleNormalize>,
+    pub rewritten_rows: i64,
+    pub filled_titles: i64,
+    pub normalized_titles: i64,
 }
 
 pub struct Storage {
@@ -120,6 +199,38 @@ impl Storage {
         Ok(())
     }
 
+    pub fn start_session_interval(
+        &self,
+        kind: SessionIntervalKind,
+        source: Option<&str>,
+        started_at: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO session_intervals (kind, source, started_at)
+             VALUES (?1, ?2, ?3)",
+            params![kind.as_str(), source, started_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn close_session_interval(&self, id: i64, ended_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE session_intervals
+             SET ended_at = ?1
+             WHERE id = ?2 AND ended_at IS NULL",
+            params![ended_at, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_session_intervals(&self, ended_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE session_intervals SET ended_at = ?1 WHERE ended_at IS NULL",
+            params![ended_at],
+        )?;
+        Ok(())
+    }
+
     pub fn unclosed_intervals(&self) -> Result<Vec<ActiveInterval>> {
         let mut stmt = self.conn.prepare(
             "
@@ -150,6 +261,31 @@ impl Storage {
                     app_class,
                     window_address,
                 })
+            })
+            .collect()
+    }
+
+    pub fn unclosed_session_intervals(&self) -> Result<Vec<ActiveSessionInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT id, kind
+            FROM session_intervals
+            WHERE ended_at IS NULL
+            ORDER BY started_at ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(id, kind)| {
+                let kind = SessionIntervalKind::from_str(&kind).with_context(|| {
+                    format!("unknown session interval kind {kind:?} for row {id}")
+                })?;
+                Ok(ActiveSessionInterval { id, kind })
             })
             .collect()
     }
@@ -218,14 +354,42 @@ impl Storage {
             .context("failed to compute local day start")?;
         let days = days.max(1) as usize;
         let range_start = today_start - chrono::Duration::days(days.saturating_sub(1) as i64);
-        let query_end = now.timestamp();
+        self.daily_totals_from(range_start, days, now.timestamp())
+    }
+
+    pub fn daily_totals_for_local_dates(
+        &self,
+        start_date: chrono::NaiveDate,
+        days: usize,
+        query_end: i64,
+    ) -> Result<Vec<DayTotals>> {
+        let range_start = Local
+            .from_local_datetime(
+                &start_date
+                    .and_hms_opt(0, 0, 0)
+                    .context("invalid daily totals start date")?,
+            )
+            .single()
+            .context("failed to compute local daily totals start")?;
+        self.daily_totals_from(range_start, days.max(1), query_end)
+    }
+
+    fn daily_totals_from(
+        &self,
+        range_start: chrono::DateTime<Local>,
+        days: usize,
+        query_end: i64,
+    ) -> Result<Vec<DayTotals>> {
         let mut output = (0..days)
             .map(|offset| {
                 let start = range_start + chrono::Duration::days(offset as i64);
                 DayTotals {
+                    date: start.format("%Y-%m-%d").to_string(),
                     label: start.format("%a").to_string(),
                     focused_seconds: 0,
                     open_seconds: 0,
+                    idle_seconds: 0,
+                    locked_seconds: 0,
                 }
             })
             .collect::<Vec<_>>();
@@ -268,6 +432,41 @@ impl Storage {
             }
         }
 
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                kind,
+                MAX(started_at, ?1) AS bounded_start,
+                MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
+            FROM session_intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ",
+        )?;
+        let session_intervals = stmt
+            .query_map(params![range_start.timestamp(), query_end], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        for (kind, started_at, ended_at) in session_intervals {
+            for (index, window) in boundaries.windows(2).enumerate() {
+                let overlap = ended_at.min(window[1]).min(query_end) - started_at.max(window[0]);
+                if overlap <= 0 {
+                    continue;
+                }
+                match kind.as_str() {
+                    "idle" => output[index].idle_seconds += overlap,
+                    "locked" => output[index].locked_seconds += overlap,
+                    _ => {}
+                }
+            }
+        }
+
         Ok(output)
     }
 
@@ -282,7 +481,8 @@ impl Storage {
     }
 
     pub fn usage_status(&self) -> Result<StorageStatus> {
-        self.conn
+        let mut status = self
+            .conn
             .query_row(
                 "
                 SELECT
@@ -299,10 +499,31 @@ impl Storage {
                         last_event_at: row.get(1)?,
                         focused_active: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
                         open_active: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        idle_active: 0,
+                        locked_active: 0,
                     })
                 },
             )
-            .context("failed to read storage status")
+            .context("failed to read storage status")?;
+
+        self.conn
+            .query_row(
+                "
+                SELECT
+                    SUM(CASE WHEN ended_at IS NULL AND kind = 'idle' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN ended_at IS NULL AND kind = 'locked' THEN 1 ELSE 0 END)
+                FROM session_intervals
+                ",
+                [],
+                |row| {
+                    status.idle_active = row.get::<_, Option<i64>>(0)?.unwrap_or(0);
+                    status.locked_active = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+                    Ok(())
+                },
+            )
+            .context("failed to read session storage status")?;
+
+        Ok(status)
     }
 
     pub fn total_duration(&self) -> Result<i64> {
@@ -352,6 +573,286 @@ impl Storage {
         self.totals_between(start, end)
     }
 
+    pub fn focused_title_totals_between(
+        &self,
+        start: i64,
+        end: i64,
+        limit: usize,
+    ) -> Result<Vec<TitleTotals>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                app_class,
+                title,
+                SUM(overlap_seconds) AS focused_seconds
+            FROM (
+                SELECT
+                    app_class,
+                    title,
+                    MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
+                FROM intervals
+                WHERE kind = 'focused'
+                  AND title IS NOT NULL
+                  AND trim(title) <> ''
+                  AND started_at < ?2
+                  AND COALESCE(ended_at, ?2) > ?1
+            )
+            WHERE overlap_seconds > 0
+            GROUP BY app_class, title
+            ORDER BY focused_seconds DESC, app_class ASC, title ASC
+            LIMIT ?3
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end, limit.max(1) as i64], |row| {
+                Ok(TitleTotals {
+                    app_class: row.get(0)?,
+                    title: row.get(1)?,
+                    focused_seconds: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn focused_app_daily_totals_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<AppDayTotals>> {
+        if end <= start {
+            return Ok(Vec::new());
+        }
+
+        let (range_start, days) = local_day_range(start, end)?;
+        let boundaries = (0..=days)
+            .map(|offset| (range_start + chrono::Duration::days(offset as i64)).timestamp())
+            .collect::<Vec<_>>();
+        let labels = (0..days)
+            .map(|offset| {
+                let day = range_start + chrono::Duration::days(offset as i64);
+                (
+                    day.format("%Y-%m-%d").to_string(),
+                    day.format("%b %-d").to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut totals = BTreeMap::<(usize, String), i64>::new();
+
+        for (app_class, started_at, ended_at) in self.focused_intervals_between(start, end)? {
+            for (index, window) in boundaries.windows(2).enumerate() {
+                let overlap = ended_at.min(window[1]).min(end) - started_at.max(window[0]);
+                if overlap > 0 {
+                    *totals.entry((index, app_class.clone())).or_default() += overlap;
+                }
+            }
+        }
+
+        let mut rows = totals
+            .into_iter()
+            .map(|((index, app_class), focused_seconds)| AppDayTotals {
+                date: labels[index].0.clone(),
+                label: labels[index].1.clone(),
+                app_class,
+                focused_seconds,
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.date
+                .cmp(&right.date)
+                .then_with(|| right.focused_seconds.cmp(&left.focused_seconds))
+                .then_with(|| left.app_class.cmp(&right.app_class))
+        });
+        Ok(rows)
+    }
+
+    pub fn focus_heatmap_between(&self, start: i64, end: i64) -> Result<Vec<FocusHeatCell>> {
+        let mut totals = BTreeMap::<(u32, u32), i64>::new();
+        for weekday in 0..7 {
+            for hour in 0..24 {
+                totals.insert((weekday, hour), 0);
+            }
+        }
+
+        if end <= start {
+            return Ok(totals
+                .into_iter()
+                .map(|((weekday, hour), focused_seconds)| FocusHeatCell {
+                    weekday,
+                    hour,
+                    focused_seconds,
+                })
+                .collect());
+        }
+
+        for (_, mut cursor, interval_end) in self.focused_intervals_between(start, end)? {
+            while cursor < interval_end {
+                let Some(local) = Local.timestamp_opt(cursor, 0).single() else {
+                    break;
+                };
+                let Some(hour_start) = Local
+                    .with_ymd_and_hms(local.year(), local.month(), local.day(), local.hour(), 0, 0)
+                    .single()
+                else {
+                    break;
+                };
+                let next_hour = (hour_start + chrono::Duration::hours(1)).timestamp();
+                let segment_end = next_hour.min(interval_end);
+                let overlap = segment_end - cursor;
+                if overlap > 0 {
+                    let key = (local.weekday().num_days_from_monday(), local.hour());
+                    *totals.entry(key).or_default() += overlap;
+                }
+                cursor = segment_end.max(cursor + 1);
+            }
+        }
+
+        Ok(totals
+            .into_iter()
+            .map(|((weekday, hour), focused_seconds)| FocusHeatCell {
+                weekday,
+                hour,
+                focused_seconds,
+            })
+            .collect())
+    }
+
+    pub fn session_totals_between(&self, start: i64, end: i64) -> Result<SessionTotals> {
+        let mut totals = SessionTotals::default();
+        if end <= start {
+            return Ok(totals);
+        }
+
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT kind, SUM(overlap_seconds)
+            FROM (
+                SELECT
+                    kind,
+                    MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
+                FROM session_intervals
+                WHERE started_at < ?2
+                  AND COALESCE(ended_at, ?2) > ?1
+            )
+            WHERE overlap_seconds > 0
+            GROUP BY kind
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        for (kind, seconds) in rows {
+            match kind.as_str() {
+                "idle" => totals.idle_seconds += seconds,
+                "locked" => totals.locked_seconds += seconds,
+                _ => {}
+            }
+        }
+        Ok(totals)
+    }
+
+    pub fn repair_titles(
+        &mut self,
+        steam: &mut SteamResolver,
+        dry_run: bool,
+    ) -> Result<TitleRepair> {
+        let class_counts = self.app_class_counts()?;
+        let mut class_update_map = HashMap::new();
+        let mut class_updates = Vec::new();
+
+        for (from, rows) in class_counts {
+            let to = identity::canonical_app_class(&steam.resolve_class(&from));
+            if to != from {
+                class_update_map.insert(from.clone(), to.clone());
+                class_updates.push(ClassRepair { from, to, rows });
+            }
+        }
+
+        let mut title_counts = BTreeMap::<String, i64>::new();
+        for (app_class, rows) in self.missing_focused_title_counts()? {
+            let app_class = class_update_map
+                .get(&app_class)
+                .cloned()
+                .unwrap_or(app_class);
+            *title_counts.entry(app_class).or_default() += rows;
+        }
+
+        let title_updates = title_counts
+            .into_iter()
+            .map(|(app_class, rows)| TitleFill {
+                title: identity::display_name(&app_class),
+                app_class,
+                rows,
+            })
+            .collect::<Vec<_>>();
+        let title_normalizations = self.planned_title_normalizations(&class_update_map)?;
+        let planned_rewritten_rows = class_updates.iter().map(|update| update.rows).sum();
+        let planned_filled_titles = title_updates.iter().map(|update| update.rows).sum();
+        let planned_normalized_titles = title_normalizations.iter().map(|update| update.rows).sum();
+
+        if dry_run {
+            return Ok(TitleRepair {
+                dry_run,
+                class_updates,
+                title_updates,
+                title_normalizations,
+                rewritten_rows: planned_rewritten_rows,
+                filled_titles: planned_filled_titles,
+                normalized_titles: planned_normalized_titles,
+            });
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut rewritten_rows = 0;
+        for update in &class_updates {
+            rewritten_rows += tx.execute(
+                "UPDATE intervals SET app_class = ?1 WHERE app_class = ?2",
+                params![update.to, update.from],
+            )? as i64;
+        }
+
+        let mut filled_titles = 0;
+        for update in &title_updates {
+            filled_titles += tx.execute(
+                "
+                UPDATE intervals
+                SET title = ?1
+                WHERE kind = 'focused'
+                  AND app_class = ?2
+                  AND (title IS NULL OR trim(title) = '')
+                ",
+                params![update.title, update.app_class],
+            )? as i64;
+        }
+        let mut normalized_titles = 0;
+        for update in &title_normalizations {
+            normalized_titles += tx.execute(
+                "
+                UPDATE intervals
+                SET title = ?1
+                WHERE kind = 'focused'
+                  AND app_class = ?2
+                  AND title = ?3
+                ",
+                params![update.to, update.app_class, update.from],
+            )? as i64;
+        }
+        tx.commit()?;
+
+        Ok(TitleRepair {
+            dry_run,
+            class_updates,
+            title_updates,
+            title_normalizations,
+            rewritten_rows,
+            filled_titles,
+            normalized_titles,
+        })
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "
@@ -385,12 +886,155 @@ impl Storage {
                 WHERE ended_at IS NULL;
             INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                 VALUES (1, unixepoch());
+
+            CREATE TABLE IF NOT EXISTS session_intervals (
+                id INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('idle', 'locked')),
+                source TEXT,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                CHECK (ended_at IS NULL OR ended_at >= started_at)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_session_intervals_kind
+                ON session_intervals(kind);
+            CREATE INDEX IF NOT EXISTS idx_session_intervals_time
+                ON session_intervals(started_at, ended_at);
+            CREATE INDEX IF NOT EXISTS idx_session_intervals_open
+                ON session_intervals(ended_at)
+                WHERE ended_at IS NULL;
+            INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                VALUES (2, unixepoch());
             ",
         )?;
         Ok(())
     }
 
-    fn totals_between(&self, start: i64, end: i64) -> Result<Vec<AppTotals>> {
+    fn app_class_counts(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT app_class, COUNT(*)
+            FROM intervals
+            GROUP BY app_class
+            ORDER BY app_class ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn missing_focused_title_counts(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT app_class, COUNT(*)
+            FROM intervals
+            WHERE kind = 'focused'
+              AND (title IS NULL OR trim(title) = '')
+            GROUP BY app_class
+            ORDER BY app_class ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn focused_intervals_between(&self, start: i64, end: i64) -> Result<Vec<(String, i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                app_class,
+                MAX(started_at, ?1) AS bounded_start,
+                MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
+            FROM intervals
+            WHERE kind = 'focused'
+              AND started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY bounded_start ASC, bounded_end ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn focused_title_counts(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT app_class, title, COUNT(*)
+            FROM intervals
+            WHERE kind = 'focused'
+              AND title IS NOT NULL
+              AND trim(title) <> ''
+            GROUP BY app_class, title
+            ORDER BY app_class ASC, title ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn planned_title_normalizations(
+        &self,
+        class_update_map: &HashMap<String, String>,
+    ) -> Result<Vec<TitleNormalize>> {
+        let mut planned = BTreeMap::<(String, String, String), i64>::new();
+        for (app_class, title, rows) in self.focused_title_counts()? {
+            let canonical_app_class = class_update_map
+                .get(&app_class)
+                .cloned()
+                .unwrap_or(app_class);
+            let Some(cleaned) = identity::clean_window_title(&title, &canonical_app_class) else {
+                continue;
+            };
+            if cleaned == title {
+                continue;
+            }
+            *planned
+                .entry((canonical_app_class, title, cleaned))
+                .or_default() += rows;
+        }
+
+        Ok(planned
+            .into_iter()
+            .map(|((app_class, from, to), rows)| TitleNormalize {
+                app_class,
+                from,
+                to,
+                rows,
+            })
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focused_titles_for_tests(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT title
+            FROM intervals
+            WHERE kind = 'focused'
+            ORDER BY id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn totals_between(&self, start: i64, end: i64) -> Result<Vec<AppTotals>> {
         let mut stmt = self.conn.prepare(
             "
             SELECT
@@ -478,6 +1122,23 @@ impl IntervalKind {
     }
 }
 
+impl SessionIntervalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Locked => "locked",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "idle" => Some(Self::Idle),
+            "locked" => Some(Self::Locked),
+            _ => None,
+        }
+    }
+}
+
 fn default_db_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -512,10 +1173,34 @@ fn copy_legacy_db_if_needed(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn local_day_range(start: i64, end: i64) -> Result<(chrono::DateTime<Local>, usize)> {
+    let start_local = Local
+        .timestamp_opt(start, 0)
+        .single()
+        .context("failed to compute local start timestamp")?;
+    let end_local = Local
+        .timestamp_opt(end.saturating_sub(1).max(start), 0)
+        .single()
+        .context("failed to compute local end timestamp")?;
+    let start_date = start_local.date_naive();
+    let end_date = end_local.date_naive();
+    let range_start = Local
+        .from_local_datetime(
+            &start_date
+                .and_hms_opt(0, 0, 0)
+                .context("invalid local range start")?,
+        )
+        .single()
+        .context("failed to compute local range start")?;
+    let days = (end_date - start_date).num_days().max(0) as usize + 1;
+    Ok((range_start, days))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IntervalKind, Storage};
+    use super::{IntervalKind, SessionIntervalKind, Storage};
     use crate::config::Config;
+    use crate::steam::SteamResolver;
     use chrono::{Datelike, Local, TimeZone};
 
     #[test]
@@ -597,5 +1282,111 @@ mod tests {
         let days = storage.daily_totals(1).unwrap();
         assert!(days[0].focused_seconds >= 60);
         assert!(days[0].focused_seconds < 120);
+    }
+
+    #[test]
+    fn daily_totals_include_session_idle_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+        let date = Local::now().date_naive();
+        let day_start = Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap();
+        let started_at = (day_start + chrono::Duration::hours(1)).timestamp();
+        let ended_at = (day_start + chrono::Duration::hours(2)).timestamp();
+
+        let idle = storage
+            .start_session_interval(SessionIntervalKind::Idle, Some("test"), started_at)
+            .unwrap();
+        storage.close_session_interval(idle, ended_at).unwrap();
+
+        let days = storage
+            .daily_totals_for_local_dates(date, 1, ended_at)
+            .unwrap();
+        assert_eq!(days[0].idle_seconds, 3600);
+        assert_eq!(days[0].locked_seconds, 0);
+    }
+
+    #[test]
+    fn aggregates_session_idle_and_locked_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let idle = storage
+            .start_session_interval(SessionIntervalKind::Idle, Some("test"), 100)
+            .unwrap();
+        storage.close_session_interval(idle, 200).unwrap();
+        let locked = storage
+            .start_session_interval(SessionIntervalKind::Locked, Some("test"), 150)
+            .unwrap();
+        storage.close_session_interval(locked, 250).unwrap();
+
+        let totals = storage.session_totals_between(125, 225).unwrap();
+        assert_eq!(totals.idle_seconds, 75);
+        assert_eq!(totals.locked_seconds, 75);
+    }
+
+    #[test]
+    fn repairs_existing_classes_and_missing_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        storage
+            .start_interval(
+                IntervalKind::Focused,
+                "chrome-discord.com__channels_@me-Default",
+                None,
+                None,
+                100,
+            )
+            .unwrap();
+        storage
+            .start_interval(
+                IntervalKind::Focused,
+                "com.mitchellh.ghostty",
+                None,
+                None,
+                100,
+            )
+            .unwrap();
+
+        let mut steam = SteamResolver::default();
+        let repair = storage.repair_titles(&mut steam, false).unwrap();
+
+        assert_eq!(repair.rewritten_rows, 1);
+        assert_eq!(repair.filled_titles, 2);
+
+        let rows = storage
+            .conn
+            .prepare(
+                "
+                SELECT app_class, title
+                FROM intervals
+                WHERE kind = 'focused'
+                ORDER BY app_class ASC
+                ",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("com.mitchellh.ghostty".to_string(), "Ghostty".to_string()),
+                ("discord".to_string(), "Discord".to_string())
+            ]
+        );
     }
 }

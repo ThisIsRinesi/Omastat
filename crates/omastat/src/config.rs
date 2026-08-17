@@ -24,6 +24,8 @@ pub struct TrackingConfig {
     pub reconcile_seconds: u64,
     #[serde(default = "default_session_poll_seconds")]
     pub session_poll_seconds: u64,
+    #[serde(default = "default_terminal_resolve_seconds")]
+    pub terminal_resolve_seconds: u64,
     #[serde(default = "default_pause_on_session_idle")]
     pub pause_on_session_idle: bool,
     #[serde(default = "default_pause_on_session_locked")]
@@ -90,6 +92,7 @@ impl Default for TrackingConfig {
         Self {
             reconcile_seconds: default_reconcile_seconds(),
             session_poll_seconds: default_session_poll_seconds(),
+            terminal_resolve_seconds: default_terminal_resolve_seconds(),
             pause_on_session_idle: default_pause_on_session_idle(),
             pause_on_session_locked: default_pause_on_session_locked(),
         }
@@ -102,6 +105,10 @@ fn default_reconcile_seconds() -> u64 {
 
 fn default_session_poll_seconds() -> u64 {
     60
+}
+
+fn default_terminal_resolve_seconds() -> u64 {
+    5
 }
 
 fn default_pause_on_session_idle() -> bool {

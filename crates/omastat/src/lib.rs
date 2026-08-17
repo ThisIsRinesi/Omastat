@@ -1,8 +1,12 @@
 pub mod cli;
 pub mod config;
+pub mod export;
 pub mod hyprland;
+pub mod identity;
+pub mod report;
 pub mod session;
 pub mod steam;
 pub mod storage;
+pub mod terminal;
 pub mod tracker;
 pub mod tui;

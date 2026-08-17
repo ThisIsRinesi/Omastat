@@ -1,9 +1,10 @@
 use crate::{
     config::Config,
     hyprland::{self, Event, EventStream, Snapshot, Window},
-    session,
+    identity, session,
     steam::SteamResolver,
-    storage::{ActiveInterval, IntervalKind, Storage},
+    storage::{IntervalKind, SessionIntervalKind, Storage},
+    terminal,
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -25,11 +26,18 @@ struct TrackerState {
     active_address: Option<String>,
     focused: Option<FocusedInterval>,
     focus_paused: bool,
+    session_pause: Option<SessionPauseInterval>,
 }
 
 struct FocusedInterval {
     address: String,
     app_class: String,
+    title: Option<String>,
+    interval_id: i64,
+}
+
+struct SessionPauseInterval {
+    kind: SessionIntervalKind,
     interval_id: i64,
 }
 
@@ -44,10 +52,11 @@ impl Tracker {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        self.close_stale_runtime_intervals()?;
+        self.refresh_session_status().await?;
         self.recover_startup_state().await?;
 
         let mut reconnect_backoff = Duration::from_secs(1);
-        self.refresh_session_status().await?;
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::pin!(ctrl_c);
         let mut terminate = terminate_signal();
@@ -62,6 +71,11 @@ impl Tracker {
         ));
         session_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
         session_timer.tick().await;
+        let mut terminal_timer = time::interval(Duration::from_secs(
+            self.config.tracking.terminal_resolve_seconds.max(2),
+        ));
+        terminal_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        terminal_timer.tick().await;
 
         loop {
             let mut stream = match EventStream::connect().await {
@@ -101,6 +115,9 @@ impl Tracker {
                     _ = session_timer.tick() => {
                         self.refresh_session_status().await?;
                     }
+                    _ = terminal_timer.tick() => {
+                        self.refresh_terminal_focus().await?;
+                    }
                     _ = &mut ctrl_c => {
                         self.shutdown()?;
                         return Ok(());
@@ -126,18 +143,38 @@ impl Tracker {
         }
     }
 
+    fn close_stale_runtime_intervals(&mut self) -> Result<()> {
+        let now = unix_now();
+        for interval in self.storage.unclosed_intervals()? {
+            if interval.kind == IntervalKind::Focused {
+                self.storage.close_interval(interval.id, now)?;
+            }
+        }
+        self.storage.close_session_intervals(now)?;
+        Ok(())
+    }
+
     async fn apply_event(&mut self, event: Event) -> Result<()> {
         match event {
             Event::WindowOpened(window) => self.open_window(window)?,
             Event::WindowClosed { address } => self.close_window(&address)?,
             Event::FocusChanged { address } => {
                 if let Some(address) = address {
+                    self.refresh_window_details(&address).await?;
                     if !self.state.windows.contains_key(&address) {
                         self.reconcile().await?;
                     }
                     self.set_active_window(Some(&address))?;
                 } else {
                     self.set_active_window(None)?;
+                }
+            }
+            Event::WindowTitleChanged { address } => {
+                if let Some(address) = address {
+                    self.refresh_window_details(&address).await?;
+                    if self.state.active_address.as_deref() == Some(address.as_str()) {
+                        self.sync_focused_interval()?;
+                    }
                 }
             }
             Event::Unknown => {}
@@ -169,12 +206,8 @@ impl Tracker {
         }
 
         for mut window in snapshot.windows {
-            window.class = self.steam.resolve_class(&window.class);
-            if !self.state.windows.contains_key(&window.address) {
-                self.open_window(window)?;
-            } else {
-                self.state.windows.insert(window.address.clone(), window);
-            }
+            window.class = self.canonical_class(&window.class);
+            self.open_window(window)?;
         }
 
         self.set_active_window(snapshot.active_address.as_deref())?;
@@ -187,8 +220,10 @@ impl Tracker {
         let mut app_open_counts = HashMap::<String, usize>::new();
 
         for mut window in snapshot.windows {
-            window.class = self.steam.resolve_class(&window.class);
-            *app_open_counts.entry(window.class.clone()).or_default() += 1;
+            window.class = self.canonical_class(&window.class);
+            if terminal::should_track_class(&window.class) {
+                *app_open_counts.entry(window.class.clone()).or_default() += 1;
+            }
             windows.insert(window.address.clone(), window);
         }
 
@@ -210,10 +245,16 @@ impl Tracker {
             }
         }
 
-        self.state = TrackerState::default();
-        self.state.windows = windows;
-        self.state.app_open_counts = app_open_counts;
-        self.state.active_address = active_address;
+        let focus_paused = self.state.focus_paused;
+        let session_pause = self.state.session_pause.take();
+        self.state = TrackerState {
+            windows,
+            app_open_counts,
+            active_address,
+            focus_paused,
+            session_pause,
+            ..TrackerState::default()
+        };
 
         let live_app_classes = self
             .state
@@ -246,44 +287,14 @@ impl Tracker {
             }
         }
 
-        self.restore_focused_interval(stored_focused, now)?;
-        self.sync_focused_interval()
-    }
-
-    fn restore_focused_interval(&mut self, stored: Vec<ActiveInterval>, now: i64) -> Result<()> {
-        let active = self
-            .state
-            .active_address
-            .as_ref()
-            .and_then(|address| self.state.windows.get(address))
-            .map(|window| (window.address.clone(), window.class.clone()));
-        let mut restored = false;
-
-        for interval in stored {
-            let matches_active = !restored
-                && active.as_ref().is_some_and(|(address, app_class)| {
-                    interval.window_address.as_deref() == Some(address.as_str())
-                        && interval.app_class == *app_class
-                });
-
-            if matches_active {
-                let (address, app_class) = active.as_ref().expect("active window checked above");
-                self.state.focused = Some(FocusedInterval {
-                    address: address.clone(),
-                    app_class: app_class.clone(),
-                    interval_id: interval.id,
-                });
-                restored = true;
-            } else {
-                self.storage.close_interval(interval.id, now)?;
-            }
+        for interval in stored_focused {
+            self.storage.close_interval(interval.id, now)?;
         }
-
-        Ok(())
+        self.sync_focused_interval_at(now)
     }
 
     fn open_window(&mut self, mut window: Window) -> Result<()> {
-        window.class = self.steam.resolve_class(&window.class);
+        window.class = self.canonical_class(&window.class);
 
         if self
             .state
@@ -302,6 +313,10 @@ impl Tracker {
         let app_class = window.class.clone();
         debug!("window opened: {} {}", app_class, window.address);
         self.state.windows.insert(window.address.clone(), window);
+
+        if !terminal::should_track_class(&app_class) {
+            return Ok(());
+        }
 
         let count = self
             .state
@@ -354,22 +369,48 @@ impl Tracker {
         self.sync_focused_interval()
     }
 
+    #[cfg(test)]
     fn set_focus_paused(&mut self, paused: bool) -> Result<()> {
+        self.set_focus_paused_at(paused, unix_now())
+    }
+
+    fn set_focus_paused_at(&mut self, paused: bool, now: i64) -> Result<()> {
         if self.state.focus_paused == paused {
             return Ok(());
         }
         self.state.focus_paused = paused;
-        self.sync_focused_interval()
+        self.sync_focused_interval_at(now)
+    }
+
+    fn set_session_pause(
+        &mut self,
+        kind: Option<SessionIntervalKind>,
+        source: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let current = self.state.session_pause.as_ref().map(|pause| pause.kind);
+        if current == kind {
+            return self.set_focus_paused_at(kind.is_some(), now);
+        }
+
+        if let Some(previous) = self.state.session_pause.take() {
+            self.storage
+                .close_session_interval(previous.interval_id, now)?;
+        }
+
+        if let Some(kind) = kind {
+            let interval_id = self.storage.start_session_interval(kind, source, now)?;
+            self.state.session_pause = Some(SessionPauseInterval { kind, interval_id });
+        }
+
+        self.set_focus_paused_at(kind.is_some(), now)
     }
 
     async fn refresh_session_status(&mut self) -> Result<()> {
         match session::status().await {
             Ok(status) => {
-                let paused = status.should_pause(
-                    self.config.tracking.pause_on_session_idle,
-                    self.config.tracking.pause_on_session_locked,
-                );
-                self.set_focus_paused(paused)?;
+                let pause_kind = self.session_pause_kind(&status);
+                self.set_session_pause(pause_kind, Some(status.source), unix_now())?;
             }
             Err(error) => {
                 debug!("session status unavailable: {error:#}");
@@ -378,16 +419,104 @@ impl Tracker {
         Ok(())
     }
 
-    fn sync_focused_interval(&mut self) -> Result<()> {
-        let now = unix_now();
-        let address = self.state.active_address.as_deref();
+    fn session_pause_kind(&self, status: &session::SessionStatus) -> Option<SessionIntervalKind> {
+        if self.config.tracking.pause_on_session_locked && status.locked {
+            return Some(SessionIntervalKind::Locked);
+        }
+        if self.config.tracking.pause_on_session_idle && status.idle && !status.audio_playing {
+            return Some(SessionIntervalKind::Idle);
+        }
+        None
+    }
 
-        if self
+    async fn refresh_window_details(&mut self, address: &str) -> Result<()> {
+        match hyprland::active_window_details().await {
+            Ok(Some(mut window)) if window.address == address => {
+                window.class = self.canonical_class(&window.class);
+                if self
+                    .state
+                    .windows
+                    .get(address)
+                    .is_some_and(|existing| existing.class != window.class)
+                {
+                    self.close_window(address)?;
+                }
+                self.open_window(window)?;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                debug!("active window detail refresh failed: {error:#}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn refresh_terminal_focus(&mut self) -> Result<()> {
+        let Some(address) = self.state.active_address.clone() else {
+            return Ok(());
+        };
+        if !self
             .state
-            .focused
-            .as_ref()
-            .is_some_and(|focused| Some(focused.address.as_str()) == address)
-            && !self.state.focus_paused
+            .windows
+            .get(&address)
+            .is_some_and(|window| terminal::is_terminal_class(&window.class))
+        {
+            return Ok(());
+        }
+
+        self.refresh_window_details(&address).await?;
+        self.sync_focused_interval()
+    }
+
+    fn focused_app_class(&mut self, window: &Window) -> String {
+        if terminal::is_terminal_class(&window.class)
+            && let Some(pid) = window.pid
+            && let Some(app) = terminal::resolve_foreground_app(pid)
+        {
+            return self.canonical_class(&app);
+        }
+
+        window.class.clone()
+    }
+
+    fn canonical_class(&mut self, app_class: &str) -> String {
+        identity::canonical_app_class(&self.steam.resolve_class(app_class))
+    }
+
+    fn focused_title(&self, window: &Window, app_class: &str) -> Option<String> {
+        self.config
+            .capture_titles()
+            .then_some(window.title.as_deref())
+            .flatten()
+            .and_then(|title| identity::clean_window_title(title, app_class))
+    }
+
+    fn sync_focused_interval(&mut self) -> Result<()> {
+        self.sync_focused_interval_at(unix_now())
+    }
+
+    fn sync_focused_interval_at(&mut self, now: i64) -> Result<()> {
+        let target = if self.state.focus_paused {
+            None
+        } else {
+            self.state
+                .active_address
+                .clone()
+                .and_then(|address| self.state.windows.get(&address).cloned())
+                .and_then(|window| {
+                    terminal::should_track_class(&window.class).then(|| {
+                        let app_class = self.focused_app_class(&window);
+                        let title = self.focused_title(&window, &app_class);
+                        (window.address.clone(), app_class, title)
+                    })
+                })
+        };
+
+        if let (Some(focused), Some((address, app_class, title))) =
+            (self.state.focused.as_ref(), target.as_ref())
+            && focused.address == *address
+            && focused.app_class == *app_class
+            && focused.title == *title
         {
             return Ok(());
         }
@@ -396,33 +525,22 @@ impl Tracker {
             self.storage.close_interval(previous.interval_id, now)?;
         }
 
-        if self.state.focus_paused {
-            return Ok(());
-        }
-
-        let Some(address) = address else {
-            return Ok(());
-        };
-        let Some(window) = self.state.windows.get(address) else {
+        let Some((address, app_class, title)) = target else {
             return Ok(());
         };
 
-        let title = self
-            .config
-            .capture_titles()
-            .then_some(window.title.as_deref())
-            .flatten();
         let interval_id = self.storage.start_interval(
             IntervalKind::Focused,
-            &window.class,
-            Some(&window.address),
-            title,
+            &app_class,
+            Some(&address),
+            title.as_deref(),
             now,
         )?;
 
         self.state.focused = Some(FocusedInterval {
-            address: window.address.clone(),
-            app_class: window.class.clone(),
+            address,
+            app_class,
+            title,
             interval_id,
         });
         Ok(())
@@ -436,6 +554,10 @@ impl Tracker {
         }
         for (_, interval_id) in self.state.open_interval_ids.drain() {
             self.storage.close_interval(interval_id, now)?;
+        }
+        if let Some(previous) = self.state.session_pause.take() {
+            self.storage
+                .close_session_interval(previous.interval_id, now)?;
         }
         Ok(())
     }
@@ -481,9 +603,10 @@ async fn recv_terminate_signal(signal: &mut Option<TerminateSignal>) {
 mod tests {
     use super::Tracker;
     use crate::{
-        config::Config,
+        config::{Config, TitleCapture},
         hyprland::{Snapshot, Window},
-        storage::{IntervalKind, Storage},
+        session::SessionStatus,
+        storage::{IntervalKind, SessionIntervalKind, Storage},
     };
 
     #[test]
@@ -510,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_snapshot_reuses_live_intervals_and_closes_stale() {
+    fn startup_snapshot_reuses_live_open_intervals_and_restarts_focus() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
         let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
@@ -548,14 +671,13 @@ mod tests {
             tracker.state.open_interval_ids.get("firefox"),
             Some(&live_open)
         );
-        assert_eq!(
-            tracker
-                .state
-                .focused
-                .as_ref()
-                .map(|focused| focused.interval_id),
-            Some(live_focus)
-        );
+        let restored_focus = tracker
+            .state
+            .focused
+            .as_ref()
+            .map(|focused| focused.interval_id);
+        assert!(restored_focus.is_some());
+        assert_ne!(restored_focus, Some(live_focus));
 
         let unclosed_ids = tracker
             .storage
@@ -565,7 +687,8 @@ mod tests {
             .map(|interval| interval.id)
             .collect::<std::collections::HashSet<_>>();
         assert!(unclosed_ids.contains(&live_open));
-        assert!(unclosed_ids.contains(&live_focus));
+        assert!(restored_focus.is_some_and(|id| unclosed_ids.contains(&id)));
+        assert!(!unclosed_ids.contains(&live_focus));
         assert!(!unclosed_ids.contains(&stale_open));
         assert!(!unclosed_ids.contains(&stale_focus));
         assert_eq!(unclosed_ids.len(), 2);
@@ -630,6 +753,50 @@ mod tests {
     }
 
     #[test]
+    fn focused_title_change_starts_new_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.privacy.title_capture = TitleCapture::All;
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .open_window(window_with_title(
+                "0x1",
+                "firefox",
+                "Issue #1 - Mozilla Firefox",
+            ))
+            .unwrap();
+        tracker.set_active_window(Some("0x1")).unwrap();
+        let first_id = tracker
+            .state
+            .focused
+            .as_ref()
+            .map(|focused| focused.interval_id)
+            .unwrap();
+
+        tracker
+            .open_window(window_with_title(
+                "0x1",
+                "firefox",
+                "Issue #2 - Mozilla Firefox",
+            ))
+            .unwrap();
+        tracker.sync_focused_interval().unwrap();
+
+        let second_id = tracker
+            .state
+            .focused
+            .as_ref()
+            .map(|focused| focused.interval_id)
+            .unwrap();
+        assert_ne!(first_id, second_id);
+
+        let titles = tracker.storage.focused_titles_for_tests().unwrap();
+        assert_eq!(titles, vec!["Issue #1", "Issue #2"]);
+    }
+
+    #[test]
     fn steam_app_classes_use_readable_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
@@ -668,6 +835,80 @@ mod tests {
 
         tracker.set_focus_paused(false).unwrap();
         assert!(tracker.state.focused.is_some());
+    }
+
+    #[test]
+    fn session_pause_records_idle_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .set_session_pause(Some(SessionIntervalKind::Idle), Some("test"), 100)
+            .unwrap();
+        assert_eq!(
+            tracker
+                .storage
+                .unclosed_session_intervals()
+                .unwrap()
+                .into_iter()
+                .map(|interval| interval.kind)
+                .collect::<Vec<_>>(),
+            vec![SessionIntervalKind::Idle]
+        );
+
+        tracker.set_session_pause(None, None, 220).unwrap();
+        let totals = tracker.storage.session_totals_between(0, 300).unwrap();
+        assert_eq!(totals.idle_seconds, 120);
+        assert_eq!(totals.locked_seconds, 0);
+    }
+
+    #[test]
+    fn audio_playback_prevents_idle_pause_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let tracker = Tracker::new(storage, config);
+        let mut status = SessionStatus {
+            idle: true,
+            locked: false,
+            stay_awake: false,
+            audio_playing: true,
+            source: "test",
+        };
+
+        assert_eq!(tracker.session_pause_kind(&status), None);
+
+        status.audio_playing = false;
+        assert_eq!(
+            tracker.session_pause_kind(&status),
+            Some(SessionIntervalKind::Idle)
+        );
+
+        status.locked = true;
+        status.audio_playing = true;
+        assert_eq!(
+            tracker.session_pause_kind(&status),
+            Some(SessionIntervalKind::Locked)
+        );
+    }
+
+    #[test]
+    fn non_user_facing_windows_are_not_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .open_window(window("0x1", "xdg-desktop-portal-gtk"))
+            .unwrap();
+        tracker.set_active_window(Some("0x1")).unwrap();
+
+        assert!(tracker.state.focused.is_none());
+        assert!(tracker.state.open_interval_ids.is_empty());
+        assert!(tracker.state.app_open_counts.is_empty());
     }
 
     #[tokio::test]
@@ -712,11 +953,15 @@ mod tests {
     }
 
     fn window(address: &str, class: &str) -> Window {
+        window_with_title(address, class, "title")
+    }
+
+    fn window_with_title(address: &str, class: &str, title: &str) -> Window {
         Window {
             address: address.to_string(),
             class: class.to_string(),
             initial_class: Some(class.to_string()),
-            title: Some("title".to_string()),
+            title: Some(title.to_string()),
             pid: Some(1),
         }
     }

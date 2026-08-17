@@ -3,10 +3,12 @@ use clap::Parser;
 use omastat::{
     cli::{self, Cli, Commands},
     config::Config,
+    export::{self, ExportOptions},
     steam::SteamResolver,
     storage::Storage,
     tui,
 };
+use std::fs;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -16,7 +18,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref())?;
-    let storage = Storage::open(cli.database.as_deref(), &config)?;
+    let mut storage = Storage::open(cli.database.as_deref(), &config)?;
     let mut steam = SteamResolver::default();
 
     match cli.command {
@@ -49,8 +51,39 @@ async fn main() -> Result<()> {
                 cli.json,
             )?;
         }
+        Commands::Summary { days } => {
+            let report = cli::summary_report(&storage, &mut steam, days)?;
+            cli::print_summary(&report)?;
+        }
+        Commands::Export {
+            lens,
+            offset,
+            output,
+            title,
+        } => {
+            if let Some(parent) = output.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                fs::create_dir_all(parent)?;
+            }
+            let html = export::render_html(
+                &storage,
+                &mut steam,
+                ExportOptions {
+                    lens: lens.into(),
+                    offset,
+                    title,
+                },
+            )?;
+            fs::write(&output, html)?;
+            println!("Exported {}", output.display());
+        }
         Commands::Tui => {
             tui::run(storage)?;
+        }
+        Commands::RepairTitles { dry_run } => {
+            let repair = storage.repair_titles(&mut steam, dry_run)?;
+            cli::print_title_repair(&repair, cli.json)?;
         }
         Commands::Doctor => {
             cli::doctor(&config, &storage).await?;

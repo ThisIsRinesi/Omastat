@@ -8,7 +8,7 @@ BarWidget {
   id: root
   moduleName: "local.omastat"
 
-  property string displayText: "Oma"
+  property string displayText: "󰔟"
   property string tooltip: "Omastat"
   property string statusText: "Not loaded"
   property string errorText: ""
@@ -16,11 +16,18 @@ BarWidget {
   property bool refreshRunning: false
   property bool refreshQueued: false
   property var rows: []
+  property var daily: []
+  property string todayKey: ""
   property int totalFocused: 0
   property int totalOpen: 0
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property real openPanelIndicatorWidth: button.labelWidth
+  readonly property string glyph: "󰔟"
+  readonly property bool iconOnly: {
+    var value = root.setting("iconOnly", false)
+    return value === true || value === "true"
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -30,6 +37,10 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
   onRowsChanged: injectPanel()
+  onDailyChanged: injectPanel()
+  onTodayKeyChanged: injectPanel()
+  onTotalFocusedChanged: injectPanel()
+  onTotalOpenChanged: injectPanel()
   onStatusTextChanged: injectPanel()
   onErrorTextChanged: injectPanel()
 
@@ -49,7 +60,7 @@ BarWidget {
       if (exitCode !== 0) {
         root.errorText = "Report command failed"
         root.statusText = "Command failed"
-        root.displayText = "Oma !"
+        root.displayText = root.glyph + " !"
         root.tooltip = "Omastat report failed"
       }
       if (root.refreshQueued) {
@@ -83,26 +94,32 @@ BarWidget {
   IpcHandler {
     target: "local.omastat"
 
-    function refresh(): void { root.broadcast("refresh") }
+    function refresh(): void { root.refresh() }
     function open(): void { root.open() }
     function close(): void { root.close() }
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function status(): void {
+      console.log("local.omastat status: opened=" + root.opened
+        + " total=" + root.formatDuration(root.totalFocused)
+        + " apps=" + root.rows.length
+        + " updated=" + root.updatedText)
+    }
   }
 
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.vertical ? "O" : root.displayText
+    text: root.vertical || root.iconOnly ? root.glyph : root.displayText
     fontSize: 12
     horizontalMargin: 8
     tooltipText: root.tooltip
     active: root.refreshRunning || root.errorText !== ""
 
     onPressed: function(button) {
-      if (button === Qt.RightButton) root.refresh()
+      if (button === Qt.RightButton) root.toggleIconOnly()
       else if (button === Qt.MiddleButton) root.openTerminalReport()
       else root.togglePanel()
     }
@@ -115,7 +132,7 @@ BarWidget {
     }
     errorText = ""
     statusText = "Refreshing"
-    reportProcess.command = shellCommand(String(root.setting("command", "omastat --json today")))
+    reportProcess.command = shellCommand(String(root.setting("command", "omastat summary")))
     reportProcess.running = true
   }
 
@@ -123,25 +140,42 @@ BarWidget {
     var parsed = []
     try {
       parsed = JSON.parse(String(text || "[]"))
-      if (!Array.isArray(parsed)) throw new Error("report was not an array")
     } catch (error) {
       rows = []
+      daily = []
+      todayKey = ""
       totalFocused = 0
       totalOpen = 0
-      displayText = "Oma !"
+      displayText = root.glyph + " !"
       tooltip = "Omastat report parse failed"
       errorText = "Report JSON parse failed"
       statusText = "Parse failed"
       return
     }
 
-    rows = parsed
-    totalFocused = sumSeconds(rows, "focused_seconds")
-    totalOpen = sumSeconds(rows, "open_seconds")
+    if (Array.isArray(parsed)) {
+      rows = parsed
+      daily = []
+      todayKey = ""
+      totalFocused = sumSeconds(rows, "focused_seconds")
+      totalOpen = sumSeconds(rows, "open_seconds")
+    } else if (parsed && typeof parsed === "object") {
+      rows = Array.isArray(parsed.rows) ? parsed.rows : []
+      daily = Array.isArray(parsed.daily) ? parsed.daily : []
+      todayKey = String(parsed.today_key || "")
+      totalFocused = Number(parsed.total_focused_seconds || sumSeconds(rows, "focused_seconds"))
+      totalOpen = Number(parsed.total_open_seconds || sumSeconds(rows, "open_seconds"))
+    } else {
+      rows = []
+      daily = []
+      todayKey = ""
+      totalFocused = 0
+      totalOpen = 0
+    }
     updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
 
     if (rows.length === 0 || totalFocused <= 0) {
-      displayText = "Oma 0s"
+      displayText = root.glyph + " 0s"
       tooltip = "No focused time today"
       statusText = "No focused time today"
       errorText = ""
@@ -149,7 +183,7 @@ BarWidget {
     }
 
     var top = rows[0]
-    displayText = shortApp(String(top.app_class || "App")) + " " + formatDuration(Number(top.focused_seconds || 0))
+    displayText = root.glyph + " " + formatDuration(totalFocused)
     tooltip = "Today: " + formatDuration(totalFocused) + " focused"
       + "\nOpen: " + formatDuration(totalOpen)
       + "\nTop: " + String(top.app_class || "App")
@@ -166,6 +200,8 @@ BarWidget {
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
     if ("rows" in target) target.rows = root.rows
+    if ("daily" in target) target.daily = root.daily
+    if ("todayKey" in target) target.todayKey = root.todayKey
     if ("totalFocused" in target) target.totalFocused = root.totalFocused
     if ("totalOpen" in target) target.totalOpen = root.totalOpen
     if ("statusText" in target) target.statusText = root.statusText
@@ -196,9 +232,20 @@ BarWidget {
     root.bar.run(String(root.setting("terminalCommand", "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'")))
   }
 
+  function toggleIconOnly() {
+    var next = !root.iconOnly
+    var entry = { id: root.moduleName }
+    var current = root.settings || {}
+    for (var key in current) if (key !== "id") entry[key] = current[key]
+    entry.iconOnly = next
+    root.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
   function shellCommand(command) {
     var value = String(command || "").trim()
-    if (value.length === 0) value = "omastat --json today"
+    if (value.length === 0) value = "omastat summary"
     return ["bash", "-lc", "PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; " + value]
   }
 

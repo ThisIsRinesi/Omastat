@@ -36,6 +36,7 @@ pub enum Event {
     WindowOpened(Window),
     WindowClosed { address: String },
     FocusChanged { address: Option<String> },
+    WindowTitleChanged { address: Option<String> },
     Unknown,
 }
 
@@ -76,7 +77,7 @@ pub fn socket_paths() -> Result<SocketPaths> {
 
 pub async fn snapshot() -> Result<Snapshot> {
     let windows = clients().await?;
-    let active_address = active_window().await?;
+    let active_address = active_window_address().await?;
     Ok(Snapshot {
         windows,
         active_address,
@@ -102,7 +103,7 @@ async fn clients() -> Result<Vec<Window>> {
     Ok(clients.into_iter().map(Window::from).collect())
 }
 
-async fn active_window() -> Result<Option<String>> {
+pub async fn active_window_details() -> Result<Option<Window>> {
     let output = Command::new("hyprctl")
         .args(["-j", "activewindow"])
         .output()
@@ -118,11 +119,43 @@ async fn active_window() -> Result<Option<String>> {
 
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .context("failed to parse hyprctl activewindow JSON")?;
-    Ok(value
+    let Some(address) = value
         .get("address")
         .and_then(|value| value.as_str())
         .filter(|address| !address.is_empty() && *address != "0x0")
-        .map(normalize_address))
+        .map(normalize_address)
+    else {
+        return Ok(None);
+    };
+
+    let class = value
+        .get("class")
+        .and_then(|value| value.as_str())
+        .filter(|class| !class.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    let initial_class = value
+        .get("initialClass")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let title = value
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+    let pid = value.get("pid").and_then(|value| value.as_i64());
+
+    Ok(Some(Window {
+        address,
+        class,
+        initial_class,
+        title,
+        pid,
+    }))
+}
+
+async fn active_window_address() -> Result<Option<String>> {
+    Ok(active_window_details().await?.map(|window| window.address))
 }
 
 fn parse_event(line: &str) -> Event {
@@ -132,6 +165,9 @@ fn parse_event(line: &str) -> Event {
 
     match name {
         "activewindowv2" => Event::FocusChanged {
+            address: non_empty_address(payload),
+        },
+        "windowtitle" => Event::WindowTitleChanged {
             address: non_empty_address(payload),
         },
         "openwindow" => {
@@ -215,6 +251,16 @@ mod tests {
         assert_eq!(
             parse_event("activewindowv2>>abc"),
             Event::FocusChanged {
+                address: Some("0xabc".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn parses_window_title_event() {
+        assert_eq!(
+            parse_event("windowtitle>>abc"),
+            Event::WindowTitleChanged {
                 address: Some("0xabc".to_string())
             }
         );

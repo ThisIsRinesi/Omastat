@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
+import "Model.js" as Model
 
 Panel {
   id: root
@@ -11,11 +12,14 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   property var rows: []
+  property var daily: []
+  property string todayKey: ""
   property int totalFocused: 0
   property int totalOpen: 0
   property string statusText: ""
   property string errorText: ""
   property string updatedText: ""
+  property bool patternsExpanded: false
 
   readonly property var barIdentity: hostWidget || root
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
@@ -23,7 +27,20 @@ Panel {
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.58)
   readonly property color track: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.12)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property var topRows: rows.slice(0, Math.min(rows.length, 8))
+
+  readonly property var apps: Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
+  readonly property var segments: Model.arcSegments(apps)
+  readonly property var sliceColors: Model.sliceColors(apps.length, Color.accent)
+  readonly property var insightRows: Model.insights(rows, daily, todayKey, totalFocused)
+  readonly property var weekTrend: Model.weekTrend(daily, todayKey)
+  readonly property real weekMax: {
+    var max = 0
+    for (var i = 0; i < weekTrend.length; i++) max = Math.max(max, Number(weekTrend[i].seconds || 0))
+    return max
+  }
+  readonly property real ringSize: Style.space(116)
+  readonly property real ringWidth: Style.space(14)
+  readonly property real ringRadius: ringSize / 2 - ringWidth / 2
 
   function refresh() {
     if (hostWidget && hostWidget.refresh) hostWidget.refresh()
@@ -33,24 +50,31 @@ Panel {
     if (hostWidget && hostWidget.openTerminalReport) hostWidget.openTerminalReport()
   }
 
-  function rowShare(row) {
-    if (totalFocused <= 0) return 0
-    return Math.max(0, Math.min(1, Number(row.focused_seconds || 0) / totalFocused))
-  }
-
-  function appLabel(app) {
-    var value = String(app || "App").replace(/^com\./, "").replace(/^org\./, "")
-    var parts = value.split(".")
-    return parts[parts.length - 1] || value
-  }
-
   function formatDuration(seconds) {
-    seconds = Math.max(0, Math.floor(seconds))
-    if (seconds < 60) return seconds + "s"
-    var minutes = Math.floor(seconds / 60)
-    var hours = Math.floor(minutes / 60)
-    if (hours > 0) return hours + "h " + String(minutes % 60).padStart(2, "0") + "m"
-    return minutes + "m"
+    return Model.fmt(seconds)
+  }
+
+  function sliceColor(index, alpha) {
+    var hex = String(root.sliceColors[index] || Color.accent).replace(/[#\s]/g, "")
+    var r = parseInt(hex.substr(0, 2), 16) / 255
+    var g = parseInt(hex.substr(2, 2), 16) / 255
+    var b = parseInt(hex.substr(4, 2), 16) / 255
+    if (isNaN(r) || isNaN(g) || isNaN(b)) return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, alpha)
+    return Qt.rgba(r, g, b, alpha)
+  }
+
+  function scrollBy(dy) {
+    if (scroll.contentHeight <= scroll.height) return
+    scroll.contentY = Math.max(0, Math.min(scroll.contentHeight - scroll.height, scroll.contentY + dy))
+  }
+
+  function togglePatterns() {
+    root.patternsExpanded = !root.patternsExpanded
+    if (root.patternsExpanded) {
+      Qt.callLater(function() {
+        scroll.contentY = Math.max(0, scroll.contentHeight - scroll.height)
+      })
+    }
   }
 
   KeyboardPanel {
@@ -61,17 +85,21 @@ Panel {
     open: root.opened
     centerOnBar: true
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight)
+    contentWidth: panel.fittedContentWidth(Style.space(390))
+    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight, Style.space(500))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      onMoveRequested: function(dx, dy) {
+        if (dy !== 0) root.scrollBy(-dy * Style.space(24))
+      }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
         if (text === "r" || text === "R") root.refresh()
         else if (text === "t" || text === "T") root.openTerminalReport()
+        else if (text === "p" || text === "P") root.togglePatterns()
       }
 
       Flickable {
@@ -86,18 +114,22 @@ Panel {
         Column {
           id: contentColumn
           width: scroll.width
-          spacing: Style.space(10)
+          spacing: Style.space(12)
 
-          RowLayout {
+          Item {
             width: parent.width
-            spacing: Style.space(12)
+            implicitHeight: Math.max(titleColumn.implicitHeight, patternsToggle.implicitHeight)
 
-            ColumnLayout {
-              Layout.fillWidth: true
+            Column {
+              id: titleColumn
+              anchors.left: parent.left
+              anchors.right: patternsToggle.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
 
               Text {
-                Layout.fillWidth: true
+                width: parent.width
                 text: "Omastat"
                 color: root.foreground
                 font.family: root.fontFamily
@@ -107,21 +139,44 @@ Panel {
               }
 
               Text {
-                Layout.fillWidth: true
-                text: root.errorText !== "" ? root.errorText : root.statusText
-                color: root.errorText !== "" ? Color.urgent : root.dim
+                width: parent.width
+                text: root.totalFocused > 0 ? Model.fmtWords(root.totalFocused) : "0 MINUTES"
+                color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.caption
+                font.bold: true
                 elide: Text.ElideRight
               }
             }
 
-            Text {
-              text: root.formatDuration(root.totalFocused)
-              color: root.accent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
+            Row {
+              id: patternsToggle
+              anchors.right: parent.right
+              anchors.top: parent.top
+              spacing: Style.space(3)
+
+              Text {
+                text: "PATTERNS"
+                color: patternsMouse.containsMouse ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Text {
+                text: root.patternsExpanded ? "v" : ">"
+                color: patternsMouse.containsMouse ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+            }
+
+            MouseArea {
+              id: patternsMouse
+              anchors.fill: patternsToggle
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.togglePatterns()
             }
           }
 
@@ -152,83 +207,240 @@ Panel {
             foreground: root.foreground
           }
 
-          Column {
-            id: appList
+          Item {
             width: parent.width
-            spacing: Style.space(7)
+            visible: root.apps.length > 0
+            implicitHeight: visible ? Math.max(root.ringSize, legendColumn.implicitHeight) : 0
 
-            Text {
-              visible: root.topRows.length === 0
-              width: parent.width
-              text: "No focused app time today"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              horizontalAlignment: Text.AlignHCenter
-            }
+            Item {
+              id: donutItem
+              width: root.ringSize
+              height: root.ringSize
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
 
-            Repeater {
-              model: root.topRows
+              Canvas {
+                id: donutCanvas
+                anchors.fill: parent
 
-              Item {
-                required property var modelData
-                required property int index
-
-                width: appList.width
-                height: Math.max(nameText.implicitHeight, Style.space(20))
-
-                Text {
-                  id: rankText
-                  width: Style.space(24)
-                  anchors.left: parent.left
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: String(index + 1)
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  horizontalAlignment: Text.AlignRight
+                Connections {
+                  target: root
+                  function onSegmentsChanged() { donutCanvas.requestPaint() }
+                  function onSliceColorsChanged() { donutCanvas.requestPaint() }
                 }
 
+                onPaint: {
+                  var ctx = getContext("2d")
+                  ctx.reset()
+                  var segs = root.segments
+                  if (!segs || segs.length === 0) return
+                  var toRad = Math.PI / 180
+                  for (var i = 0; i < segs.length; i++) {
+                    var seg = segs[i]
+                    ctx.lineWidth = root.ringWidth
+                    ctx.strokeStyle = root.sliceColor(i, 1.0)
+                    ctx.beginPath()
+                    ctx.arc(width / 2, height / 2, root.ringRadius, seg.startAngle * toRad, (seg.startAngle + seg.sweepAngle) * toRad, false)
+                    ctx.stroke()
+                  }
+                }
+              }
+
+              Column {
+                anchors.centerIn: parent
+                width: parent.width * 0.62
+                spacing: Style.space(1)
+
                 Text {
-                  id: nameText
-                  anchors.left: rankText.right
-                  anchors.leftMargin: Style.space(8)
-                  anchors.right: durationText.left
-                  anchors.rightMargin: Style.space(12)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: root.appLabel(modelData.app_class)
+                  width: parent.width
+                  text: "TODAY"
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                  horizontalAlignment: Text.AlignHCenter
                   elide: Text.ElideRight
                 }
 
-                Rectangle {
-                  anchors.left: nameText.left
-                  anchors.right: nameText.right
-                  anchors.bottom: parent.bottom
-                  height: Math.max(1, Style.space(2))
-                  radius: height / 2
-                  color: root.track
-
-                  Rectangle {
-                    width: parent.width * root.rowShare(modelData)
-                    height: parent.height
-                    radius: parent.radius
-                    color: root.accent
-                  }
-                }
-
                 Text {
-                  id: durationText
-                  width: Style.space(70)
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: root.formatDuration(Number(modelData.focused_seconds || 0))
+                  width: parent.width
+                  text: root.formatDuration(root.totalFocused)
                   color: root.dim
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  horizontalAlignment: Text.AlignRight
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  horizontalAlignment: Text.AlignHCenter
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
+            Column {
+              id: legendColumn
+              anchors.left: donutItem.right
+              anchors.leftMargin: Style.space(16)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(5)
+
+              Repeater {
+                model: root.apps
+
+                Item {
+                  required property var modelData
+                  required property int index
+
+                  width: parent.width
+                  implicitHeight: Math.max(swatch.height, Math.max(appNameText.implicitHeight, appTimeText.implicitHeight))
+
+                  Rectangle {
+                    id: swatch
+                    width: Style.space(7)
+                    height: width
+                    radius: width / 2
+                    color: root.sliceColors[index] || root.accent
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    id: appNameText
+                    text: String(modelData.app || "")
+                    color: root.foreground
+                    opacity: 0.68
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+                    anchors.left: swatch.right
+                    anchors.leftMargin: Style.space(6)
+                    anchors.right: appTimeText.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    id: appTimeText
+                    text: Model.fmt(Number(modelData.seconds || 0))
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+              }
+            }
+          }
+
+          Text {
+            visible: root.apps.length === 0
+            width: parent.width
+            text: root.errorText !== "" ? root.errorText : "No focused app time today"
+            color: root.errorText !== "" ? Color.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+          }
+
+          Item {
+            width: parent.width
+            visible: root.patternsExpanded && (root.weekTrend.length > 0 || root.insightRows.length > 0)
+            implicitHeight: visible ? patternsColumn.implicitHeight : 0
+
+            Column {
+              id: patternsColumn
+              width: parent.width
+              spacing: Style.space(10)
+
+              PanelSeparator {
+                width: parent.width
+                foreground: root.foreground
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: root.weekTrend
+
+                  Column {
+                    required property var modelData
+
+                    width: (parent.width - parent.spacing * 6) / 7
+                    spacing: Style.space(3)
+
+                    Item {
+                      id: trendSlot
+                      width: parent.width
+                      height: Style.space(42)
+
+                      Rectangle {
+                        width: parent.width * 0.42
+                        radius: Style.space(2)
+                        color: modelData.isToday ? root.sliceColor(0, 1.0) : root.sliceColor(0, 0.28)
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom
+                        height: {
+                          if (modelData.seconds <= 0 || root.weekMax <= 0) return 3
+                          return Math.max(3, trendSlot.height * Number(modelData.seconds) / root.weekMax)
+                        }
+                      }
+                    }
+
+                    Text {
+                      width: parent.width
+                      text: String(modelData.label || "")
+                      color: root.foreground
+                      opacity: modelData.isToday ? 1.0 : 0.5
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      horizontalAlignment: Text.AlignHCenter
+                      elide: Text.ElideRight
+                    }
+                  }
+                }
+              }
+
+              PanelSeparator {
+                width: parent.width
+                foreground: root.foreground
+              }
+
+              Repeater {
+                model: root.insightRows
+
+                Item {
+                  required property var modelData
+
+                  width: parent.width
+                  implicitHeight: Math.max(labelText.implicitHeight, valueText.implicitHeight)
+
+                  Text {
+                    id: labelText
+                    text: String(modelData.label || "")
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    width: parent.width * 0.4
+                  }
+
+                  Text {
+                    id: valueText
+                    text: String(modelData.value || "")
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideRight
+                    width: parent.width * 0.58
+                  }
                 }
               }
             }
@@ -236,6 +448,16 @@ Panel {
 
           PanelSeparator {
             foreground: root.foreground
+          }
+
+          Text {
+            width: parent.width
+            text: root.errorText !== "" ? root.errorText : root.statusText
+            color: root.errorText !== "" ? Color.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
           }
 
           RowLayout {
