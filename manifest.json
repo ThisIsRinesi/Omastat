@@ -9,7 +9,7 @@
   "description": "Local focused/open application usage for the Omarchy Quattro bar.",
   "kinds": ["bar-widget"],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
+    "barWidget": "packaging/omarchy/omastat/BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Omastat",
