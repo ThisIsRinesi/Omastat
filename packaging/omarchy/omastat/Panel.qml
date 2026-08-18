@@ -12,8 +12,11 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   property var rows: []
+  property var reportApps: []
+  property var reportInsights: []
   property var daily: []
   property string todayKey: ""
+  property string periodLabel: "Today"
   property int totalFocused: 0
   property int totalOpen: 0
   property string statusText: ""
@@ -28,11 +31,12 @@ Panel {
   readonly property color track: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.12)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property var apps: Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
+  readonly property var apps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
   readonly property var segments: Model.arcSegments(apps)
   readonly property var sliceColors: Model.sliceColors(apps.length, Color.accent)
-  readonly property var insightRows: Model.insights(rows, daily, todayKey, totalFocused)
+  readonly property var insightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
   readonly property var weekTrend: Model.weekTrend(daily, todayKey)
+  readonly property string densityText: totalOpen > 0 ? Model.percent(totalFocused / totalOpen) : "--"
   readonly property real weekMax: {
     var max = 0
     for (var i = 0; i < weekTrend.length; i++) max = Math.max(max, Number(weekTrend[i].seconds || 0))
@@ -140,7 +144,7 @@ Panel {
 
               Text {
                 width: parent.width
-                text: root.totalFocused > 0 ? Model.fmtWords(root.totalFocused) : "0 MINUTES"
+                text: root.periodLabel || "Today"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -186,14 +190,14 @@ Panel {
 
             StatBlock {
               Layout.fillWidth: true
-              label: "Focused"
-              value: root.formatDuration(root.totalFocused)
+              label: "Open"
+              value: root.formatDuration(root.totalOpen)
             }
 
             StatBlock {
               Layout.fillWidth: true
-              label: "Open"
-              value: root.formatDuration(root.totalOpen)
+              label: "Density"
+              value: root.densityText
             }
 
             StatBlock {
@@ -253,7 +257,7 @@ Panel {
 
                 Text {
                   width: parent.width
-                  text: "TODAY"
+                  text: "FOCUSED"
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -451,8 +455,9 @@ Panel {
           }
 
           Text {
+            visible: root.errorText !== "" || root.statusText === "Refreshing"
             width: parent.width
-            text: root.errorText !== "" ? root.errorText : root.statusText
+            text: root.errorText !== "" ? root.errorText : "Refreshing..."
             color: root.errorText !== "" ? Color.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall

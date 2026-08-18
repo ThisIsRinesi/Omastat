@@ -518,26 +518,8 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     second.extend([
         Span::styled("  period ", Style::default().fg(theme.dim).bg(theme.bg)),
         Span::styled(
-            fit_text(&app.report.period.label, 22),
+            fit_text(&app.report.period.label, 28),
             Style::default().fg(theme.text).bg(theme.bg),
-        ),
-        Span::styled("  focus ", Style::default().fg(theme.dim).bg(theme.bg)),
-        Span::styled(
-            report::format_duration(app.report.total_focused_seconds),
-            Style::default().fg(theme.warn).bg(theme.bg),
-        ),
-        Span::styled("  open ", Style::default().fg(theme.dim).bg(theme.bg)),
-        Span::styled(
-            report::format_duration(app.report.total_open_seconds),
-            Style::default().fg(theme.secondary).bg(theme.bg),
-        ),
-        Span::styled("  density ", Style::default().fg(theme.dim).bg(theme.bg)),
-        Span::styled(
-            report::percent(ratio(
-                app.report.total_focused_seconds,
-                app.report.total_open_seconds,
-            )),
-            Style::default().fg(theme.tertiary).bg(theme.bg),
         ),
         Span::styled("  updated ", Style::default().fg(theme.dim).bg(theme.bg)),
         Span::styled(
@@ -571,12 +553,24 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     } else {
         format!("{} back", app.period_offset.abs())
     };
-    let left = format!(
-        " Tab view  h/l lens  [/] period  1-5 lens  j/k select  p patterns  r refresh  q quit  [{} / {} / {}]",
+    let active = format!(
+        "[{} / {} / {}]",
         app.view.label(),
         app.lens.label(),
         period_hint
     );
+    let left = match app.view {
+        View::Overview => {
+            format!(" Tab view  h/l lens  [/] period  p patterns  r refresh  q quit  {active}")
+        }
+        View::Apps => format!(
+            " j/k select  PgUp/PgDn jump  h/l lens  [/] period  r refresh  q quit  {active}"
+        ),
+        View::Timeline => {
+            format!(" j/k select app  h/l lens  [/] period  r refresh  q quit  {active}")
+        }
+        View::System => format!(" Tab view  h/l lens  r refresh  q quit  {active}"),
+    };
     let right = format!("{}s auto", AUTO_REFRESH.as_secs());
     let width = area.width as usize;
     let left_len = left.chars().count();
@@ -621,7 +615,7 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) 
         };
         render_hero(frame, hero, app, theme);
         render_breakdown(frame, apps, app, theme);
-        render_trend(frame, trend, app, theme);
+        render_trend(frame, trend, app, theme, true);
         return;
     }
 
@@ -656,7 +650,7 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) 
 
     render_hero(frame, hero, app, theme);
     render_breakdown(frame, breakdown, app, theme);
-    render_trend(frame, trend, app, theme);
+    render_trend(frame, trend, app, theme, false);
     render_insights(frame, insights, app, theme);
     render_lens_totals(frame, lenses, app, theme);
 }
@@ -675,6 +669,12 @@ fn render_hero(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         .first()
         .map(|app| app.label.clone())
         .unwrap_or_else(|| "no app focus yet".to_string());
+    let focused_app_count = app
+        .report
+        .rows
+        .iter()
+        .filter(|row| row.focused_seconds > 0)
+        .count();
     let lines = vec![
         Line::from(vec![
             Span::styled(
@@ -705,11 +705,7 @@ fn render_hero(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         ]),
         Line::from(Span::styled(
             fit_text(
-                &format!(
-                    "{} apps tracked across {}",
-                    app.report.rows.len(),
-                    app.report.period.label
-                ),
+                &format!("{focused_app_count} apps with focused time"),
                 inner.width as usize,
             ),
             Style::default().fg(theme.muted).bg(theme.panel),
@@ -773,9 +769,15 @@ fn render_breakdown(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
     );
 }
 
-fn render_trend(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_trend(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    include_patterns: bool,
+) {
     let block = panel(
-        if app.show_patterns {
+        if include_patterns && app.show_patterns {
             "patterns"
         } else {
             "trend"
@@ -787,7 +789,7 @@ fn render_trend(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(block, area);
 
     let mut lines = daily_bar_lines(&app.report.daily, inner.width as usize, theme);
-    if app.show_patterns {
+    if include_patterns && app.show_patterns {
         for row in &app.report.insights {
             lines.push(metric_line(
                 &row.label,
@@ -1093,13 +1095,9 @@ fn render_timeline_map(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
             theme,
         ),
         Line::from(Span::styled(
-            "focused blocks use app color; open-only time is dim",
-            Style::default().fg(theme.muted).bg(theme.panel),
-        )),
-        Line::from(Span::styled(
             fit_text(
                 &format!(
-                    "{} intervals today, {} selected",
+                    "{} intervals today; selected {}",
                     app.today_intervals.len(),
                     app.rows()
                         .get(app.selected)
@@ -1210,26 +1208,6 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
             ),
             width,
             theme.secondary,
-            theme,
-        ),
-        Line::from(Span::styled(
-            rule(width),
-            Style::default().fg(theme.dim).bg(theme.panel),
-        )),
-        metric_line("View", app.view.label(), width, theme.primary, theme),
-        metric_line(
-            "Lens",
-            app.lens.title(),
-            width,
-            lens_color(app.lens, theme),
-            theme,
-        ),
-        metric_line("Period", &app.report.period.label, width, theme.warn, theme),
-        metric_line(
-            "Rows",
-            &app.report.rows.len().to_string(),
-            width,
-            theme.text,
             theme,
         ),
         metric_line(

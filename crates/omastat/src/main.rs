@@ -5,7 +5,7 @@ use omastat::{
     config::Config,
     export::{self, ExportOptions},
     steam::SteamResolver,
-    storage::Storage,
+    storage::{Storage, StorageOpenMode},
     tui,
 };
 use std::fs;
@@ -18,7 +18,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref())?;
-    let mut storage = Storage::open(cli.database.as_deref(), &config)?;
+    let storage_mode = match &cli.command {
+        Commands::RepairTitles { .. } => StorageOpenMode::ReadWriteMigrate,
+        _ => StorageOpenMode::ReadOnly,
+    };
+    let mut storage = Storage::open_with_mode(cli.database.as_deref(), &config, storage_mode)?;
     let mut steam = SteamResolver::default();
 
     match cli.command {

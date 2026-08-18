@@ -74,13 +74,6 @@ fn document(
         .filter(|row| row.focused_seconds > 0)
         .count();
     let longest_streak = longest_focus_streak(&report.daily);
-    let top = report.rows.iter().find(|row| row.focused_seconds > 0);
-    let top_app = top
-        .map(|row| report::app_label(&row.app_class))
-        .unwrap_or_else(|| "No focus yet".to_string());
-    let top_share = top
-        .map(|row| report::percent(ratio(row.focused_seconds, report.total_focused_seconds)))
-        .unwrap_or_else(|| "0%".to_string());
     let peak_day = report
         .daily
         .iter()
@@ -88,7 +81,6 @@ fn document(
         .filter(|day| day.focused_seconds > 0);
     let app_count_label = app_count.to_string();
     let longest_streak_label = format!("{longest_streak}d");
-    let top_share_note = format!("{top_share} of focus");
     let peak_day_label = peak_day
         .map(|day| day.label.clone())
         .unwrap_or_else(|| "none".to_string());
@@ -96,13 +88,12 @@ fn document(
         .map(|day| report::format_duration(day.focused_seconds))
         .unwrap_or_else(|| "no focus".to_string());
     let mut number_card_rows = vec![
-        NumberCard::new("Open time", &open, "apps remained open"),
-        NumberCard::new("Apps tracked", &app_count_label, "with focused time"),
-        NumberCard::new("Top app", &top_app, &top_share_note),
+        NumberCard::new("Open time", &open, "tracked beside focus"),
+        NumberCard::new("Apps", &app_count_label, "with focused time"),
         NumberCard::new(
             "Longest streak",
             &longest_streak_label,
-            "consecutive focused days",
+            "focused days in a row",
         ),
         NumberCard::new("Peak day", &peak_day_label, &peak_day_duration),
     ];
@@ -133,14 +124,14 @@ fn document(
 <main class="replay">
   <section class="hero">
     <div class="hero-copy">
-      <p class="eyebrow">Omastat local replay</p>
+      <p class="eyebrow">Omastat replay</p>
       <h1>{title}</h1>
-      <p class="subhead">{period} - {range} - generated {generated}</p>
+      <p class="subhead">{period} - {range} - captured locally - generated {generated}</p>
     </div>
     <div class="hero-card hero-total">
       <small>Focused time</small>
       <strong>{focused}</strong>
-      <span>{density} of open app time</span>
+      <span>{density} focus density</span>
     </div>
   </section>
 
@@ -152,10 +143,10 @@ fn document(
     <article class="panel panel-wide">
       <div class="panel-heading">
         <div>
-          <span class="kicker">Steam Replay-style stacked view</span>
+          <span class="kicker">Daily replay</span>
           <h2>Focus by day</h2>
         </div>
-        <p>Each column is a local day. Color bands show the top apps driving that day.</p>
+        <p>Stacked by app for the selected period.</p>
       </div>
       {stacked_days}
     </article>
@@ -163,7 +154,7 @@ fn document(
     <article class="panel">
       <div class="panel-heading compact">
         <div>
-          <span class="kicker">Share of attention</span>
+          <span class="kicker">Attention ranking</span>
           <h2>Top apps</h2>
         </div>
       </div>
@@ -175,10 +166,10 @@ fn document(
     <article class="panel">
       <div class="panel-heading">
         <div>
-          <span class="kicker">Scale + density</span>
+          <span class="kicker">App gravity</span>
           <h2>App constellation</h2>
         </div>
-        <p>Bigger bubbles mean more focused time; brighter outlines mean denser focus while open.</p>
+        <p>Scale shows focus; outline shows density.</p>
       </div>
       {constellation}
     </article>
@@ -186,10 +177,10 @@ fn document(
     <article class="panel">
       <div class="panel-heading">
         <div>
-          <span class="kicker">When focus happened</span>
+          <span class="kicker">Focus windows</span>
           <h2>Week x hour heatmap</h2>
         </div>
-        <p>Dark cells are quiet; cyan and yellow cells mark recurring focus windows.</p>
+        <p>Brighter cells mark recurring focus.</p>
       </div>
       {heatmap_chart}
     </article>
@@ -199,8 +190,8 @@ fn document(
     <article class="panel">
       <div class="panel-heading compact">
         <div>
-          <span class="kicker">Behavior fingerprint</span>
-          <h2>Radar</h2>
+          <span class="kicker">Behavior print</span>
+          <h2>Rhythm radar</h2>
         </div>
       </div>
       {radar}
@@ -210,7 +201,7 @@ fn document(
       <div class="panel-heading compact">
         <div>
           <span class="kicker">Captured titles</span>
-          <h2>Top moments</h2>
+          <h2>Captured moments</h2>
         </div>
       </div>
       {title_rows}
@@ -220,7 +211,7 @@ fn document(
       <div class="panel-heading compact">
         <div>
           <span class="kicker">Lenses</span>
-          <h2>Replay scale</h2>
+          <h2>Period lenses</h2>
         </div>
       </div>
       {lens_cards}
@@ -228,8 +219,8 @@ fn document(
   </section>
 
   <footer>
-    <span>Source: local Omastat SQLite data</span>
-    <span>Built with the Omastat Rust HTML/SVG exporter</span>
+    <span>Generated from local Omastat data</span>
+    <span>Self-contained HTML/SVG replay</span>
   </footer>
 </main>
 </body>
@@ -257,29 +248,26 @@ fn stylesheet() -> &'static str {
     r#"
 :root {
   color-scheme: dark;
-  --bg: #06181f;
-  --bg-2: #092a2d;
-  --panel: rgba(9, 39, 46, 0.86);
-  --panel-strong: rgba(13, 62, 70, 0.92);
-  --ink: #f4fbff;
-  --muted: #9ab8bd;
-  --line: rgba(120, 242, 255, 0.24);
-  --line-strong: rgba(125, 255, 239, 0.58);
-  --cyan: #4de8ff;
+  --bg: #101114;
+  --bg-2: #18141d;
+  --panel: rgba(27, 27, 31, 0.88);
+  --panel-strong: rgba(39, 35, 38, 0.94);
+  --ink: #f7f1e8;
+  --muted: #b6aa9d;
+  --line: rgba(236, 180, 94, 0.24);
+  --line-strong: rgba(244, 114, 182, 0.48);
+  --cyan: #5ad7ff;
   --green: #46d369;
-  --yellow: #ffd166;
+  --yellow: #f6c453;
   --red: #ff667d;
-  --purple: #8f7aff;
+  --purple: #b28cff;
   --shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   color: var(--ink);
-  background:
-    radial-gradient(circle at 18% 0%, rgba(77, 232, 255, 0.2), transparent 34%),
-    radial-gradient(circle at 80% 12%, rgba(143, 122, 255, 0.22), transparent 32%),
-    linear-gradient(145deg, #041017 0%, #06252b 45%, #111224 100%);
+  background: linear-gradient(135deg, #101114 0%, #161821 48%, #24151b 100%);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
 }
@@ -309,7 +297,8 @@ body::before {
 }
 .hero-copy, .hero-card, .panel, .number-card {
   border: 1px solid var(--line);
-  background: linear-gradient(145deg, rgba(11, 51, 59, 0.94), rgba(6, 23, 32, 0.9));
+  border-radius: 8px;
+  background: linear-gradient(145deg, rgba(39, 35, 38, 0.94), rgba(19, 20, 24, 0.92));
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,0.06);
 }
 .hero-copy {
@@ -330,7 +319,7 @@ h1, h2, p { margin: 0; }
 h1 {
   max-width: 900px;
   margin-top: 12px;
-  font-size: clamp(3rem, 8vw, 7.9rem);
+  font-size: 6.4rem;
   line-height: 0.86;
   letter-spacing: 0;
 }
@@ -341,7 +330,7 @@ h2 {
 }
 .subhead {
   margin-top: 18px;
-  color: #c2d9dc;
+  color: #d7cabd;
   font-size: 1.02rem;
 }
 .hero-total {
@@ -352,8 +341,8 @@ h2 {
   flex-direction: column;
   justify-content: flex-end;
   background:
-    linear-gradient(145deg, rgba(77, 232, 255, 0.28), rgba(70, 211, 105, 0.12)),
-    linear-gradient(145deg, rgba(15, 81, 91, 0.95), rgba(9, 31, 42, 0.95));
+    linear-gradient(145deg, rgba(246, 196, 83, 0.24), rgba(244, 114, 182, 0.14)),
+    linear-gradient(145deg, rgba(50, 42, 38, 0.96), rgba(20, 21, 29, 0.96));
 }
 .hero-total::before {
   content: "";
@@ -365,17 +354,17 @@ h2 {
   position: relative;
   display: block;
   margin: 16px 0 10px;
-  font-size: clamp(3.8rem, 7vw, 6.8rem);
+  font-size: 5.8rem;
   line-height: 0.82;
 }
 .hero-total span {
   position: relative;
-  color: #d6fbff;
+  color: #ffe6b1;
   font-weight: 850;
 }
 .number-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
   margin-top: 16px;
 }
@@ -387,14 +376,14 @@ h2 {
 .number-card strong {
   display: block;
   margin-top: 18px;
-  font-size: clamp(1.5rem, 2.7vw, 2.2rem);
+  font-size: 2rem;
   line-height: 0.95;
   overflow-wrap: anywhere;
 }
 .number-card span {
   display: block;
   margin-top: 8px;
-  color: #bee7ea;
+  color: #dfd1c3;
   font-weight: 750;
 }
 .grid {
@@ -426,8 +415,9 @@ h2 {
   line-height: 1.35;
 }
 .chart-frame {
-  border: 1px solid rgba(125, 255, 239, 0.18);
-  background: rgba(2, 12, 19, 0.32);
+  border: 1px solid rgba(236, 180, 94, 0.18);
+  border-radius: 6px;
+  background: rgba(10, 11, 14, 0.38);
   padding: 12px;
 }
 .chart-frame svg { width: 100%; height: auto; display: block; overflow: visible; }
@@ -449,7 +439,7 @@ h2 {
 .swatch {
   width: 12px;
   height: 12px;
-  border-radius: 999px;
+  border-radius: 6px;
   box-shadow: 0 0 16px currentColor;
 }
 .ranked-list, .title-list, .lens-list {
@@ -510,6 +500,7 @@ h2 {
   gap: 12px;
   align-items: center;
   padding: 12px;
+  border-radius: 6px;
   border: 1px solid rgba(255,255,255,0.1);
   background: rgba(255,255,255,0.045);
 }
@@ -533,9 +524,11 @@ footer {
   .hero, .grid-main, .grid-secondary, .grid-tertiary, .number-grid {
     grid-template-columns: 1fr;
   }
+  h1 { font-size: 3.6rem; }
+  .hero-total strong { font-size: 4rem; }
 }
 @media print {
-  body { background: #06181f; }
+  body { background: #101114; }
   .replay { width: 100%; padding: 0; }
   body::before { display: none; }
 }

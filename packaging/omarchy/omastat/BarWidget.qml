@@ -16,8 +16,11 @@ BarWidget {
   property bool refreshRunning: false
   property bool refreshQueued: false
   property var rows: []
+  property var reportApps: []
+  property var reportInsights: []
   property var daily: []
   property string todayKey: ""
+  property string periodLabel: "Today"
   property int totalFocused: 0
   property int totalOpen: 0
 
@@ -37,12 +40,16 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
   onRowsChanged: injectPanel()
+  onReportAppsChanged: injectPanel()
+  onReportInsightsChanged: injectPanel()
   onDailyChanged: injectPanel()
   onTodayKeyChanged: injectPanel()
+  onPeriodLabelChanged: injectPanel()
   onTotalFocusedChanged: injectPanel()
   onTotalOpenChanged: injectPanel()
   onStatusTextChanged: injectPanel()
   onErrorTextChanged: injectPanel()
+  onUpdatedTextChanged: injectPanel()
 
   Timer {
     interval: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 1000
@@ -142,8 +149,11 @@ BarWidget {
       parsed = JSON.parse(String(text || "[]"))
     } catch (error) {
       rows = []
+      reportApps = []
+      reportInsights = []
       daily = []
       todayKey = ""
+      periodLabel = "Today"
       totalFocused = 0
       totalOpen = 0
       displayText = root.glyph + " !"
@@ -155,26 +165,35 @@ BarWidget {
 
     if (Array.isArray(parsed)) {
       rows = parsed
+      reportApps = []
+      reportInsights = []
       daily = []
       todayKey = ""
+      periodLabel = "Today"
       totalFocused = sumSeconds(rows, "focused_seconds")
       totalOpen = sumSeconds(rows, "open_seconds")
     } else if (parsed && typeof parsed === "object") {
       rows = Array.isArray(parsed.rows) ? parsed.rows : []
+      reportApps = Array.isArray(parsed.apps) ? normalizeApps(parsed.apps) : []
+      reportInsights = Array.isArray(parsed.insights) ? normalizeInsights(parsed.insights) : []
       daily = Array.isArray(parsed.daily) ? parsed.daily : []
       todayKey = String(parsed.today_key || "")
-      totalFocused = Number(parsed.total_focused_seconds || sumSeconds(rows, "focused_seconds"))
-      totalOpen = Number(parsed.total_open_seconds || sumSeconds(rows, "open_seconds"))
+      periodLabel = parsed.period && typeof parsed.period === "object" ? String(parsed.period.label || "Today") : "Today"
+      totalFocused = numericField(parsed, "total_focused_seconds", sumSeconds(rows, "focused_seconds"))
+      totalOpen = numericField(parsed, "total_open_seconds", sumSeconds(rows, "open_seconds"))
     } else {
       rows = []
+      reportApps = []
+      reportInsights = []
       daily = []
       todayKey = ""
+      periodLabel = "Today"
       totalFocused = 0
       totalOpen = 0
     }
     updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
 
-    if (rows.length === 0 || totalFocused <= 0) {
+    if ((rows.length === 0 && reportApps.length === 0) || totalFocused <= 0) {
       displayText = root.glyph + " 0s"
       tooltip = "No focused time today"
       statusText = "No focused time today"
@@ -182,13 +201,13 @@ BarWidget {
       return
     }
 
-    var top = rows[0]
+    var top = reportApps.length > 0 ? reportApps[0] : rows[0]
     displayText = root.glyph + " " + formatDuration(totalFocused)
     tooltip = "Today: " + formatDuration(totalFocused) + " focused"
       + "\nOpen: " + formatDuration(totalOpen)
-      + "\nTop: " + String(top.app_class || "App")
-      + " (" + formatDuration(Number(top.focused_seconds || 0)) + ")"
-    statusText = rows.length + " apps tracked"
+      + "\nTop: " + topAppLabel(top)
+      + " (" + formatDuration(topAppSeconds(top)) + ")"
+    statusText = Math.max(rows.length, reportApps.length) + " apps tracked"
     errorText = ""
   }
 
@@ -200,8 +219,11 @@ BarWidget {
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
     if ("rows" in target) target.rows = root.rows
+    if ("reportApps" in target) target.reportApps = root.reportApps
+    if ("reportInsights" in target) target.reportInsights = root.reportInsights
     if ("daily" in target) target.daily = root.daily
     if ("todayKey" in target) target.todayKey = root.todayKey
+    if ("periodLabel" in target) target.periodLabel = root.periodLabel
     if ("totalFocused" in target) target.totalFocused = root.totalFocused
     if ("totalOpen" in target) target.totalOpen = root.totalOpen
     if ("statusText" in target) target.statusText = root.statusText
@@ -255,11 +277,51 @@ BarWidget {
     return Math.max(0, Math.floor(total))
   }
 
-  function shortApp(app) {
-    var value = app.replace(/^com\./, "").replace(/^org\./, "")
-    var parts = value.split(".")
-    value = parts[parts.length - 1] || value
-    return value.length > 10 ? value.substring(0, 9) + "." : value
+  function numericField(object, key, fallback) {
+    var value = object ? object[key] : undefined
+    var number = Number(value)
+    if (value === undefined || value === null || isNaN(number)) return Math.max(0, Math.floor(Number(fallback) || 0))
+    return Math.max(0, Math.floor(number))
+  }
+
+  function normalizeApps(list) {
+    var output = []
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i] || {}
+      var seconds = numericField(item, "focused_seconds", numericField(item, "seconds", 0))
+      if (seconds <= 0) continue
+      var rawShare = item.share !== undefined && item.share !== null ? Number(item.share) : Number(item.pct || 0) / 100
+      if (isNaN(rawShare)) rawShare = 0
+      output.push({
+        app: String(item.label || item.app || item.app_class || "App"),
+        seconds: seconds,
+        open_seconds: numericField(item, "open_seconds", 0),
+        pct: Math.round(Math.max(0, Math.min(1, rawShare)) * 100)
+      })
+    }
+    return output
+  }
+
+  function normalizeInsights(list) {
+    var output = []
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i] || {}
+      var label = String(item.label || "")
+      var value = String(item.value || "")
+      if (label.length === 0 && value.length === 0) continue
+      output.push({ label: label, value: value })
+    }
+    return output
+  }
+
+  function topAppLabel(app) {
+    if (!app) return "App"
+    return String(app.app || app.label || app.app_class || "App")
+  }
+
+  function topAppSeconds(app) {
+    if (!app) return 0
+    return numericField(app, "seconds", numericField(app, "focused_seconds", 0))
   }
 
   function formatDuration(seconds) {

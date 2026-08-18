@@ -1,19 +1,23 @@
 function fmt(seconds) {
-  seconds = Math.max(0, Math.round(Number(seconds) || 0))
-  if (seconds <= 0) return "0m"
+  seconds = Math.max(0, Math.floor(Number(seconds) || 0))
   if (seconds < 60) return seconds + "s"
-  var mins = Math.round(seconds / 60)
+  var mins = Math.floor(seconds / 60)
   if (mins < 60) return mins + "m"
   var hours = Math.floor(mins / 60)
   var rest = mins % 60
   return rest === 0 ? hours + "h" : hours + "h " + rest + "m"
 }
 
+function percent(value) {
+  value = Math.max(0, Math.min(1, Number(value) || 0))
+  return Math.round(value * 100) + "%"
+}
+
 function fmtWords(seconds) {
-  seconds = Math.max(0, Math.round(Number(seconds) || 0))
-  if (seconds <= 0) return "0 MINUTES"
+  seconds = Math.max(0, Math.floor(Number(seconds) || 0))
+  if (seconds <= 0) return "0 SECONDS"
   if (seconds < 60) return seconds + (seconds === 1 ? " SECOND" : " SECONDS")
-  var mins = Math.round(seconds / 60)
+  var mins = Math.floor(seconds / 60)
   if (mins < 60) return mins + (mins === 1 ? " MINUTE" : " MINUTES")
   var hours = Math.floor(mins / 60)
   var rest = mins % 60

@@ -1,7 +1,7 @@
 use crate::{config::Config, identity, steam::SteamResolver};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, TimeZone, Timelike};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -136,11 +136,44 @@ pub struct Storage {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageOpenMode {
+    ReadWriteMigrate,
+    ReadOnly,
+}
+
 impl Storage {
     pub fn open(explicit_path: Option<&Path>, _config: &Config) -> Result<Self> {
+        Self::open_with_mode(explicit_path, _config, StorageOpenMode::ReadWriteMigrate)
+    }
+
+    pub fn open_read_only(explicit_path: Option<&Path>, config: &Config) -> Result<Self> {
+        Self::open_with_mode(explicit_path, config, StorageOpenMode::ReadOnly)
+    }
+
+    pub fn open_with_mode(
+        explicit_path: Option<&Path>,
+        _config: &Config,
+        mode: StorageOpenMode,
+    ) -> Result<Self> {
         let path = explicit_path
             .map(PathBuf::from)
-            .unwrap_or_else(default_db_path);
+            .unwrap_or_else(|| default_db_path_for_mode(mode));
+
+        if mode == StorageOpenMode::ReadOnly {
+            if !path.exists() {
+                anyhow::bail!(
+                    "database {} does not exist; start omastatd once with write access to initialize it",
+                    path.display()
+                );
+            }
+            let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .with_context(|| format!("failed to open database {} read-only", path.display()))?;
+            let storage = Self { conn, path };
+            storage.validate_schema()?;
+            return Ok(storage);
+        }
+
         if explicit_path.is_none() {
             copy_legacy_db_if_needed(&path)?;
         }
@@ -910,6 +943,21 @@ impl Storage {
         Ok(())
     }
 
+    fn validate_schema(&self) -> Result<()> {
+        for statement in [
+            "SELECT id, kind, app_class, window_address, title, started_at, ended_at FROM intervals LIMIT 0",
+            "SELECT id, kind, source, started_at, ended_at FROM session_intervals LIMIT 0",
+        ] {
+            self.conn.prepare(statement).with_context(|| {
+                format!(
+                    "database {} is not initialized or needs migration; start omastatd once with write access before running read-only reports",
+                    self.path.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     fn app_class_counts(&self) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "
@@ -1146,6 +1194,17 @@ fn default_db_path() -> PathBuf {
         .join("omastat.db")
 }
 
+fn default_db_path_for_mode(mode: StorageOpenMode) -> PathBuf {
+    let path = default_db_path();
+    if mode == StorageOpenMode::ReadOnly && !path.exists() {
+        let legacy = legacy_db_path();
+        if legacy.exists() {
+            return legacy;
+        }
+    }
+    path
+}
+
 fn legacy_db_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -1202,6 +1261,7 @@ mod tests {
     use crate::config::Config;
     use crate::steam::SteamResolver;
     use chrono::{Datelike, Local, TimeZone};
+    use rusqlite::Connection;
 
     #[test]
     fn aggregates_overlapping_intervals() {
@@ -1224,6 +1284,62 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].focused_seconds, 50);
         assert_eq!(rows[0].open_seconds, 75);
+    }
+
+    #[test]
+    fn read_only_open_reads_existing_schema_without_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        {
+            let storage = Storage::open(Some(&db), &config).unwrap();
+            let focused = storage
+                .start_interval(IntervalKind::Focused, "firefox", None, None, 100)
+                .unwrap();
+            storage.close_interval(focused, 160).unwrap();
+        }
+
+        let storage = Storage::open_read_only(Some(&db), &config).unwrap();
+        let rows = storage.totals_between(100, 200).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].focused_seconds, 60);
+        assert!(
+            storage
+                .start_interval(IntervalKind::Focused, "firefox", None, None, 200)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn read_only_open_requires_existing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("missing.db");
+        let config = Config::default();
+
+        let error = match Storage::open_read_only(Some(&db), &config) {
+            Ok(_) => panic!("read-only open unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+
+        assert!(message.contains("does not exist"), "{message}");
+    }
+
+    #[test]
+    fn read_only_open_reports_unmigrated_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("empty.db");
+        let config = Config::default();
+        drop(Connection::open(&db).unwrap());
+
+        let error = match Storage::open_read_only(Some(&db), &config) {
+            Ok(_) => panic!("read-only open unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+
+        assert!(message.contains("needs migration"), "{message}");
     }
 
     #[test]
