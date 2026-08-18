@@ -3,7 +3,7 @@ use crate::{
     steam::SteamResolver,
     storage::{AppDayTotals, AppTotals, DayTotals, FocusHeatCell, Storage, TitleTotals},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{Datelike, Local, TimeZone, Timelike};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -25,7 +25,7 @@ pub fn render_html(
     options: ExportOptions,
 ) -> Result<String> {
     let report = report::usage_report_for_period(storage, steam, options.lens, options.offset)?;
-    let (start_ts, end_ts) = report_time_range(&report)?;
+    let (start_ts, end_ts) = (report.query_start_ts, report.query_end_ts);
     let titles = storage.focused_title_totals_between(start_ts, end_ts, 12)?;
     let daily_apps = storage.focused_app_daily_totals_between(start_ts, end_ts)?;
     let heatmap = storage.focus_heatmap_between(start_ts, end_ts)?;
@@ -1090,54 +1090,6 @@ fn app_name(app_class: &str) -> String {
     } else {
         report::app_label(app_class)
     }
-}
-
-fn report_time_range(report: &UsageReport) -> Result<(i64, i64)> {
-    let now = Local::now().timestamp();
-    let Some(start_date) = report.period.start_date.as_deref() else {
-        return Ok((0, now));
-    };
-    let Some(end_date) = report.period.end_date.as_deref() else {
-        return Ok((0, now));
-    };
-
-    let start = parse_local_midnight(start_date)?;
-    let end_date = chrono::NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
-        .with_context(|| format!("invalid report end date {end_date:?}"))?;
-    let end = Local
-        .from_local_datetime(
-            &end_date
-                .succ_opt()
-                .context("export report end date overflow")?
-                .and_hms_opt(0, 0, 0)
-                .context("invalid export report end date")?,
-        )
-        .single()
-        .context("failed to compute export report end")?
-        .timestamp();
-
-    Ok((
-        start,
-        if report.period.offset == 0 {
-            end.min(now)
-        } else {
-            end
-        },
-    ))
-}
-
-fn parse_local_midnight(date: &str) -> Result<i64> {
-    let date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .with_context(|| format!("invalid report start date {date:?}"))?;
-    Ok(Local
-        .from_local_datetime(
-            &date
-                .and_hms_opt(0, 0, 0)
-                .context("invalid export report start date")?,
-        )
-        .single()
-        .context("failed to compute export report start")?
-        .timestamp())
 }
 
 fn period_range_label(report: &UsageReport) -> String {

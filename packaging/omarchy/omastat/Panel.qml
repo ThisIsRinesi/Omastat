@@ -36,6 +36,7 @@ Panel {
   readonly property var sliceColors: Model.sliceColors(apps.length, Color.accent)
   readonly property var insightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
   readonly property var weekTrend: Model.weekTrend(daily, todayKey)
+  readonly property bool hasTrendDetails: weekTrend.length > 0 || insightRows.length > 0
   readonly property string densityText: totalOpen > 0 ? Model.percent(totalFocused / totalOpen) : "--"
   readonly property real weekMax: {
     var max = 0
@@ -73,13 +74,11 @@ Panel {
   }
 
   function togglePatterns() {
+    if (!root.hasTrendDetails) return
     root.patternsExpanded = !root.patternsExpanded
-    if (root.patternsExpanded) {
-      Qt.callLater(function() {
-        scroll.contentY = Math.max(0, scroll.contentHeight - scroll.height)
-      })
-    }
   }
+
+  onHasTrendDetailsChanged: if (!hasTrendDetails) patternsExpanded = false
 
   KeyboardPanel {
     id: panel
@@ -90,7 +89,7 @@ Panel {
     centerOnBar: true
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(390))
-    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight, Style.space(500))
+    contentHeight: panel.fittedContentHeight(headerRow.implicitHeight + Style.space(12) + contentColumn.implicitHeight, Style.space(500))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -106,9 +105,83 @@ Panel {
         else if (text === "p" || text === "P") root.togglePatterns()
       }
 
+      Item {
+        id: headerRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        implicitHeight: Math.max(titleColumn.implicitHeight, patternsToggle.implicitHeight)
+
+        Column {
+          id: titleColumn
+          anchors.left: parent.left
+          anchors.right: patternsToggle.left
+          anchors.rightMargin: Style.space(10)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(2)
+
+          Text {
+            width: parent.width
+            text: "Omastat"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Text {
+            width: parent.width
+            text: root.periodLabel || "Today"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            elide: Text.ElideRight
+          }
+        }
+
+        Row {
+          id: patternsToggle
+          visible: root.hasTrendDetails
+          width: visible ? implicitWidth : 0
+          anchors.right: parent.right
+          anchors.top: parent.top
+          spacing: Style.space(3)
+
+          Text {
+            text: "TRENDS"
+            color: patternsMouse.containsMouse ? root.foreground : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          Text {
+            text: root.patternsExpanded ? "v" : ">"
+            color: patternsMouse.containsMouse ? root.foreground : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+        }
+
+        MouseArea {
+          id: patternsMouse
+          anchors.fill: patternsToggle
+          enabled: root.hasTrendDetails
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.togglePatterns()
+        }
+      }
+
       Flickable {
         id: scroll
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: headerRow.bottom
+        anchors.topMargin: Style.space(12)
+        anchors.bottom: parent.bottom
         contentWidth: contentColumn.width
         contentHeight: contentColumn.implicitHeight
         clip: true
@@ -119,70 +192,6 @@ Panel {
           id: contentColumn
           width: scroll.width
           spacing: Style.space(12)
-
-          Item {
-            width: parent.width
-            implicitHeight: Math.max(titleColumn.implicitHeight, patternsToggle.implicitHeight)
-
-            Column {
-              id: titleColumn
-              anchors.left: parent.left
-              anchors.right: patternsToggle.left
-              anchors.rightMargin: Style.space(10)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
-
-              Text {
-                width: parent.width
-                text: "Omastat"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.title
-                font.bold: true
-                elide: Text.ElideRight
-              }
-
-              Text {
-                width: parent.width
-                text: root.periodLabel || "Today"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                elide: Text.ElideRight
-              }
-            }
-
-            Row {
-              id: patternsToggle
-              anchors.right: parent.right
-              anchors.top: parent.top
-              spacing: Style.space(3)
-
-              Text {
-                text: "PATTERNS"
-                color: patternsMouse.containsMouse ? root.foreground : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-              }
-
-              Text {
-                text: root.patternsExpanded ? "v" : ">"
-                color: patternsMouse.containsMouse ? root.foreground : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-            }
-
-            MouseArea {
-              id: patternsMouse
-              anchors.fill: patternsToggle
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.togglePatterns()
-            }
-          }
 
           RowLayout {
             width: parent.width
@@ -349,7 +358,7 @@ Panel {
 
           Item {
             width: parent.width
-            visible: root.patternsExpanded && (root.weekTrend.length > 0 || root.insightRows.length > 0)
+            visible: root.patternsExpanded && root.hasTrendDetails
             implicitHeight: visible ? patternsColumn.implicitHeight : 0
 
             Column {

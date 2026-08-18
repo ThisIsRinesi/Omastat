@@ -43,6 +43,8 @@ pub struct Period {
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageReport {
     pub generated_at: i64,
+    pub query_start_ts: i64,
+    pub query_end_ts: i64,
     pub today_key: String,
     pub lens: Lens,
     pub lens_label: &'static str,
@@ -162,6 +164,8 @@ fn usage_report_for_period_with_days(
 
     Ok(UsageReport {
         generated_at: chrono::Utc::now().timestamp(),
+        query_start_ts: period.start_ts,
+        query_end_ts: period.query_end_ts,
         today_key,
         lens,
         lens_label: lens.label(),
@@ -534,5 +538,12 @@ mod tests {
         assert_eq!(period.meta.label, "Lifetime");
         assert_eq!(period.meta.offset, 0);
         assert!(period.meta.start_date.is_none());
+    }
+
+    #[test]
+    fn period_bounds_expose_query_range_for_reports() {
+        let period = period_for_lens(Lens::Week, -1).unwrap();
+
+        assert!(period.start_ts < period.query_end_ts);
     }
 }

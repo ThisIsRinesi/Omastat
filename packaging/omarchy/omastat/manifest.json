@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Omastat",
-    "description": "Shows today's focused total, app breakdown, and 7-day usage patterns.",
+    "description": "Shows today's focused total, app breakdown, and 7-day usage trends.",
     "category": "Utilities",
     "aliases": ["omastat", "usage", "time", "focus"],
     "defaultSection": "right",
