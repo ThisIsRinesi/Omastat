@@ -28,7 +28,7 @@ Left/Right or h/l   Cycle Day, Week, Month, Year, Life lenses
 1/2/3/4/5           Jump to a lens
 Up/Down or j/k      Move the app selection
 PageUp/PageDown     Jump the selection
-p                   Toggle expanded pattern details
+p                   Toggle overview focus stats / period signals
 r                   Refresh from SQLite
 q or Esc            Quit
 ```

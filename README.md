@@ -16,6 +16,8 @@ Omarchy Quattro bar widget.
 - Steam app IDs and common desktop classes are normalized to readable names.
 - Omarchy Quattro widget with today's total, app breakdown, 7-day patterns, and
   a shortcut into the TUI.
+- Rich terminal dashboard with app composition pies, focus-flow charts, hourly
+  peaks, heatmaps, focus block stats, and idle/locked signal gauges.
 - Static HTML export for shareable day, week, month, year, and lifetime replays.
 
 ## Install

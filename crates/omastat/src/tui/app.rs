@@ -1,5 +1,5 @@
 use super::{
-    data::{self, DashboardData, HealthSnapshot},
+    data::{self, DashboardData, DashboardStats, HealthSnapshot},
     theme::Theme,
 };
 use crate::{
@@ -243,6 +243,10 @@ impl App {
         &self.data
     }
 
+    pub(super) fn stats(&self) -> &DashboardStats {
+        &self.data.stats
+    }
+
     pub(super) fn health(&self) -> &HealthSnapshot {
         &self.data.health
     }
@@ -259,6 +263,13 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn from_parts_for_test(parts: TestAppParts) -> Self {
+        let focus_intervals = parts
+            .today_intervals
+            .iter()
+            .filter(|interval| interval.kind == crate::storage::IntervalKind::Focused)
+            .cloned()
+            .collect::<Vec<_>>();
+        let stats = DashboardStats::from_data(&parts.report, &parts.heatmap, &focus_intervals);
         let mut app = Self {
             view: parts.view,
             lens: parts.report.lens,
@@ -277,6 +288,7 @@ impl App {
                 daily_apps: parts.daily_apps,
                 heatmap: parts.heatmap,
                 titles: parts.titles,
+                stats,
                 health: HealthSnapshot::from_status_for_test(parts.storage),
             },
             table_state: TableState::new(),

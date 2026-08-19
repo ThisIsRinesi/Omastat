@@ -5,7 +5,10 @@ use super::{
 };
 use crate::{
     report::{self, Lens},
-    storage::{AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, TimelineInterval},
+    storage::{
+        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, TimelineInterval,
+        TitleTotals,
+    },
 };
 use chrono::Local;
 use ratatui::{
@@ -15,10 +18,11 @@ use ratatui::{
     symbols,
     text::{Line, Span, Text},
     widgets::{
-        Axis, Bar, BarChart, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType,
-        HighlightSpacing, LineGauge, Paragraph, Row, Sparkline, Table, Wrap, canvas,
+        Axis, Bar, BarChart, Block, Cell, Chart, Clear, Dataset, GraphType, HighlightSpacing,
+        LineGauge, Paragraph, Row, Sparkline, Table, Wrap, canvas,
     },
 };
+use tui_piechart::{LegendLayout, LegendPosition, PieChart, PieSlice, Resolution};
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const HEAT_CHARS: [char; 8] = [' ', '·', '░', '▒', '▓', '█', '▇', '▉'];
@@ -144,7 +148,7 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
         format!("{} back", app.period_offset().abs())
     };
     let left = match app.view() {
-        View::Overview => "Tab view  h/l lens  [/] period  p trends  ? help  q quit",
+        View::Overview => "Tab view  h/l lens  [/] period  p stats/signals  ? help  q quit",
         View::Apps => "j/k select  PgUp/PgDn jump  h/l lens  [/] period  ? help  q quit",
         View::Timeline => "j/k highlight app  h/l lens  [/] period  ? help  q quit",
         View::System => "Tab view  h/l lens  r refresh  ? help  q quit",
@@ -184,19 +188,25 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
 pub(super) fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     widgets::fill_area(frame, area, theme.bg);
     if area.width < 92 {
-        let [kpis, flow, apps, trends] = *Layout::vertical([
+        let [kpis, flow, apps, hours, stats] = *Layout::vertical([
             Constraint::Length(4),
-            Constraint::Length(7),
-            Constraint::Length(6),
-            Constraint::Min(3),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(4),
+            Constraint::Min(2),
         ])
         .split(area) else {
             return;
         };
         render_kpis(frame, kpis, app, theme);
         render_focus_sparkline(frame, flow, app, theme);
-        render_app_share(frame, apps, app, theme);
-        render_insights(frame, trends, app, theme);
+        render_focus_composition(frame, apps, app, theme);
+        render_peak_hours(frame, hours, app, theme);
+        if app.show_trends() {
+            render_focus_stats(frame, stats, app, theme);
+        } else {
+            render_period_signals(frame, stats, app, theme);
+        }
         return;
     }
 
@@ -204,53 +214,45 @@ pub(super) fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, them
     else {
         return;
     };
-    let [left, right] =
-        *Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(body)
+    let [top, bottom] =
+        *Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)]).split(body)
     else {
         return;
     };
-    let [flow, lower_left] =
-        *Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(left)
+    let [flow, composition] =
+        *Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(top)
     else {
         return;
     };
-    let [apps, lenses] =
-        *Layout::vertical([Constraint::Percentage(62), Constraint::Percentage(38)]).split(right)
-    else {
-        return;
-    };
-    let [heat, insights] =
-        *Layout::horizontal([Constraint::Percentage(54), Constraint::Percentage(46)])
-            .split(lower_left)
-    else {
+    let [heat, hours, stats] = *Layout::horizontal([
+        Constraint::Percentage(38),
+        Constraint::Percentage(31),
+        Constraint::Percentage(31),
+    ])
+    .split(bottom) else {
         return;
     };
 
     render_kpis(frame, kpis, app, theme);
     render_focus_chart(frame, flow, app, theme);
+    render_focus_composition(frame, composition, app, theme);
     render_heatmap(frame, heat, app, theme);
+    render_peak_hours(frame, hours, app, theme);
     if app.show_trends() {
-        render_insights(frame, insights, app, theme);
+        render_focus_stats(frame, stats, app, theme);
     } else {
-        render_density(frame, insights, app, theme);
+        render_period_signals(frame, stats, app, theme);
     }
-    render_app_share(frame, apps, app, theme);
-    render_lens_totals(frame, lenses, app, theme);
 }
 
 fn render_kpis(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let report = app.report();
-    let density = widgets::ratio(report.total_focused_seconds, report.total_open_seconds);
-    let app_count = report
-        .rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .count();
+    let stats = app.stats();
     let chunks = Layout::horizontal([
-        Constraint::Percentage(28),
+        Constraint::Percentage(26),
         Constraint::Percentage(24),
-        Constraint::Percentage(18),
-        Constraint::Percentage(30),
+        Constraint::Percentage(22),
+        Constraint::Percentage(28),
     ])
     .spacing(1)
     .split(area);
@@ -259,34 +261,34 @@ fn render_kpis(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         chunks[0],
         "Focused",
         &report::format_duration(report.total_focused_seconds),
-        "active work",
+        &format!("{} active days", stats.active_days),
         theme.warn,
         theme,
     );
     render_kpi(
         frame,
         chunks[1],
-        "Open",
-        &report::format_duration(report.total_open_seconds),
-        "visible apps",
-        theme.secondary,
+        "Active Avg",
+        &report::format_duration(stats.active_day_average_seconds),
+        &format!("{} tracked days", stats.total_days),
+        theme.success,
         theme,
     );
     render_kpi(
         frame,
         chunks[2],
-        "Density",
-        &report::percent(density),
-        "focus/open",
-        widgets::density_color(density, theme),
+        "Longest",
+        &report::format_duration(stats.longest_block_seconds),
+        &format!("{} focus blocks", stats.focus_block_count),
+        theme.secondary,
         theme,
     );
     render_kpi(
         frame,
         chunks[3],
-        "Coverage",
-        &format!("{app_count} apps"),
-        &app.report().period.label,
+        "App Mix",
+        &format!("{:.1} apps", stats.effective_apps),
+        &format!("top {}", report::percent(stats.top_app_share)),
         theme.primary,
         theme,
     );
@@ -335,11 +337,20 @@ fn render_focus_chart(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
     }
     let focused = daily_points(&app.report().daily, |day| day.focused_seconds);
     let open = daily_points(&app.report().daily, |day| day.open_seconds);
+    let idle = daily_points(&app.report().daily, |day| day.idle_seconds);
+    let locked = daily_points(&app.report().daily, |day| day.locked_seconds);
     let max = app
         .report()
         .daily
         .iter()
-        .flat_map(|day| [day.focused_seconds, day.open_seconds])
+        .flat_map(|day| {
+            [
+                day.focused_seconds,
+                day.open_seconds,
+                day.idle_seconds,
+                day.locked_seconds,
+            ]
+        })
         .max()
         .unwrap_or(1)
         .max(1) as f64;
@@ -358,6 +369,18 @@ fn render_focus_chart(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             .graph_type(GraphType::Line)
             .style(Style::default().fg(theme.secondary))
             .data(&open),
+        Dataset::default()
+            .name("idle")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(theme.tertiary))
+            .data(&idle),
+        Dataset::default()
+            .name("locked")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(theme.danger))
+            .data(&locked),
     ];
     let chart = Chart::new(datasets)
         .x_axis(
@@ -429,32 +452,82 @@ fn render_focus_sparkline(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
     );
 }
 
-fn render_app_share(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("App Share", theme, theme.warn);
+fn render_focus_composition(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = widgets::panel("Focus Composition", theme, theme.warn);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if app.report().apps.is_empty() {
         widgets::render_empty(frame, inner, "No focused app time for this lens", theme);
         return;
     }
-    if inner.height < 7 {
-        frame.render_widget(
-            Paragraph::new(vec![widgets::app_share_line(
-                &app.report().apps,
-                inner.width as usize,
-                theme,
-            )])
-            .style(Style::default().bg(theme.panel)),
-            inner,
-        );
+
+    if inner.width < 42 || inner.height < 9 {
+        render_composition_list(frame, inner, app, theme);
         return;
     }
+
+    let labels = app
+        .report()
+        .apps
+        .iter()
+        .map(|row| widgets::fit_text(&row.label, 15).trim_end().to_string())
+        .collect::<Vec<_>>();
+    let slices = app
+        .report()
+        .apps
+        .iter()
+        .enumerate()
+        .zip(labels.iter())
+        .filter(|((_, row), _)| row.focused_seconds > 0)
+        .map(|((index, row), label)| {
+            PieSlice::new(
+                label.as_str(),
+                row.focused_seconds.max(0) as f64,
+                widgets::rank_color(index, theme),
+            )
+        })
+        .collect::<Vec<_>>();
+    let legend_position = if inner.width < 56 {
+        LegendPosition::Bottom
+    } else {
+        LegendPosition::Right
+    };
+    let pie = PieChart::new(slices)
+        .style(Style::default().bg(theme.panel).fg(theme.text))
+        .resolution(Resolution::Braille)
+        .show_legend(true)
+        .show_percentages(true)
+        .legend_position(legend_position)
+        .legend_layout(if legend_position == LegendPosition::Bottom {
+            LegendLayout::Horizontal
+        } else {
+            LegendLayout::Vertical
+        })
+        .legend_marker("■")
+        .pie_char('█');
+    frame.render_widget(pie, inner);
+}
+
+fn render_composition_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let [bar, list] = *Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area)
+    else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(vec![widgets::app_share_line(
+            &app.report().apps,
+            bar.width as usize,
+            theme,
+        )])
+        .style(Style::default().bg(theme.panel)),
+        bar,
+    );
     let bars = app
         .report()
         .apps
         .iter()
         .enumerate()
-        .take(inner.height.saturating_sub(1) as usize)
+        .take(list.height.saturating_sub(1) as usize)
         .map(|(index, row)| {
             Bar::with_label(
                 widgets::fit_text(&row.label, 16),
@@ -470,7 +543,293 @@ fn render_app_share(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
         .value_style(Style::default().fg(theme.text).bg(theme.panel))
         .label_style(Style::default().fg(theme.muted).bg(theme.panel))
         .style(Style::default().bg(theme.panel));
+    frame.render_widget(chart, list);
+}
+
+fn render_peak_hours(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = widgets::panel("Peak Hours", theme, theme.secondary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let hours = hour_totals(&app.data().heatmap);
+    if hours.iter().all(|(_, seconds)| *seconds <= 0) {
+        widgets::render_empty(frame, inner, "No hourly focus data for this period", theme);
+        return;
+    }
+
+    let limit = (inner.height as usize).saturating_sub(1).clamp(1, 8);
+    let max = hours
+        .iter()
+        .map(|(_, seconds)| *seconds)
+        .max()
+        .unwrap_or(1)
+        .max(1) as u64;
+    let bars = hours
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, (hour, seconds))| {
+            Bar::with_label(hour_label(*hour), (*seconds).max(0) as u64)
+                .text_value(widgets::compact_duration(*seconds))
+                .style(Style::default().fg(widgets::rank_color(index, theme)))
+                .value_style(Style::default().fg(theme.text))
+        })
+        .collect::<Vec<_>>();
+    let chart = BarChart::horizontal(bars)
+        .max(max)
+        .bar_width(1)
+        .bar_gap(0)
+        .bar_style(Style::default().fg(theme.secondary).bg(theme.panel))
+        .value_style(Style::default().fg(theme.text).bg(theme.panel))
+        .label_style(Style::default().fg(theme.muted).bg(theme.panel))
+        .style(Style::default().bg(theme.panel));
     frame.render_widget(chart, inner);
+}
+
+fn render_focus_stats(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = widgets::panel("Focus Stats", theme, theme.primary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let stats = app.stats();
+    let switch_rate = if app.report().total_focused_seconds > 0 {
+        stats.app_switch_count as f64 / (app.report().total_focused_seconds as f64 / 3600.0)
+    } else {
+        0.0
+    };
+    let best_day = stats
+        .best_day_label
+        .as_ref()
+        .map(|label| {
+            format!(
+                "{label} - {}",
+                report::format_duration(stats.best_day_seconds)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let peak_hour = stats
+        .peak_hour
+        .map(|peak| {
+            format!(
+                "{} - {}",
+                hour_label(peak.hour),
+                report::format_duration(peak.focused_seconds)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let peak_day = stats
+        .peak_weekday
+        .map(|peak| {
+            format!(
+                "{} - {}",
+                weekday_label(peak.weekday),
+                report::format_duration(peak.focused_seconds)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let lines = vec![
+        widgets::metric_line(
+            "Best day",
+            &best_day,
+            inner.width as usize,
+            theme.warn,
+            theme,
+        ),
+        widgets::metric_line(
+            "Peak hour",
+            &peak_hour,
+            inner.width as usize,
+            theme.secondary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Peak weekday",
+            &peak_day,
+            inner.width as usize,
+            theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Avg block",
+            &report::format_duration(stats.average_block_seconds),
+            inner.width as usize,
+            theme.success,
+            theme,
+        ),
+        widgets::metric_line(
+            "Median block",
+            &report::format_duration(stats.median_block_seconds),
+            inner.width as usize,
+            theme.success,
+            theme,
+        ),
+        widgets::metric_line(
+            "Deep focus",
+            &format!(
+                "{} / {}",
+                stats.deep_block_count,
+                report::format_duration(stats.deep_block_seconds)
+            ),
+            inner.width as usize,
+            theme.primary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Switches",
+            &format!("{} ({switch_rate:.1}/h)", stats.app_switch_count),
+            inner.width as usize,
+            theme.muted,
+            theme,
+        ),
+        widgets::metric_line(
+            "Streak",
+            &format!("{} days", stats.longest_streak_days),
+            inner.width as usize,
+            theme.text,
+            theme,
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = widgets::panel("Period Signals", theme, theme.success);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 6 {
+        let density = widgets::ratio(
+            app.report().total_focused_seconds,
+            app.report().total_open_seconds,
+        );
+        let lines = vec![
+            widgets::metric_line(
+                "Density",
+                &report::percent(density),
+                inner.width as usize,
+                widgets::density_color(density, theme),
+                theme,
+            ),
+            widgets::metric_line(
+                "Open",
+                &report::format_duration(app.report().total_open_seconds),
+                inner.width as usize,
+                theme.secondary,
+                theme,
+            ),
+            widgets::metric_line(
+                "Idle",
+                &report::format_duration(app.report().total_idle_seconds),
+                inner.width as usize,
+                theme.tertiary,
+                theme,
+            ),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+            inner,
+        );
+        return;
+    }
+
+    let [gauges, details] =
+        *Layout::vertical([Constraint::Length(6), Constraint::Min(2)]).split(inner)
+    else {
+        return;
+    };
+    let focus_density = widgets::ratio(
+        app.report().total_focused_seconds,
+        app.report().total_open_seconds,
+    );
+    let signal_total = app
+        .report()
+        .total_focused_seconds
+        .saturating_add(app.report().total_idle_seconds)
+        .saturating_add(app.report().total_locked_seconds)
+        .max(1);
+    let gauge_lines = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(gauges);
+    frame.render_widget(
+        LineGauge::default()
+            .label(format!("focus/open {}", report::percent(focus_density)))
+            .ratio(focus_density)
+            .filled_style(Style::default().fg(widgets::density_color(focus_density, theme)))
+            .unfilled_style(Style::default().fg(theme.dim))
+            .style(Style::default().bg(theme.panel)),
+        gauge_lines[0],
+    );
+    frame.render_widget(
+        LineGauge::default()
+            .label(format!(
+                "focus signal {}",
+                report::percent(app.report().total_focused_seconds as f64 / signal_total as f64)
+            ))
+            .ratio(app.report().total_focused_seconds as f64 / signal_total as f64)
+            .filled_style(Style::default().fg(theme.warn))
+            .unfilled_style(Style::default().fg(theme.dim))
+            .style(Style::default().bg(theme.panel)),
+        gauge_lines[1],
+    );
+    frame.render_widget(
+        LineGauge::default()
+            .label(format!(
+                "away signal {}",
+                report::percent(
+                    (app.report().total_idle_seconds + app.report().total_locked_seconds) as f64
+                        / signal_total as f64
+                )
+            ))
+            .ratio(
+                (app.report().total_idle_seconds + app.report().total_locked_seconds) as f64
+                    / signal_total as f64,
+            )
+            .filled_style(Style::default().fg(theme.tertiary))
+            .unfilled_style(Style::default().fg(theme.dim))
+            .style(Style::default().bg(theme.panel)),
+        gauge_lines[2],
+    );
+    let lines = vec![
+        widgets::metric_line(
+            "Open total",
+            &report::format_duration(app.report().total_open_seconds),
+            details.width as usize,
+            theme.secondary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Idle total",
+            &report::format_duration(app.report().total_idle_seconds),
+            details.width as usize,
+            theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Locked",
+            &report::format_duration(app.report().total_locked_seconds),
+            details.width as usize,
+            theme.danger,
+            theme,
+        ),
+        widgets::metric_line(
+            "Daily avg",
+            &report::format_duration(app.stats().daily_average_seconds),
+            details.width as usize,
+            theme.success,
+            theme,
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        details,
+    );
 }
 
 fn render_heatmap(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -528,74 +887,6 @@ fn render_heatmap(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
             .style(Style::default().bg(theme.panel))
             .wrap(Wrap { trim: false }),
         inner,
-    );
-}
-
-fn render_insights(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Trends", theme, theme.primary);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let mut lines = if app.report().insights.is_empty() {
-        vec![Line::from(Span::styled(
-            "No trends yet for this lens",
-            Style::default().fg(theme.muted).bg(theme.panel),
-        ))]
-    } else {
-        app.report()
-            .insights
-            .iter()
-            .map(|row| {
-                widgets::metric_line(
-                    &row.label,
-                    &row.value,
-                    inner.width as usize,
-                    theme.text,
-                    theme,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    if lines.len() < inner.height as usize {
-        lines.push(Line::from(Span::styled(
-            "press p for density card",
-            Style::default().fg(theme.dim).bg(theme.panel),
-        )));
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(theme.panel))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
-}
-
-fn render_density(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Density", theme, theme.success);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let report = app.report();
-    let density = widgets::ratio(report.total_focused_seconds, report.total_open_seconds);
-    let gauge = Gauge::default()
-        .ratio(density)
-        .label(report::percent(density))
-        .gauge_style(
-            Style::default()
-                .fg(widgets::density_color(density, theme))
-                .bg(theme.panel)
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(Style::default().bg(theme.panel));
-    let [gauge_area, note] =
-        *Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(inner)
-    else {
-        return;
-    };
-    frame.render_widget(gauge, gauge_area);
-    frame.render_widget(
-        Paragraph::new("focused time divided by open time")
-            .style(Style::default().fg(theme.dim).bg(theme.panel))
-            .alignment(Alignment::Center),
-        note,
     );
 }
 
@@ -706,8 +997,12 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
         return;
     };
     let density = widgets::ratio(row.focused_seconds, row.open_seconds);
+    let share = widgets::ratio(
+        row.focused_seconds,
+        app.report().total_focused_seconds.max(1),
+    );
     let [summary, spark, titles] = *Layout::vertical([
-        Constraint::Length(8),
+        Constraint::Length(9),
         Constraint::Length(5),
         Constraint::Min(5),
     ])
@@ -743,6 +1038,13 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
             widgets::density_color(density, theme),
             theme,
         ),
+        widgets::metric_line(
+            "Share",
+            &report::percent(share),
+            summary.width as usize,
+            theme.tertiary,
+            theme,
+        ),
     ];
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme.panel)),
@@ -775,36 +1077,87 @@ fn render_title_list(
     selected: &AppTotals,
     theme: &Theme,
 ) {
-    let block = widgets::panel("Top Titles", theme, theme.tertiary);
+    let block = widgets::panel("Title Mix", theme, theme.tertiary);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let mut lines = app
+    let titles = app
         .data()
         .titles
         .iter()
         .filter(|title| title.app_class == selected.app_class)
-        .take(inner.height as usize)
+        .collect::<Vec<_>>();
+
+    if titles.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No focused titles for this app",
+                Style::default().fg(theme.muted).bg(theme.panel),
+            )))
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    if inner.width < 34 || inner.height < 8 {
+        render_title_rows(frame, inner, &titles, theme);
+        return;
+    }
+
+    let labels = titles
+        .iter()
+        .take(6)
+        .map(|title| widgets::fit_text(&title.title, 14).trim_end().to_string())
+        .collect::<Vec<_>>();
+    let slices = titles
+        .iter()
+        .take(6)
+        .enumerate()
+        .zip(labels.iter())
+        .map(|((index, title), label)| {
+            PieSlice::new(
+                label.as_str(),
+                title.focused_seconds.max(0) as f64,
+                widgets::rank_color(index, theme),
+            )
+        })
+        .collect::<Vec<_>>();
+    let pie = PieChart::new(slices)
+        .style(Style::default().bg(theme.panel).fg(theme.text))
+        .resolution(Resolution::Braille)
+        .show_legend(true)
+        .show_percentages(true)
+        .legend_position(if inner.width < 42 {
+            LegendPosition::Bottom
+        } else {
+            LegendPosition::Right
+        })
+        .legend_layout(LegendLayout::Vertical)
+        .legend_marker("■")
+        .pie_char('█');
+    frame.render_widget(pie, inner);
+}
+
+fn render_title_rows(frame: &mut Frame<'_>, area: Rect, titles: &[&TitleTotals], theme: &Theme) {
+    let lines = titles
+        .iter()
+        .take(area.height as usize)
         .map(|title| {
             widgets::metric_line(
                 &widgets::fit_text(&title.title, 18),
                 &report::format_duration(title.focused_seconds),
-                inner.width as usize,
+                area.width as usize,
                 theme.text,
                 theme,
             )
         })
         .collect::<Vec<_>>();
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No focused titles for this app",
-            Style::default().fg(theme.muted).bg(theme.panel),
-        )));
-    }
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(theme.panel))
             .wrap(Wrap { trim: false }),
-        inner,
+        area,
     );
 }
 
@@ -953,13 +1306,19 @@ fn interval_row(interval: TimelineInterval, rows: &[AppTotals], theme: &Theme) -
 
 pub(super) fn render_system(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     widgets::fill_area(frame, area, theme.bg);
-    let [health, lenses] =
+    let [health, right] =
         *Layout::horizontal([Constraint::Percentage(54), Constraint::Percentage(46)]).split(area)
+    else {
+        return;
+    };
+    let [lenses, signals] =
+        *Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(right)
     else {
         return;
     };
     render_system_health(frame, health, app, theme);
     render_lens_totals(frame, lenses, app, theme);
+    render_period_signals(frame, signals, app, theme);
 }
 
 fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -1127,7 +1486,7 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         Line::from(vec![
             Span::styled("p", Style::default().fg(theme.primary)),
             Span::styled(
-                "  toggle overview trends card",
+                "  toggle overview stats / signals",
                 Style::default().fg(theme.text),
             ),
         ]),
@@ -1186,6 +1545,30 @@ fn heat_value(cells: &[FocusHeatCell], weekday: u32, hour: u32) -> i64 {
         .find(|cell| cell.weekday == weekday && cell.hour == hour)
         .map(|cell| cell.focused_seconds)
         .unwrap_or(0)
+}
+
+fn hour_totals(cells: &[FocusHeatCell]) -> Vec<(u32, i64)> {
+    let mut totals = [0_i64; 24];
+    for cell in cells {
+        if let Some(total) = totals.get_mut(cell.hour as usize) {
+            *total += cell.focused_seconds.max(0);
+        }
+    }
+    let mut rows = totals
+        .into_iter()
+        .enumerate()
+        .map(|(hour, focused_seconds)| (hour as u32, focused_seconds))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    rows
+}
+
+fn hour_label(hour: u32) -> String {
+    format!("{:02}:00", hour.min(23))
+}
+
+fn weekday_label(weekday: u32) -> &'static str {
+    WEEKDAYS.get(weekday as usize).copied().unwrap_or("--")
 }
 
 fn app_daily_values(daily_apps: &[AppDayTotals], days: &[DayTotals], app_class: &str) -> Vec<u64> {

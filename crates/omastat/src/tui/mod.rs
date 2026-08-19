@@ -172,9 +172,10 @@ mod tests {
             "Timeline",
             "System",
             "Focus Flow",
-            "App Share",
+            "Focus Composition",
             "Focus Heat",
-            "Density",
+            "Peak Hours",
+            "Focus Stats",
             "Week of Jan 12",
         ] {
             assert!(rendered.contains(label), "missing {label}");
@@ -241,7 +242,7 @@ mod tests {
 
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("Focus Spark"));
-        assert!(rendered.contains("Trends"));
+        assert!(rendered.contains("Focus Stats"));
         assert!(!rendered.contains("Need more space"));
     }
 

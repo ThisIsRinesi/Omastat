@@ -699,6 +699,19 @@ impl Storage {
         Ok(rows)
     }
 
+    pub fn focused_timeline_between(&self, start: i64, end: i64) -> Result<Vec<TimelineInterval>> {
+        Ok(self
+            .focused_intervals_between(start, end)?
+            .into_iter()
+            .map(|(app_class, started_at, ended_at)| TimelineInterval {
+                kind: IntervalKind::Focused,
+                app_class,
+                started_at,
+                ended_at,
+            })
+            .collect())
+    }
+
     pub fn focus_heatmap_between(&self, start: i64, end: i64) -> Result<Vec<FocusHeatCell>> {
         let mut totals = BTreeMap::<(u32, u32), i64>::new();
         for weekday in 0..7 {
