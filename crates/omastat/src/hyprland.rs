@@ -22,6 +22,8 @@ pub struct Window {
     pub class: String,
     pub initial_class: Option<String>,
     pub title: Option<String>,
+    pub workspace: Option<String>,
+    pub monitor: Option<String>,
     pub pid: Option<i64>,
 }
 
@@ -143,6 +145,8 @@ pub async fn active_window_details() -> Result<Option<Window>> {
         .get("title")
         .and_then(|value| value.as_str())
         .map(ToOwned::to_owned);
+    let workspace = value.get("workspace").and_then(workspace_label);
+    let monitor = value.get("monitor").and_then(monitor_label);
     let pid = value.get("pid").and_then(|value| value.as_i64());
 
     Ok(Some(Window {
@@ -150,6 +154,8 @@ pub async fn active_window_details() -> Result<Option<Window>> {
         class,
         initial_class,
         title,
+        workspace,
+        monitor,
         pid,
     }))
 }
@@ -182,6 +188,8 @@ fn parse_event(line: &str) -> Event {
                 class,
                 initial_class: None,
                 title,
+                workspace: parts.get(1).and_then(|value| non_empty(value)),
+                monitor: None,
                 pid: None,
             })
         }
@@ -216,6 +224,28 @@ fn normalize_address(address: &str) -> String {
     }
 }
 
+fn workspace_label(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("name")
+        .and_then(|name| name.as_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            value
+                .get("id")
+                .and_then(|id| id.as_i64())
+                .map(|id| id.to_string())
+        })
+}
+
+fn monitor_label(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|monitor| !monitor.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| value.as_i64().map(|monitor| monitor.to_string()))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClientJson {
@@ -223,7 +253,15 @@ struct ClientJson {
     class: String,
     initial_class: Option<String>,
     title: Option<String>,
+    workspace: Option<WorkspaceJson>,
+    monitor: Option<i64>,
     pid: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceJson {
+    id: Option<i64>,
+    name: Option<String>,
 }
 
 impl From<ClientJson> for Window {
@@ -237,6 +275,13 @@ impl From<ClientJson> for Window {
             },
             initial_class: value.initial_class,
             title: value.title,
+            workspace: value.workspace.and_then(|workspace| {
+                workspace
+                    .name
+                    .filter(|name| !name.trim().is_empty())
+                    .or_else(|| workspace.id.map(|id| id.to_string()))
+            }),
+            monitor: value.monitor.map(|monitor| monitor.to_string()),
             pid: value.pid,
         }
     }
@@ -275,6 +320,8 @@ mod tests {
                 class: "firefox".to_string(),
                 initial_class: None,
                 title: Some("Title, With Commas".to_string()),
+                workspace: Some("1".to_string()),
+                monitor: None,
                 pid: None,
             })
         );

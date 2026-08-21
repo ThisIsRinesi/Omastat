@@ -3,7 +3,7 @@ use crate::{
     hyprland::{self, Event, EventStream, Snapshot, Window},
     identity, session,
     steam::SteamResolver,
-    storage::{IntervalKind, SessionIntervalKind, Storage},
+    storage::{IntervalKind, IntervalMetadata, SessionIntervalKind, Storage},
     terminal,
 };
 use anyhow::Result;
@@ -33,6 +33,8 @@ struct FocusedInterval {
     address: String,
     app_class: String,
     title: Option<String>,
+    workspace: Option<String>,
+    monitor: Option<String>,
     interval_id: i64,
 }
 
@@ -507,16 +509,24 @@ impl Tracker {
                     terminal::should_track_class(&window.class).then(|| {
                         let app_class = self.focused_app_class(&window);
                         let title = self.focused_title(&window, &app_class);
-                        (window.address.clone(), app_class, title)
+                        (
+                            window.address.clone(),
+                            app_class,
+                            title,
+                            window.workspace.clone(),
+                            window.monitor.clone(),
+                        )
                     })
                 })
         };
 
-        if let (Some(focused), Some((address, app_class, title))) =
+        if let (Some(focused), Some((address, app_class, title, workspace, monitor))) =
             (self.state.focused.as_ref(), target.as_ref())
             && focused.address == *address
             && focused.app_class == *app_class
             && focused.title == *title
+            && focused.workspace == *workspace
+            && focused.monitor == *monitor
         {
             return Ok(());
         }
@@ -525,15 +535,19 @@ impl Tracker {
             self.storage.close_interval(previous.interval_id, now)?;
         }
 
-        let Some((address, app_class, title)) = target else {
+        let Some((address, app_class, title, workspace, monitor)) = target else {
             return Ok(());
         };
 
-        let interval_id = self.storage.start_interval(
+        let interval_id = self.storage.start_interval_with_metadata(
             IntervalKind::Focused,
             &app_class,
-            Some(&address),
-            title.as_deref(),
+            IntervalMetadata {
+                window_address: Some(&address),
+                title: title.as_deref(),
+                workspace: workspace.as_deref(),
+                monitor: monitor.as_deref(),
+            },
             now,
         )?;
 
@@ -541,6 +555,8 @@ impl Tracker {
             address,
             app_class,
             title,
+            workspace,
+            monitor,
             interval_id,
         });
         Ok(())
@@ -962,6 +978,8 @@ mod tests {
             class: class.to_string(),
             initial_class: Some(class.to_string()),
             title: Some(title.to_string()),
+            workspace: None,
+            monitor: None,
             pid: Some(1),
         }
     }

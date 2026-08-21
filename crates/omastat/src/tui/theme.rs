@@ -1,6 +1,6 @@
 use ratatui::style::Color;
 use serde_json::Value as JsonValue;
-use std::fs;
+use std::{fs, path::PathBuf};
 use toml::Value as TomlValue;
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ pub(super) struct Theme {
 impl Theme {
     pub(super) fn load() -> Self {
         read_noctalia_theme()
+            .or_else(read_skwd_wall_theme)
             .or_else(read_omarchy_theme)
             .unwrap_or_else(Self::fallback)
     }
@@ -107,7 +108,7 @@ impl Rgb {
 
     fn parse(value: &str) -> Option<Self> {
         let value = value.trim().strip_prefix('#').unwrap_or(value.trim());
-        if value.len() != 6 {
+        if value.len() != 6 && value.len() != 8 {
             return None;
         }
         Some(Self {
@@ -160,6 +161,144 @@ fn read_noctalia_theme() -> Option<Theme> {
     ))
 }
 
+fn read_skwd_wall_theme() -> Option<Theme> {
+    for path in skwd_wall_theme_paths() {
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<JsonValue>(&contents) else {
+            continue;
+        };
+        if let Some(theme) = theme_from_material_value(&value) {
+            return Some(theme);
+        }
+    }
+    None
+}
+
+fn skwd_wall_theme_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(config_dir) = dirs::config_dir() {
+        paths.push(config_dir.join("omastat/theme/colors.json"));
+        paths.push(config_dir.join("omastat/theme/matugen.json"));
+        paths.push(config_dir.join("skwd-wall/colors.json"));
+    }
+    if let Some(cache_dir) = dirs::cache_dir() {
+        paths.push(cache_dir.join("skwd/colors.json"));
+        paths.push(cache_dir.join("skwd-wall/colors.json"));
+    }
+    paths
+}
+
+fn theme_from_material_value(value: &JsonValue) -> Option<Theme> {
+    Some(Theme::from_palette(
+        material_color(
+            value,
+            &[
+                "surface",
+                "background",
+                "surface_container_lowest",
+                "surfaceContainerLowest",
+                "mSurface",
+            ],
+        )?,
+        material_color(
+            value,
+            &[
+                "on_surface",
+                "onSurface",
+                "on_background",
+                "onBackground",
+                "mOnSurface",
+            ],
+        )?,
+        material_color(value, &["primary", "mPrimary"])?,
+        material_color(
+            value,
+            &[
+                "secondary",
+                "primary_container",
+                "primaryContainer",
+                "mSecondary",
+            ],
+        )?,
+        material_color(
+            value,
+            &[
+                "tertiary",
+                "secondary_container",
+                "secondaryContainer",
+                "mTertiary",
+            ],
+        )?,
+        material_color(value, &["error", "mError"])?,
+        material_color(
+            value,
+            &[
+                "outline",
+                "outline_variant",
+                "outlineVariant",
+                "surface_variant",
+                "surfaceVariant",
+                "mOutline",
+            ],
+        )?,
+    ))
+}
+
+fn material_color(value: &JsonValue, names: &[&str]) -> Option<Rgb> {
+    let mut roots = vec![value];
+    for key in ["colors", "schemes", "md3", "palette"] {
+        if let Some(root) = value.get(key) {
+            roots.push(root);
+        }
+    }
+
+    for root in roots {
+        for name in names {
+            if let Some(color) = root.get(*name).and_then(parse_color_node) {
+                return Some(color);
+            }
+            for mode in ["default", "dark", "light"] {
+                if let Some(color) = root
+                    .get(mode)
+                    .and_then(|scheme| scheme.get(*name))
+                    .and_then(parse_color_node)
+                {
+                    return Some(color);
+                }
+                if let Some(color) = root
+                    .get(*name)
+                    .and_then(|token| token.get(mode))
+                    .and_then(parse_color_node)
+                {
+                    return Some(color);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_color_node(value: &JsonValue) -> Option<Rgb> {
+    value
+        .as_str()
+        .and_then(Rgb::parse)
+        .or_else(|| {
+            value
+                .get("hex")
+                .and_then(|value| value.as_str())
+                .and_then(Rgb::parse)
+        })
+        .or_else(|| {
+            value
+                .get("value")
+                .and_then(|value| value.as_str())
+                .and_then(Rgb::parse)
+        })
+}
+
 fn read_omarchy_theme() -> Option<Theme> {
     let path = dirs::state_dir()?.join("omarchy/current/theme/colors.toml");
     let contents = fs::read_to_string(path).ok()?;
@@ -193,4 +332,61 @@ fn toml_color(value: &TomlValue, path: &[&str]) -> Option<Rgb> {
         current = current.get(*key)?;
     }
     current.as_str().and_then(Rgb::parse)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Color, JsonValue, Rgb, theme_from_material_value};
+
+    #[test]
+    fn parses_nested_matugen_dark_colors() {
+        let value: JsonValue = serde_json::json!({
+            "colors": {
+                "dark": {
+                    "surface": "#101112",
+                    "on_surface": "#f0f1f2",
+                    "primary": "#7dd3fc",
+                    "secondary": "#c084fc",
+                    "tertiary": "#f9a8d4",
+                    "error": "#f87171",
+                    "outline": "#64748b"
+                }
+            }
+        });
+
+        let theme = theme_from_material_value(&value).unwrap();
+
+        assert_eq!(theme.bg, Color::Rgb(16, 17, 18));
+        assert_eq!(theme.text, Color::Rgb(240, 241, 242));
+        assert_eq!(theme.primary, Color::Rgb(125, 211, 252));
+    }
+
+    #[test]
+    fn parses_direct_skwd_style_colors() {
+        let value: JsonValue = serde_json::json!({
+            "colors": {
+                "background": "#0b0c0dff",
+                "onBackground": "#eff6ffff",
+                "primary": { "default": { "hex": "#38bdf8" } },
+                "secondary": "#a78bfa",
+                "tertiary": "#f472b6",
+                "error": "#fb7185",
+                "outlineVariant": "#475569"
+            }
+        });
+
+        let theme = theme_from_material_value(&value).unwrap();
+
+        assert_eq!(theme.bg, Color::Rgb(11, 12, 13));
+        assert_eq!(theme.primary, Color::Rgb(56, 189, 248));
+        assert_eq!(theme.danger, Color::Rgb(251, 113, 133));
+    }
+
+    #[test]
+    fn parses_alpha_hex_by_ignoring_alpha_channel() {
+        assert_eq!(
+            Rgb::parse("#112233cc").unwrap().color(),
+            Color::Rgb(17, 34, 51)
+        );
+    }
 }

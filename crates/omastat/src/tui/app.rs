@@ -71,6 +71,7 @@ pub(super) struct App {
     theme: Theme,
     steam: SteamResolver,
     data: DashboardData,
+    health: HealthSnapshot,
     table_state: TableState,
 }
 
@@ -79,6 +80,7 @@ impl App {
         let mut steam = SteamResolver::default();
         let lens = Lens::Day;
         let data = data::load_dashboard_data(storage, &mut steam, lens, 0)?;
+        let health = HealthSnapshot::load(storage);
         let mut app = Self {
             view: View::Overview,
             lens,
@@ -91,6 +93,7 @@ impl App {
             theme: Theme::load(),
             steam,
             data,
+            health,
             table_state: TableState::new(),
         };
         app.sync_table_state();
@@ -98,12 +101,7 @@ impl App {
     }
 
     pub(super) fn refresh(&mut self, storage: &Storage) -> Result<()> {
-        self.data =
-            data::load_dashboard_data(storage, &mut self.steam, self.lens, self.period_offset)?;
-        self.loaded_at = Local::now();
-        self.last_refresh = Instant::now();
-        self.clamp_selection();
-        Ok(())
+        self.reload_data(storage)
     }
 
     pub(super) fn previous_lens(&mut self, storage: &Storage) -> Result<()> {
@@ -117,12 +115,7 @@ impl App {
     pub(super) fn set_lens(&mut self, storage: &Storage, lens: Lens) -> Result<()> {
         self.lens = lens;
         self.period_offset = 0;
-        self.data =
-            data::load_dashboard_data(storage, &mut self.steam, self.lens, self.period_offset)?;
-        self.loaded_at = Local::now();
-        self.last_refresh = Instant::now();
-        self.clamp_selection();
-        Ok(())
+        self.reload_data(storage)
     }
 
     pub(super) fn previous_period(&mut self, storage: &Storage) -> Result<()> {
@@ -130,12 +123,7 @@ impl App {
             return Ok(());
         }
         self.period_offset -= 1;
-        self.data =
-            data::load_dashboard_data(storage, &mut self.steam, self.lens, self.period_offset)?;
-        self.loaded_at = Local::now();
-        self.last_refresh = Instant::now();
-        self.clamp_selection();
-        Ok(())
+        self.reload_data(storage)
     }
 
     pub(super) fn next_period(&mut self, storage: &Storage) -> Result<()> {
@@ -143,20 +131,17 @@ impl App {
             return Ok(());
         }
         self.period_offset += 1;
-        self.data =
-            data::load_dashboard_data(storage, &mut self.steam, self.lens, self.period_offset)?;
-        self.loaded_at = Local::now();
-        self.last_refresh = Instant::now();
-        self.clamp_selection();
-        Ok(())
+        self.reload_data(storage)
     }
 
-    pub(super) fn next_view(&mut self) {
+    pub(super) fn next_view(&mut self, storage: &Storage) {
         self.view = self.view.next();
+        self.refresh_health_if_visible(storage);
     }
 
-    pub(super) fn previous_view(&mut self) {
+    pub(super) fn previous_view(&mut self, storage: &Storage) {
         self.view = self.view.previous();
+        self.refresh_health_if_visible(storage);
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
@@ -248,7 +233,24 @@ impl App {
     }
 
     pub(super) fn health(&self) -> &HealthSnapshot {
-        &self.data.health
+        &self.health
+    }
+
+    fn reload_data(&mut self, storage: &Storage) -> Result<()> {
+        self.data =
+            data::load_dashboard_data(storage, &mut self.steam, self.lens, self.period_offset)?;
+        self.refresh_health_if_visible(storage);
+        self.theme = Theme::load();
+        self.loaded_at = Local::now();
+        self.last_refresh = Instant::now();
+        self.clamp_selection();
+        Ok(())
+    }
+
+    fn refresh_health_if_visible(&mut self, storage: &Storage) {
+        if self.view == View::System {
+            self.health = HealthSnapshot::load(storage);
+        }
     }
 
     fn clamp_selection(&mut self) {
@@ -264,7 +266,7 @@ impl App {
     #[cfg(test)]
     pub(super) fn from_parts_for_test(parts: TestAppParts) -> Self {
         let focus_intervals = parts
-            .today_intervals
+            .timeline_intervals
             .iter()
             .filter(|interval| interval.kind == crate::storage::IntervalKind::Focused)
             .cloned()
@@ -284,13 +286,14 @@ impl App {
             data: DashboardData {
                 report: parts.report,
                 lens_totals: parts.lens_totals,
-                today_intervals: parts.today_intervals,
+                timeline_intervals: parts.timeline_intervals,
                 daily_apps: parts.daily_apps,
                 heatmap: parts.heatmap,
+                workspaces: parts.workspaces,
                 titles: parts.titles,
                 stats,
-                health: HealthSnapshot::from_status_for_test(parts.storage),
             },
+            health: HealthSnapshot::from_status_for_test(parts.storage),
             table_state: TableState::new(),
         };
         app.sync_table_state();
@@ -309,9 +312,10 @@ pub(super) struct TestAppParts {
     pub(super) view: View,
     pub(super) report: UsageReport,
     pub(super) lens_totals: [Option<(i64, i64)>; 5],
-    pub(super) today_intervals: Vec<crate::storage::TimelineInterval>,
+    pub(super) timeline_intervals: Vec<crate::storage::TimelineInterval>,
     pub(super) daily_apps: Vec<crate::storage::AppDayTotals>,
     pub(super) heatmap: Vec<crate::storage::FocusHeatCell>,
+    pub(super) workspaces: Vec<crate::storage::WorkspaceTotals>,
     pub(super) titles: Vec<crate::storage::TitleTotals>,
     pub(super) storage: crate::storage::StorageStatus,
     pub(super) steam: SteamResolver,

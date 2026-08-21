@@ -7,10 +7,10 @@ use crate::{
     report::{self, Lens},
     storage::{
         AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, TimelineInterval,
-        TitleTotals,
+        TitleTotals, WorkspaceTotals,
     },
 };
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Margin, Rect},
@@ -19,7 +19,8 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Axis, Bar, BarChart, Block, Cell, Chart, Clear, Dataset, GraphType, HighlightSpacing,
-        LineGauge, Paragraph, Row, Sparkline, Table, Wrap, canvas,
+        LineGauge, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
+        Table, Wrap, canvas,
     },
 };
 use tui_piechart::{LegendLayout, LegendPosition, PieChart, PieSlice, Resolution};
@@ -224,10 +225,11 @@ pub(super) fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, them
     else {
         return;
     };
-    let [heat, hours, stats] = *Layout::horizontal([
-        Constraint::Percentage(38),
-        Constraint::Percentage(31),
-        Constraint::Percentage(31),
+    let [heat, hours, workspaces, stats] = *Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Percentage(22),
+        Constraint::Percentage(22),
+        Constraint::Percentage(22),
     ])
     .split(bottom) else {
         return;
@@ -238,6 +240,7 @@ pub(super) fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, them
     render_focus_composition(frame, composition, app, theme);
     render_heatmap(frame, heat, app, theme);
     render_peak_hours(frame, hours, app, theme);
+    render_workspace_focus(frame, workspaces, app, theme);
     if app.show_trends() {
         render_focus_stats(frame, stats, app, theme);
     } else {
@@ -579,6 +582,36 @@ fn render_peak_hours(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
         .bar_width(1)
         .bar_gap(0)
         .bar_style(Style::default().fg(theme.secondary).bg(theme.panel))
+        .value_style(Style::default().fg(theme.text).bg(theme.panel))
+        .label_style(Style::default().fg(theme.muted).bg(theme.panel))
+        .style(Style::default().bg(theme.panel));
+    frame.render_widget(chart, inner);
+}
+
+fn render_workspace_focus(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = widgets::panel("Workspace Focus", theme, theme.primary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if app.data().workspaces.is_empty() {
+        widgets::render_empty(frame, inner, "No workspace focus data yet", theme);
+        return;
+    }
+
+    let limit = (inner.height as usize).saturating_sub(1).clamp(1, 6);
+    let bars = workspace_bars(&app.data().workspaces, limit, theme);
+    let max = app
+        .data()
+        .workspaces
+        .iter()
+        .map(|row| row.focused_seconds)
+        .max()
+        .unwrap_or(1)
+        .max(1) as u64;
+    let chart = BarChart::horizontal(bars)
+        .max(max)
+        .bar_width(1)
+        .bar_gap(0)
+        .bar_style(Style::default().fg(theme.primary).bg(theme.panel))
         .value_style(Style::default().fg(theme.text).bg(theme.panel))
         .label_style(Style::default().fg(theme.muted).bg(theme.panel))
         .style(Style::default().bg(theme.panel));
@@ -941,6 +974,8 @@ pub(super) fn render_apps(frame: &mut Frame<'_>, area: Rect, app: &mut App, them
 fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let block = widgets::panel("Apps", theme, theme.warn);
     let rows_data = app.rows().to_vec();
+    let row_count = rows_data.len();
+    let selected = app.selected;
     let total = app.report().total_focused_seconds.max(1);
     let rows = rows_data
         .iter()
@@ -986,6 +1021,21 @@ fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
     .style(Style::default().bg(theme.panel));
 
     frame.render_stateful_widget(table, area, app.table_state());
+    let visible_rows = area.height.saturating_sub(3) as usize;
+    if row_count > visible_rows {
+        let mut scrollbar_state = ScrollbarState::new(row_count).position(selected);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(theme.primary))
+            .track_style(Style::default().fg(theme.dim));
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -1176,17 +1226,15 @@ fn render_activity_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
     let block = widgets::panel("Activity Canvas", theme, theme.primary);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some((start, end)) = widgets::today_bounds() else {
-        widgets::render_empty(frame, inner, "Timeline unavailable", theme);
-        return;
-    };
-    if app.data().today_intervals.is_empty() || end <= start {
-        widgets::render_empty(frame, inner, "No intervals recorded today", theme);
+    let start = app.report().query_start_ts;
+    let end = app.report().query_end_ts;
+    if app.data().timeline_intervals.is_empty() || end <= start {
+        widgets::render_empty(frame, inner, "No intervals recorded for this period", theme);
         return;
     }
     let selected = app.selected_row().map(|row| row.app_class.as_str());
     let rows = app.rows().to_vec();
-    let intervals = app.data().today_intervals.clone();
+    let intervals = app.data().timeline_intervals.clone();
     let canvas = canvas::Canvas::default()
         .x_bounds([start as f64, end as f64])
         .y_bounds([0.0, 3.0])
@@ -1222,13 +1270,14 @@ fn render_activity_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         });
     frame.render_widget(canvas, inner);
 
+    let span = end.saturating_sub(start);
     let labels = vec![
         Line::from(Span::styled(
-            format!("{} start", widgets::format_clock(start)),
+            format!("{} start", timeline_label(start, span)),
             Style::default().fg(theme.dim).bg(theme.panel),
         )),
         Line::from(Span::styled(
-            format!("now {}", widgets::format_clock(end)),
+            format!("{} end", timeline_label(end, span)),
             Style::default().fg(theme.dim).bg(theme.panel),
         )),
     ];
@@ -1246,12 +1295,16 @@ fn render_activity_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
 
 fn render_interval_table(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let block = widgets::panel("Intervals", theme, theme.secondary);
-    let mut intervals = app.data().today_intervals.clone();
+    let mut intervals = app.data().timeline_intervals.clone();
     intervals.sort_by_key(|interval| interval.started_at);
+    let span = app
+        .report()
+        .query_end_ts
+        .saturating_sub(app.report().query_start_ts);
     let rows = intervals
         .into_iter()
         .rev()
-        .map(|interval| interval_row(interval, app.rows(), theme))
+        .map(|interval| interval_row(interval, span, app.rows(), theme))
         .collect::<Vec<_>>();
     let table = Table::new(
         rows,
@@ -1273,7 +1326,12 @@ fn render_interval_table(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     frame.render_widget(table, area);
 }
 
-fn interval_row(interval: TimelineInterval, rows: &[AppTotals], theme: &Theme) -> Row<'static> {
+fn interval_row(
+    interval: TimelineInterval,
+    span_seconds: i64,
+    rows: &[AppTotals],
+    theme: &Theme,
+) -> Row<'static> {
     let rank = rows
         .iter()
         .position(|row| row.app_class == interval.app_class)
@@ -1290,8 +1348,8 @@ fn interval_row(interval: TimelineInterval, rows: &[AppTotals], theme: &Theme) -
     Row::new(vec![
         Cell::from(format!(
             "{}-{}",
-            widgets::format_clock(interval.started_at),
-            widgets::format_clock(interval.ended_at)
+            interval_time_label(interval.started_at, span_seconds),
+            interval_time_label(interval.ended_at, span_seconds)
         ))
         .style(Style::default().fg(theme.dim)),
         Cell::from(kind).style(Style::default().fg(color)),
@@ -1571,14 +1629,59 @@ fn weekday_label(weekday: u32) -> &'static str {
     WEEKDAYS.get(weekday as usize).copied().unwrap_or("--")
 }
 
+fn workspace_bars<'a>(
+    workspaces: &'a [WorkspaceTotals],
+    limit: usize,
+    theme: &Theme,
+) -> Vec<Bar<'a>> {
+    workspaces
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, row)| {
+            Bar::with_label(
+                widgets::fit_text(&row.workspace, 12),
+                row.focused_seconds.max(0) as u64,
+            )
+            .text_value(widgets::compact_duration(row.focused_seconds))
+            .style(Style::default().fg(widgets::rank_color(index, theme)))
+            .value_style(Style::default().fg(theme.text))
+        })
+        .collect()
+}
+
 fn app_daily_values(daily_apps: &[AppDayTotals], days: &[DayTotals], app_class: &str) -> Vec<u64> {
     days.iter()
         .map(|day| {
             daily_apps
                 .iter()
-                .find(|row| row.app_class == app_class && row.date == day.date)
+                .filter(|row| row.app_class == app_class && row.date == day.date)
                 .map(|row| row.focused_seconds.max(0) as u64)
-                .unwrap_or(0)
+                .sum()
         })
         .collect()
+}
+
+fn timeline_label(timestamp: i64, span_seconds: i64) -> String {
+    if span_seconds >= 2 * 86400 {
+        return Local
+            .timestamp_opt(timestamp, 0)
+            .single()
+            .map(|time| time.format("%b %-d %H:%M").to_string())
+            .unwrap_or_else(|| "--".to_string());
+    }
+
+    widgets::format_clock(timestamp)
+}
+
+fn interval_time_label(timestamp: i64, span_seconds: i64) -> String {
+    if span_seconds >= 2 * 86400 {
+        return Local
+            .timestamp_opt(timestamp, 0)
+            .single()
+            .map(|time| time.format("%m/%d %H:%M").to_string())
+            .unwrap_or_else(|| "--/-- --:--".to_string());
+    }
+
+    widgets::format_clock(timestamp)
 }

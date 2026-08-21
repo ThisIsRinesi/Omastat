@@ -2,22 +2,28 @@ use crate::{
     hyprland,
     report::{self, Lens, UsageReport},
     steam::SteamResolver,
-    storage::{AppDayTotals, FocusHeatCell, Storage, StorageStatus, TimelineInterval, TitleTotals},
+    storage::{
+        AppDayTotals, FocusHeatCell, Storage, StorageStatus, TimelineInterval, TitleTotals,
+        WorkspaceTotals,
+    },
 };
 use anyhow::Result;
 use chrono::Local;
+use std::collections::BTreeMap;
 use std::process::Command;
+
+const TITLE_LIMIT_PER_APP: usize = 8;
 
 #[derive(Debug)]
 pub(super) struct DashboardData {
     pub(super) report: UsageReport,
     pub(super) lens_totals: [Option<(i64, i64)>; Lens::ALL.len()],
-    pub(super) today_intervals: Vec<TimelineInterval>,
+    pub(super) timeline_intervals: Vec<TimelineInterval>,
     pub(super) daily_apps: Vec<AppDayTotals>,
     pub(super) heatmap: Vec<FocusHeatCell>,
+    pub(super) workspaces: Vec<WorkspaceTotals>,
     pub(super) titles: Vec<TitleTotals>,
     pub(super) stats: DashboardStats,
-    pub(super) health: HealthSnapshot,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -145,8 +151,8 @@ pub(super) fn load_dashboard_data(
         report::usage_report_for_period(storage, steam, lens, offset)?
     };
     let lens_totals = load_lens_totals(storage, steam);
-    let today_intervals = storage
-        .timeline_for_today()?
+    let timeline_intervals = storage
+        .timeline_between(report.query_start_ts, report.query_end_ts)?
         .into_iter()
         .map(|mut interval| {
             interval.app_class = steam.resolve_class(&interval.app_class);
@@ -170,26 +176,26 @@ pub(super) fn load_dashboard_data(
         })
         .collect();
     let heatmap = storage.focus_heatmap_between(report.query_start_ts, report.query_end_ts)?;
+    let workspaces =
+        storage.focused_workspace_totals_between(report.query_start_ts, report.query_end_ts, 8)?;
     let titles = storage
-        .focused_title_totals_between(report.query_start_ts, report.query_end_ts, 24)?
-        .into_iter()
-        .map(|mut row| {
-            row.app_class = steam.resolve_class(&row.app_class);
-            row
-        })
-        .collect();
+        .focused_title_totals_by_app_between(
+            report.query_start_ts,
+            report.query_end_ts,
+            TITLE_LIMIT_PER_APP,
+        )
+        .map(|rows| resolve_title_totals(rows, steam))?;
     let stats = DashboardStats::from_data(&report, &heatmap, &focus_intervals);
-    let health = HealthSnapshot::load(storage);
 
     Ok(DashboardData {
         report,
         lens_totals,
-        today_intervals,
+        timeline_intervals,
         daily_apps,
         heatmap,
+        workspaces,
         titles,
         stats,
-        health,
     })
 }
 
@@ -204,6 +210,30 @@ fn load_lens_totals(
     })
 }
 
+fn resolve_title_totals(rows: Vec<TitleTotals>, steam: &mut SteamResolver) -> Vec<TitleTotals> {
+    let mut totals = BTreeMap::<(String, String), i64>::new();
+    for row in rows {
+        let app_class = steam.resolve_class(&row.app_class);
+        *totals.entry((app_class, row.title)).or_default() += row.focused_seconds.max(0);
+    }
+
+    let mut rows = totals
+        .into_iter()
+        .map(|((app_class, title), focused_seconds)| TitleTotals {
+            app_class,
+            title,
+            focused_seconds,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.app_class
+            .cmp(&right.app_class)
+            .then_with(|| right.focused_seconds.cmp(&left.focused_seconds))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    rows
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct HealthSnapshot {
     pub(super) storage: StorageStatus,
@@ -212,7 +242,7 @@ pub(super) struct HealthSnapshot {
 }
 
 impl HealthSnapshot {
-    fn load(storage: &Storage) -> Self {
+    pub(super) fn load(storage: &Storage) -> Self {
         Self {
             storage: storage.usage_status().unwrap_or_default(),
             service_state: omastatd_state(),

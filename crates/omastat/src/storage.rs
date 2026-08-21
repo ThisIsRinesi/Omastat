@@ -48,6 +48,12 @@ pub struct FocusHeatCell {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceTotals {
+    pub workspace: String,
+    pub focused_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TitleTotals {
     pub app_class: String,
     pub title: String,
@@ -78,6 +84,14 @@ pub struct ActiveInterval {
     pub kind: IntervalKind,
     pub app_class: String,
     pub window_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IntervalMetadata<'a> {
+    pub window_address: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub workspace: Option<&'a str>,
+    pub monitor: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,10 +220,37 @@ impl Storage {
         title: Option<&str>,
         started_at: i64,
     ) -> Result<i64> {
+        self.start_interval_with_metadata(
+            kind,
+            app_class,
+            IntervalMetadata {
+                window_address,
+                title,
+                ..IntervalMetadata::default()
+            },
+            started_at,
+        )
+    }
+
+    pub fn start_interval_with_metadata(
+        &self,
+        kind: IntervalKind,
+        app_class: &str,
+        metadata: IntervalMetadata<'_>,
+        started_at: i64,
+    ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO intervals (kind, app_class, window_address, title, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![kind.as_str(), app_class, window_address, title, started_at],
+            "INSERT INTO intervals (kind, app_class, window_address, title, workspace, monitor, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                kind.as_str(),
+                app_class,
+                metadata.window_address,
+                metadata.title,
+                metadata.workspace,
+                metadata.monitor,
+                started_at
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -648,6 +689,63 @@ impl Storage {
         Ok(rows)
     }
 
+    pub fn focused_title_totals_by_app_between(
+        &self,
+        start: i64,
+        end: i64,
+        limit_per_app: usize,
+    ) -> Result<Vec<TitleTotals>> {
+        let mut stmt = self.conn.prepare(
+            "
+            WITH title_totals AS (
+                SELECT
+                    app_class,
+                    title,
+                    SUM(overlap_seconds) AS focused_seconds
+                FROM (
+                    SELECT
+                        app_class,
+                        title,
+                        MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
+                    FROM intervals
+                    WHERE kind = 'focused'
+                      AND title IS NOT NULL
+                      AND trim(title) <> ''
+                      AND started_at < ?2
+                      AND COALESCE(ended_at, ?2) > ?1
+                )
+                WHERE overlap_seconds > 0
+                GROUP BY app_class, title
+            ),
+            ranked AS (
+                SELECT
+                    app_class,
+                    title,
+                    focused_seconds,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY app_class
+                        ORDER BY focused_seconds DESC, title ASC
+                    ) AS title_rank
+                FROM title_totals
+            )
+            SELECT app_class, title, focused_seconds
+            FROM ranked
+            WHERE title_rank <= ?3
+            ORDER BY app_class ASC, focused_seconds DESC, title ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end, limit_per_app.max(1) as i64], |row| {
+                Ok(TitleTotals {
+                    app_class: row.get(0)?,
+                    title: row.get(1)?,
+                    focused_seconds: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn focused_app_daily_totals_between(
         &self,
         start: i64,
@@ -761,6 +859,45 @@ impl Storage {
                 focused_seconds,
             })
             .collect())
+    }
+
+    pub fn focused_workspace_totals_between(
+        &self,
+        start: i64,
+        end: i64,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceTotals>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                workspace,
+                SUM(overlap_seconds) AS focused_seconds
+            FROM (
+                SELECT
+                    trim(workspace) AS workspace,
+                    MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
+                FROM intervals
+                WHERE kind = 'focused'
+                  AND workspace IS NOT NULL
+                  AND trim(workspace) <> ''
+                  AND started_at < ?2
+                  AND COALESCE(ended_at, ?2) > ?1
+            )
+            WHERE overlap_seconds > 0
+            GROUP BY workspace
+            ORDER BY focused_seconds DESC, workspace ASC
+            LIMIT ?3
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end, limit.max(1) as i64], |row| {
+                Ok(WorkspaceTotals {
+                    workspace: row.get(0)?,
+                    focused_seconds: row.get(1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn session_totals_between(&self, start: i64, end: i64) -> Result<SessionTotals> {
@@ -953,12 +1090,14 @@ impl Storage {
                 VALUES (2, unixepoch());
             ",
         )?;
+        self.add_column_if_missing("intervals", "workspace", "TEXT")?;
+        self.add_column_if_missing("intervals", "monitor", "TEXT")?;
         Ok(())
     }
 
     fn validate_schema(&self) -> Result<()> {
         for statement in [
-            "SELECT id, kind, app_class, window_address, title, started_at, ended_at FROM intervals LIMIT 0",
+            "SELECT id, kind, app_class, window_address, title, workspace, monitor, started_at, ended_at FROM intervals LIMIT 0",
             "SELECT id, kind, source, started_at, ended_at FROM session_intervals LIMIT 0",
         ] {
             self.conn.prepare(statement).with_context(|| {
@@ -969,6 +1108,25 @@ impl Storage {
             })?;
         }
         Ok(())
+    }
+
+    fn add_column_if_missing(&self, table: &str, column: &str, column_type: &str) -> Result<()> {
+        if self.column_exists(table, column)? {
+            return Ok(());
+        }
+        self.conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(columns.iter().any(|name| name == column))
     }
 
     fn app_class_counts(&self) -> Result<Vec<(String, i64)>> {
@@ -1129,7 +1287,7 @@ impl Storage {
         Ok(rows)
     }
 
-    fn timeline_between(&self, start: i64, end: i64) -> Result<Vec<TimelineInterval>> {
+    pub fn timeline_between(&self, start: i64, end: i64) -> Result<Vec<TimelineInterval>> {
         let mut stmt = self.conn.prepare(
             "
             SELECT
@@ -1270,7 +1428,7 @@ fn local_day_range(start: i64, end: i64) -> Result<(chrono::DateTime<Local>, usi
 
 #[cfg(test)]
 mod tests {
-    use super::{IntervalKind, SessionIntervalKind, Storage};
+    use super::{IntervalKind, IntervalMetadata, SessionIntervalKind, Storage};
     use crate::config::Config;
     use crate::steam::SteamResolver;
     use chrono::{Datelike, Local, TimeZone};
@@ -1297,6 +1455,135 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].focused_seconds, 50);
         assert_eq!(rows[0].open_seconds, 75);
+    }
+
+    #[test]
+    fn timeline_between_bounds_open_and_focused_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let focused = storage
+            .start_interval(IntervalKind::Focused, "ghostty", None, None, 100)
+            .unwrap();
+        storage.close_interval(focused, 220).unwrap();
+        let open = storage
+            .start_interval(IntervalKind::Open, "firefox", None, None, 140)
+            .unwrap();
+        storage.close_interval(open, 260).unwrap();
+
+        let rows = storage.timeline_between(150, 225).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].kind, IntervalKind::Focused);
+        assert_eq!(rows[0].started_at, 150);
+        assert_eq!(rows[0].ended_at, 220);
+        assert_eq!(rows[1].kind, IntervalKind::Open);
+        assert_eq!(rows[1].started_at, 150);
+        assert_eq!(rows[1].ended_at, 225);
+    }
+
+    #[test]
+    fn title_totals_by_app_keeps_each_apps_top_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let ghostty_alpha = storage
+            .start_interval(
+                IntervalKind::Focused,
+                "ghostty",
+                Some("0x1"),
+                Some("alpha"),
+                100,
+            )
+            .unwrap();
+        storage.close_interval(ghostty_alpha, 160).unwrap();
+        let ghostty_beta = storage
+            .start_interval(
+                IntervalKind::Focused,
+                "ghostty",
+                Some("0x2"),
+                Some("beta"),
+                170,
+            )
+            .unwrap();
+        storage.close_interval(ghostty_beta, 220).unwrap();
+        let firefox_docs = storage
+            .start_interval(
+                IntervalKind::Focused,
+                "firefox",
+                Some("0x3"),
+                Some("docs"),
+                110,
+            )
+            .unwrap();
+        storage.close_interval(firefox_docs, 140).unwrap();
+
+        let rows = storage
+            .focused_title_totals_by_app_between(100, 240, 1)
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].app_class, "firefox");
+        assert_eq!(rows[0].title, "docs");
+        assert_eq!(rows[0].focused_seconds, 30);
+        assert_eq!(rows[1].app_class, "ghostty");
+        assert_eq!(rows[1].title, "alpha");
+        assert_eq!(rows[1].focused_seconds, 60);
+    }
+
+    #[test]
+    fn workspace_totals_use_focused_interval_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let code = storage
+            .start_interval_with_metadata(
+                IntervalKind::Focused,
+                "ghostty",
+                IntervalMetadata {
+                    window_address: Some("0x1"),
+                    workspace: Some("code"),
+                    monitor: Some("0"),
+                    ..IntervalMetadata::default()
+                },
+                100,
+            )
+            .unwrap();
+        storage.close_interval(code, 220).unwrap();
+        let chat = storage
+            .start_interval_with_metadata(
+                IntervalKind::Focused,
+                "vesktop",
+                IntervalMetadata {
+                    window_address: Some("0x2"),
+                    workspace: Some("chat"),
+                    monitor: Some("0"),
+                    ..IntervalMetadata::default()
+                },
+                150,
+            )
+            .unwrap();
+        storage.close_interval(chat, 190).unwrap();
+        let legacy = storage
+            .start_interval(IntervalKind::Focused, "firefox", None, None, 100)
+            .unwrap();
+        storage.close_interval(legacy, 300).unwrap();
+
+        let rows = storage
+            .focused_workspace_totals_between(120, 240, 8)
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].workspace, "code");
+        assert_eq!(rows[0].focused_seconds, 100);
+        assert_eq!(rows[1].workspace, "chat");
+        assert_eq!(rows[1].focused_seconds, 40);
     }
 
     #[test]

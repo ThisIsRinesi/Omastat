@@ -17,7 +17,10 @@ Omarchy Quattro bar widget.
 - Omarchy Quattro widget with today's total, app breakdown, 7-day patterns, and
   a shortcut into the TUI.
 - Rich terminal dashboard with app composition pies, focus-flow charts, hourly
-  peaks, heatmaps, focus block stats, and idle/locked signal gauges.
+  peaks, heatmaps, workspace focus, focus block stats, and idle/locked signal
+  gauges.
+- TUI colors follow Noctalia, skwd-wall/Matugen, or the current Omarchy theme
+  when those files are present.
 - Static HTML export for shareable day, week, month, year, and lifetime replays.
 
 ## Install
@@ -69,10 +72,17 @@ omastat export --lens month --output ~/Pictures/omastat-month.html
 
 More command examples and configuration notes are in [docs/USAGE.md](docs/USAGE.md).
 
+## skwd-wall Theme
+
+Omastat can read skwd-wall/Matugen colors from the default skwd cache paths, or
+from a dedicated Omastat output. The template and integration notes are in
+[packaging/skwd-wall](packaging/skwd-wall).
+
 ## Privacy
 
-By default, Omastat stores application class names and timing intervals. It does
-not store window titles, page names, file names, screenshots, or browser history.
+By default, Omastat stores application class names, timing intervals, and
+workspace/monitor context when Hyprland provides it. It does not store window
+titles, page names, file names, screenshots, or browser history.
 
 Optional title capture can be enabled explicitly in the config file when richer
 replay labels are worth the extra local data. See [docs/USAGE.md](docs/USAGE.md).

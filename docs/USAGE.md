@@ -33,6 +33,10 @@ r                   Refresh from SQLite
 q or Esc            Quit
 ```
 
+The TUI loads theme colors from Noctalia, skwd-wall/Matugen, Omarchy, then the
+built-in fallback palette. Press `r` to reload colors after skwd-wall generates a
+new palette.
+
 ## HTML Export
 
 Create a static, self-contained replay:
@@ -81,6 +85,34 @@ cleaned window titles. Existing databases can be normalized after upgrades:
 ```bash
 omastat repair-titles --dry-run
 omastat repair-titles
+```
+
+Focused intervals also store workspace and monitor context when Hyprland exposes
+it. This powers the TUI Workspace Focus chart and does not require title capture.
+
+## skwd-wall / Matugen
+
+Omastat reads skwd-wall colors from:
+
+```text
+${XDG_CONFIG_HOME:-~/.config}/omastat/theme/colors.json
+${XDG_CONFIG_HOME:-~/.config}/omastat/theme/matugen.json
+${XDG_CONFIG_HOME:-~/.config}/skwd-wall/colors.json
+${XDG_CACHE_HOME:-~/.cache}/skwd/colors.json
+${XDG_CACHE_HOME:-~/.cache}/skwd-wall/colors.json
+```
+
+For a dedicated integration, copy
+`packaging/skwd-wall/omastat-colors.json` into your skwd-wall templates
+directory and add this to the `integrations` array in
+`~/.config/skwd-wall/config.json`:
+
+```json
+{
+  "name": "omastat",
+  "template": "omastat-colors.json",
+  "output": "~/.config/omastat/theme/colors.json"
+}
 ```
 
 ## Tracking Model

@@ -63,8 +63,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Stor
                     KeyCode::Char('?') => app.toggle_help(),
                     KeyCode::Char('q') | KeyCode::Esc => app.close_help(),
                     KeyCode::Char('r') => app.refresh(storage)?,
-                    KeyCode::Tab => app.next_view(),
-                    KeyCode::BackTab => app.previous_view(),
+                    KeyCode::Tab => app.next_view(storage),
+                    KeyCode::BackTab => app.previous_view(storage),
                     KeyCode::Char('p') => app.toggle_trends(),
                     KeyCode::Char('[') => app.previous_period(storage)?,
                     KeyCode::Char(']') => app.next_period(storage)?,
@@ -150,7 +150,7 @@ mod tests {
         steam::SteamResolver,
         storage::{
             AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, StorageStatus,
-            TimelineInterval, TitleTotals,
+            TimelineInterval, TitleTotals, WorkspaceTotals,
         },
         tui::theme::Theme,
     };
@@ -174,6 +174,7 @@ mod tests {
             "Focus Flow",
             "Focus Composition",
             "Focus Heat",
+            "Workspace Focus",
             "Peak Hours",
             "Focus Stats",
             "Week of Jan 12",
@@ -364,6 +365,16 @@ mod tests {
                 })
             })
             .collect();
+        let workspaces = vec![
+            WorkspaceTotals {
+                workspace: "code".to_string(),
+                focused_seconds: 7 * 3600,
+            },
+            WorkspaceTotals {
+                workspace: "chat".to_string(),
+                focused_seconds: 3600,
+            },
+        ];
 
         App::from_parts_for_test(app::TestAppParts {
             view,
@@ -375,9 +386,10 @@ mod tests {
                 Some((200 * 3600, 420 * 3600)),
                 Some((500 * 3600, 900 * 3600)),
             ],
-            today_intervals: timeline,
+            timeline_intervals: timeline,
             daily_apps,
             heatmap,
+            workspaces,
             titles,
             storage: StorageStatus::default(),
             steam: SteamResolver::default(),

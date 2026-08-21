@@ -1,6 +1,6 @@
 use super::theme::Theme;
 use crate::report::{self, AppBreakdown, Lens};
-use chrono::{Datelike, Local, TimeZone};
+use chrono::{Local, TimeZone};
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
@@ -153,15 +153,6 @@ pub(super) fn format_clock(timestamp: i64) -> String {
         .single()
         .map(|time| time.format("%H:%M").to_string())
         .unwrap_or_else(|| "--:--".to_string())
-}
-
-pub(super) fn today_bounds() -> Option<(i64, i64)> {
-    let now = Local::now();
-    let start = Local
-        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-        .single()?
-        .timestamp();
-    Some((start, now.timestamp()))
 }
 
 pub(super) fn app_share_line(apps: &[AppBreakdown], width: usize, theme: &Theme) -> Line<'static> {
