@@ -21,15 +21,14 @@ use ratatui::{
     symbols,
     text::{Line, Span, Text},
     widgets::{
-        Axis, Bar, BarChart, Block, Cell, Chart, Clear, Dataset, GraphType, HighlightSpacing,
-        LineGauge, List, ListItem, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Sparkline, Table, Wrap, canvas,
+        Bar, BarChart, Block, Cell, Clear, HighlightSpacing, LineGauge, List, ListItem, Paragraph,
+        Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table, Wrap, canvas,
     },
 };
 use tui_piechart::{LegendLayout, LegendPosition, PieChart, PieSlice, Resolution};
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const HEAT_CHARS: [char; 8] = [' ', '·', '░', '▒', '▓', '█', '▇', '▉'];
+const DAILY_LANE_CHARS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '█'];
 const INSIGHT_CATEGORIES: [InsightCategory; 4] = [
     InsightCategory::Patterns,
     InsightCategory::FocusQuality,
@@ -158,9 +157,7 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
         format!("{} back", app.period_offset().abs())
     };
     let left = match app.view() {
-        View::Overview => {
-            "j/k inspect day  h/l lens  [/] period  p sessions/time mix  ? help  q quit"
-        }
+        View::Overview => "j/k inspect day  h/l lens  [/] period  p switch detail  ? help  q quit",
         View::Insights => "j/k select  PgUp/PgDn jump  h/l lens  [/] period  ? help  q quit",
         View::Apps => "j/k select  PgUp/PgDn jump  h/l lens  [/] period  ? help  q quit",
         View::Timeline => "j/k highlight app  h/l lens  [/] period  ? help  q quit",
@@ -565,7 +562,10 @@ fn render_kpis(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         chunks[2],
         "Longest",
         &report::format_duration(stats.longest_block_seconds),
-        &format!("{} focus sessions", stats.focus_block_count),
+        &format!(
+            "{} focus sessions",
+            widgets::compact_count(stats.focus_block_count as i64)
+        ),
         theme.secondary,
         theme,
     );
@@ -621,139 +621,48 @@ fn render_focus_chart(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
         widgets::render_empty(frame, inner, "No daily focus yet", theme);
         return;
     }
-    let legend_height = if inner.height >= 9 { 2 } else { 1 };
-    let [legend, chart_area] =
-        *Layout::vertical([Constraint::Length(legend_height), Constraint::Min(3)]).split(inner)
+
+    let summary_height = if inner.height >= 10 { 3 } else { 2 }.min(inner.height);
+    let [summary, lanes] =
+        *Layout::vertical([Constraint::Length(summary_height), Constraint::Min(3)]).split(inner)
     else {
         return;
     };
-    let focused = daily_points(&app.report().daily, |day| day.focused_seconds);
-    let open = daily_points(&app.report().daily, |day| day.open_seconds);
-    let idle = daily_points(&app.report().daily, |day| day.idle_seconds);
-    let locked = daily_points(&app.report().daily, |day| day.locked_seconds);
-    let selected_focus = focused
-        .get(app.selected_day_index())
-        .copied()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let max = app
-        .report()
-        .daily
-        .iter()
-        .flat_map(|day| {
-            [
-                day.focused_seconds,
-                day.open_seconds,
-                day.idle_seconds,
-                day.locked_seconds,
-            ]
-        })
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
-    let labels = chart_labels(&app.report().daily);
-    render_focus_flow_legend(frame, legend, app, theme);
-    let mut datasets = vec![
-        Dataset::default()
-            .name("focus")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Area)
-            .style(Style::default().fg(theme.warn))
-            .data(&focused)
-            .fill_to_y(0.0),
-        Dataset::default()
-            .name("open")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(theme.secondary))
-            .data(&open),
-        Dataset::default()
-            .name("idle")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(theme.tertiary))
-            .data(&idle),
-        Dataset::default()
-            .name("locked")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(theme.danger))
-            .data(&locked),
-    ];
-    if !selected_focus.is_empty() {
-        datasets.push(
-            Dataset::default()
-                .name("selected")
-                .marker(symbols::Marker::Block)
-                .graph_type(GraphType::Scatter)
-                .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD))
-                .data(&selected_focus),
-        );
-    }
-    let chart = Chart::new(datasets)
-        .x_axis(
-            Axis::default()
-                .style(Style::default().fg(theme.dim).bg(theme.panel))
-                .bounds([0.0, focused.len().saturating_sub(1).max(1) as f64])
-                .labels(labels),
-        )
-        .y_axis(
-            Axis::default()
-                .style(Style::default().fg(theme.dim).bg(theme.panel))
-                .bounds([0.0, max])
-                .labels(flow_y_axis_labels(max, chart_area.height)),
-        )
-        .legend_position(None)
-        .style(Style::default().bg(theme.panel));
-    frame.render_widget(chart, chart_area);
-}
 
-fn render_focus_flow_legend(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    if area.height == 0 {
-        return;
-    }
-    let mut lines = vec![Line::from(vec![
-        Span::styled("focus", Style::default().fg(theme.warn).bg(theme.panel)),
-        Span::styled(
-            "  open",
-            Style::default().fg(theme.secondary).bg(theme.panel),
-        ),
-        Span::styled(
-            "  idle",
-            Style::default().fg(theme.tertiary).bg(theme.panel),
-        ),
-        Span::styled(
-            "  locked",
-            Style::default().fg(theme.danger).bg(theme.panel),
-        ),
-    ])];
-    if area.height > 1 {
-        lines.push(Line::from(Span::styled(
-            widgets::fit_text(&focus_flow_summary(app), area.width as usize),
-            Style::default().fg(theme.dim).bg(theme.panel),
-        )));
-    }
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
-        area,
+        Paragraph::new(daily_pattern_summary_lines(
+            app,
+            summary.width as usize,
+            theme,
+        ))
+        .style(Style::default().bg(theme.panel))
+        .wrap(Wrap { trim: false }),
+        summary,
+    );
+
+    let mut rows = daily_pattern_lane_rows(app, lanes.width as usize, theme);
+    rows.truncate(lanes.height as usize);
+    frame.render_widget(
+        Paragraph::new(rows)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        lanes,
     );
 }
 
-fn focus_flow_summary(app: &App) -> String {
-    let focus_share = widgets::ratio(
-        app.report().total_focused_seconds,
-        app.report().total_open_seconds,
-    );
+fn daily_pattern_summary_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let selected = app
         .selected_day()
         .map(|day| {
             let day_share = widgets::ratio(day.focused_seconds, day.open_seconds);
+            let not_counted = day_not_counted_seconds(day);
             format!(
-                "{}: {} focus, {} open, {} focused while open",
+                "{}: {} focus, {} open, {} focused while open, {} not counted",
                 day.label,
                 report::format_duration(day.focused_seconds),
                 report::format_duration(day.open_seconds),
-                report::percent(day_share)
+                report::percent(day_share),
+                report::format_duration(not_counted)
             )
         })
         .unwrap_or_else(|| "No day selected".to_string());
@@ -768,28 +677,249 @@ fn focus_flow_summary(app: &App) -> String {
             )
         })
         .unwrap_or_else(|| "best none".to_string());
-    format!(
-        "{selected} | {} days with focus | daily avg {} | focus share {} | {best}",
-        app.stats().active_days,
-        report::format_duration(app.stats().active_day_average_seconds),
-        report::percent(focus_share)
-    )
+    let focus_share = widgets::ratio(
+        app.report().total_focused_seconds,
+        app.report().total_open_seconds,
+    );
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            widgets::fit_text(&selected, width),
+            Style::default().fg(theme.text).bg(theme.panel),
+        )),
+        Line::from(Span::styled(
+            widgets::fit_text(
+                &format!(
+                    "{} days with focus | daily average {} | focus share {} | {best}",
+                    app.stats().active_days,
+                    report::format_duration(app.stats().active_day_average_seconds),
+                    report::percent(focus_share)
+                ),
+                width,
+            ),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        )),
+    ];
+
+    lines.push(Line::from(vec![
+        Span::styled("Focus", Style::default().fg(theme.warn).bg(theme.panel)),
+        Span::styled(
+            "  Focus % ",
+            Style::default().fg(theme.success).bg(theme.panel),
+        ),
+        Span::styled(
+            " Open time ",
+            Style::default().fg(theme.secondary).bg(theme.panel),
+        ),
+        Span::styled(
+            " Not counted",
+            Style::default().fg(theme.tertiary).bg(theme.panel),
+        ),
+    ]));
+    lines
 }
 
-fn flow_y_axis_labels(max: f64, height: u16) -> Vec<Line<'static>> {
-    let max_seconds = max.round() as i64;
-    if height >= 8 {
-        vec![
-            Line::from("0"),
-            Line::from(widgets::compact_duration(max_seconds / 2)),
-            Line::from(widgets::compact_duration(max_seconds)),
-        ]
-    } else {
-        vec![
-            Line::from("0"),
-            Line::from(widgets::compact_duration(max_seconds)),
-        ]
+fn daily_pattern_lane_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let days = &app.report().daily;
+    let label_width = if width < 96 { 11 } else { 13 };
+    let value_width = if width < 96 { 7 } else { 10 };
+    let available = width.saturating_sub(label_width + value_width + 2);
+    let cell_width = (available / days.len().max(1)).clamp(1, 5);
+
+    let focus_values = days
+        .iter()
+        .map(|day| day.focused_seconds.max(0) as f64)
+        .collect::<Vec<_>>();
+    let open_values = days
+        .iter()
+        .map(|day| day.open_seconds.max(0) as f64)
+        .collect::<Vec<_>>();
+    let not_counted_values = days
+        .iter()
+        .map(|day| day_not_counted_seconds(day).max(0) as f64)
+        .collect::<Vec<_>>();
+    let focus_share_values = days
+        .iter()
+        .map(|day| widgets::ratio(day.focused_seconds, day.open_seconds) * 100.0)
+        .collect::<Vec<_>>();
+
+    vec![
+        daily_lane_axis(days, label_width, value_width, cell_width, theme),
+        daily_lane_line(DailyLane {
+            label: "Focus",
+            values: &focus_values,
+            max_label: lane_duration_label(&focus_values),
+            selected_index: app.selected_day_index(),
+            label_width,
+            value_width,
+            cell_width,
+            color: theme.warn,
+            theme,
+        }),
+        daily_lane_line(DailyLane {
+            label: "Focus %",
+            values: &focus_share_values,
+            max_label: lane_percent_label(&focus_share_values),
+            selected_index: app.selected_day_index(),
+            label_width,
+            value_width,
+            cell_width,
+            color: theme.success,
+            theme,
+        }),
+        daily_lane_line(DailyLane {
+            label: "Open time",
+            values: &open_values,
+            max_label: lane_duration_label(&open_values),
+            selected_index: app.selected_day_index(),
+            label_width,
+            value_width,
+            cell_width,
+            color: theme.secondary,
+            theme,
+        }),
+        daily_lane_line(DailyLane {
+            label: "Not counted",
+            values: &not_counted_values,
+            max_label: lane_duration_label(&not_counted_values),
+            selected_index: app.selected_day_index(),
+            label_width,
+            value_width,
+            cell_width,
+            color: theme.tertiary,
+            theme,
+        }),
+    ]
+}
+
+struct DailyLane<'a> {
+    label: &'static str,
+    values: &'a [f64],
+    max_label: String,
+    selected_index: usize,
+    label_width: usize,
+    value_width: usize,
+    cell_width: usize,
+    color: Color,
+    theme: &'a Theme,
+}
+
+fn daily_lane_line(lane: DailyLane<'_>) -> Line<'static> {
+    let max = lane.values.iter().copied().fold(0.0_f64, f64::max).max(1.0);
+    let mut spans = vec![
+        Span::styled(
+            widgets::fit_text(lane.label, lane.label_width),
+            Style::default().fg(lane.color).bg(lane.theme.panel),
+        ),
+        Span::styled(" ", Style::default().bg(lane.theme.panel)),
+    ];
+    for (index, value) in lane.values.iter().enumerate() {
+        let intensity = (*value / max).clamp(0.0, 1.0);
+        let glyph = daily_lane_glyph(intensity);
+        let selected = index == lane.selected_index;
+        let style = Style::default()
+            .fg(if selected {
+                lane.theme.text
+            } else {
+                lane.color
+            })
+            .bg(if selected {
+                lane.theme.selection
+            } else {
+                lane.theme.panel
+            })
+            .add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        spans.push(Span::styled(
+            glyph.to_string().repeat(lane.cell_width),
+            style,
+        ));
     }
+    spans.push(Span::styled(" ", Style::default().bg(lane.theme.panel)));
+    spans.push(Span::styled(
+        widgets::fit_text(&lane.max_label, lane.value_width),
+        Style::default().fg(lane.theme.dim).bg(lane.theme.panel),
+    ));
+    Line::from(spans)
+}
+
+fn daily_lane_axis(
+    days: &[DayTotals],
+    label_width: usize,
+    value_width: usize,
+    cell_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut axis = vec![' '; days.len().saturating_mul(cell_width)];
+    if let Some(first) = days.first() {
+        place_text(&mut axis, 0, &first.label);
+    }
+    if days.len() > 2 {
+        let mid = days.len() / 2;
+        place_text(&mut axis, mid.saturating_mul(cell_width), &days[mid].label);
+    }
+    if days.len() > 1
+        && let Some(last) = days.last()
+    {
+        let start = days
+            .len()
+            .saturating_mul(cell_width)
+            .saturating_sub(last.label.chars().count());
+        place_text(&mut axis, start, &last.label);
+    }
+    Line::from(vec![
+        Span::styled(
+            " ".repeat(label_width + 1),
+            Style::default().bg(theme.panel),
+        ),
+        Span::styled(
+            axis.into_iter().collect::<String>(),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        ),
+        Span::styled(
+            " ".repeat(value_width + 1),
+            Style::default().bg(theme.panel),
+        ),
+    ])
+}
+
+fn place_text(target: &mut [char], start: usize, text: &str) {
+    for (offset, ch) in text.chars().enumerate() {
+        if let Some(slot) = target.get_mut(start + offset) {
+            *slot = ch;
+        }
+    }
+}
+
+fn daily_lane_glyph(intensity: f64) -> char {
+    if intensity <= 0.0 {
+        ' '
+    } else {
+        let bucket = (intensity * (DAILY_LANE_CHARS.len() as f64 - 1.0))
+            .ceil()
+            .clamp(1.0, DAILY_LANE_CHARS.len() as f64 - 1.0) as usize;
+        DAILY_LANE_CHARS[bucket]
+    }
+}
+
+fn lane_duration_label(values: &[f64]) -> String {
+    let max_seconds = values.iter().copied().fold(0.0_f64, f64::max).round() as i64;
+    format!("top {}", widgets::compact_duration(max_seconds))
+}
+
+fn lane_percent_label(values: &[f64]) -> String {
+    let max = values.iter().copied().fold(0.0_f64, f64::max) / 100.0;
+    format!("top {}", report::percent(max))
+}
+
+fn day_not_counted_seconds(day: &DayTotals) -> i64 {
+    day.idle_seconds
+        .saturating_add(day.locked_seconds)
+        .saturating_add(day.sleep_seconds)
+        .saturating_add(day.unobserved_seconds)
 }
 
 fn render_focus_sparkline(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -878,9 +1008,9 @@ fn render_composition_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
             .map(|row| {
                 let density = widgets::ratio(row.focused_seconds, row.open_seconds);
                 format!(
-                    "top {} {} ({}) | focus share {}",
+                    "Top: {} {} ({}) | {} focused while open",
                     row.label,
-                    report::format_duration(row.focused_seconds),
+                    widgets::compact_duration(row.focused_seconds),
                     report::percent(row.share),
                     report::percent(density)
                 )
@@ -1067,14 +1197,14 @@ fn render_focus_stats(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             theme,
         ),
         widgets::metric_line(
-            "Average session",
+            "Avg session",
             &report::format_duration(stats.average_block_seconds),
             inner.width as usize,
             theme.success,
             theme,
         ),
         widgets::metric_line(
-            "Typical session",
+            "Typical",
             &report::format_duration(stats.median_block_seconds),
             inner.width as usize,
             theme.success,
@@ -1093,7 +1223,10 @@ fn render_focus_stats(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
         ),
         widgets::metric_line(
             "App changes",
-            &format!("{} ({switch_rate:.1}/h)", stats.app_switch_count),
+            &format!(
+                "{} ({switch_rate:.0}/h)",
+                widgets::compact_count(stats.app_switch_count as i64)
+            ),
             inner.width as usize,
             theme.muted,
             theme,
@@ -1322,8 +1455,7 @@ fn render_heatmap(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     };
     let leading_width = layout.label_width + layout.left_pad;
     let summary_height = usize::from(inner.height >= 10);
-    let day_space = (inner.height as usize).saturating_sub(1 + summary_height);
-    let row_height = (day_space / 7).clamp(1, 2);
+    let row_height = 1;
 
     let mut rows = Vec::new();
     rows.push(heatmap_axis_line(leading_width, cell_width, theme));
@@ -1401,14 +1533,7 @@ fn heatmap_weekday_line(
     for hour in 0..24 {
         let seconds = heat_value(cells, weekday, hour);
         let intensity = seconds as f64 / layout.max as f64;
-        let bucket = (intensity * (HEAT_CHARS.len() as f64 - 1.0))
-            .round()
-            .clamp(0.0, HEAT_CHARS.len() as f64 - 1.0) as usize;
-        let glyph = if seconds > 0 {
-            HEAT_CHARS[bucket]
-        } else {
-            HEAT_CHARS[0]
-        };
+        let glyph = if seconds > 0 { '█' } else { ' ' };
         spans.push(Span::styled(
             glyph.to_string().repeat(layout.cell_width),
             Style::default()
@@ -1431,21 +1556,26 @@ fn heatmap_summary_line(cells: &[FocusHeatCell], max: i64, theme: &Theme) -> Lin
     let peak_label = peak
         .map(|cell| {
             format!(
-                "peak {} {} {}",
+                "Busiest: {} {} {}",
                 weekday_label(cell.weekday),
                 hour_label(cell.hour),
                 report::format_duration(cell.focused_seconds)
             )
         })
-        .unwrap_or_else(|| "peak none".to_string());
-    let max_label = format!("darkest = {}", report::format_duration(max));
+        .unwrap_or_else(|| "Busiest: none".to_string());
+    let max_label = format!("One-hour top {}", report::format_duration(max));
     Line::from(vec![
-        Span::styled("lighter ", Style::default().fg(theme.dim).bg(theme.panel)),
-        Span::styled("░", Style::default().fg(theme.secondary).bg(theme.panel)),
-        Span::styled("▒", Style::default().fg(theme.success).bg(theme.panel)),
-        Span::styled("▓", Style::default().fg(theme.warn).bg(theme.panel)),
+        Span::styled(
+            "Less focus ",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        ),
+        Span::styled("█", Style::default().fg(theme.secondary).bg(theme.panel)),
+        Span::styled("█", Style::default().fg(theme.success).bg(theme.panel)),
         Span::styled("█", Style::default().fg(theme.warn).bg(theme.panel)),
-        Span::styled(" darker  ", Style::default().fg(theme.dim).bg(theme.panel)),
+        Span::styled(
+            " More focus  ",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        ),
         Span::styled(peak_label, Style::default().fg(theme.text).bg(theme.panel)),
         Span::styled("  ", Style::default().bg(theme.panel)),
         Span::styled(max_label, Style::default().fg(theme.dim).bg(theme.panel)),
@@ -2324,7 +2454,7 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         Line::from(vec![
             Span::styled("p", Style::default().fg(theme.primary)),
             Span::styled(
-                "  toggle overview sessions / time mix",
+                "  switch overview detail panel",
                 Style::default().fg(theme.text),
             ),
         ]),
@@ -2818,33 +2948,6 @@ fn format_signed_duration(seconds: i64) -> String {
         format!("-{}", report::format_duration(seconds.saturating_abs()))
     } else {
         report::format_duration(0)
-    }
-}
-
-fn daily_points<F>(days: &[DayTotals], value: F) -> Vec<(f64, f64)>
-where
-    F: Fn(&DayTotals) -> i64,
-{
-    days.iter()
-        .enumerate()
-        .map(|(index, day)| (index as f64, value(day).max(0) as f64))
-        .collect()
-}
-
-fn chart_labels(days: &[DayTotals]) -> Vec<Line<'static>> {
-    if days.is_empty() {
-        return Vec::new();
-    }
-    let first = days
-        .first()
-        .map(|day| day.label.clone())
-        .unwrap_or_default();
-    let last = days.last().map(|day| day.label.clone()).unwrap_or_default();
-    if days.len() > 2 {
-        let middle = days[days.len() / 2].label.clone();
-        vec![Line::from(first), Line::from(middle), Line::from(last)]
-    } else {
-        vec![Line::from(first), Line::from(last)]
     }
 }
 

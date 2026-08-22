@@ -70,6 +70,17 @@ pub(super) fn compact_duration(seconds: i64) -> String {
     }
 }
 
+pub(super) fn compact_count(value: i64) -> String {
+    let value = value.max(0);
+    if value >= 10_000 {
+        format!("{:.0}k", value as f64 / 1_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
 pub(super) fn ratio(numerator: i64, denominator: i64) -> f64 {
     if denominator <= 0 {
         0.0

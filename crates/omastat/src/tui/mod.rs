@@ -183,11 +183,12 @@ mod tests {
             "Timeline",
             "System",
             "Daily Pattern",
-            "focus",
+            "Focus %",
             "App Mix",
             "When Focus Happens",
-            "lighter",
-            "darkest =",
+            "Less focus",
+            "More focus",
+            "Busiest:",
             "Workspace Focus",
             "Top Hours",
             "Focus Sessions",
@@ -201,6 +202,7 @@ mod tests {
             "Focus Heat",
             "focus area",
             "cell max",
+            "darkest =",
         ] {
             assert!(
                 !rendered.contains(old_label),
