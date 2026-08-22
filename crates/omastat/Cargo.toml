@@ -12,16 +12,19 @@ anyhow = "1.0.100"
 chrono = { version = "0.4.42", features = ["clock"] }
 clap = { version = "4.5.53", features = ["derive"] }
 crossterm = "0.29.0"
+csv = "1.4.0"
 dirs = "6.0.0"
+futures-util = "0.3.31"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt", "signal", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 toml = "0.9.8"
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tui-piechart = "1.0.2"
+zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"

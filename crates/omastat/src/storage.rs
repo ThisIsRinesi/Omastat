@@ -1,15 +1,16 @@
 use crate::{config::Config, identity, steam::SteamResolver};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, TimeZone, Timelike};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum IntervalKind {
     Focused,
     Open,
@@ -30,6 +31,8 @@ pub struct DayTotals {
     pub open_seconds: i64,
     pub idle_seconds: i64,
     pub locked_seconds: i64,
+    pub sleep_seconds: i64,
+    pub unobserved_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +57,13 @@ pub struct WorkspaceTotals {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AppWorkspaceTotals {
+    pub workspace: String,
+    pub app_class: String,
+    pub focused_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TitleTotals {
     pub app_class: String,
     pub title: String,
@@ -68,6 +78,14 @@ pub struct TimelineInterval {
     pub ended_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SystemTimelineInterval {
+    pub kind: SystemIntervalKind,
+    pub source: Option<String>,
+    pub started_at: i64,
+    pub ended_at: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StorageStatus {
     pub interval_count: i64,
@@ -76,6 +94,51 @@ pub struct StorageStatus {
     pub open_active: i64,
     pub idle_active: i64,
     pub locked_active: i64,
+    pub sleep_active: i64,
+    pub daemon_active: i64,
+    pub last_heartbeat_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageDiagnostic {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub schema_status: StorageSchemaStatus,
+    pub quick_check: StorageQuickCheck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageSchemaStatus {
+    Missing,
+    NotInitialized {
+        reason: String,
+    },
+    Current {
+        applied_migrations: Vec<i64>,
+    },
+    NeedsMigration {
+        version: i64,
+        description: String,
+        applied_migrations: Vec<i64>,
+    },
+    UnknownMigration {
+        version: i64,
+        applied_migrations: Vec<i64>,
+    },
+    Invalid {
+        error: String,
+    },
+    Unreadable {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageQuickCheck {
+    Ok,
+    Problem(String),
+    Skipped(String),
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -94,22 +157,111 @@ pub struct IntervalMetadata<'a> {
     pub monitor: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SessionIntervalKind {
     Idle,
     Locked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SystemIntervalKind {
+    Sleep,
+    Unobserved,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SessionTotals {
     pub idle_seconds: i64,
     pub locked_seconds: i64,
+    pub sleep_seconds: i64,
+    pub unobserved_seconds: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FocusedRollups {
+    pub focus_intervals: Vec<TimelineInterval>,
+    pub daily_apps: Vec<AppDayTotals>,
+    pub heatmap: Vec<FocusHeatCell>,
+    pub workspaces: Vec<WorkspaceTotals>,
+    pub app_workspaces: Vec<AppWorkspaceTotals>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RawInterval {
+    pub kind: IntervalKind,
+    pub app_class: String,
+    pub window_address: Option<String>,
+    pub title: Option<String>,
+    pub workspace: Option<String>,
+    pub monitor: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub local_start: String,
+    pub local_end: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RawSessionInterval {
+    pub kind: SessionIntervalKind,
+    pub source: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub local_start: String,
+    pub local_end: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RawSystemInterval {
+    pub kind: SystemIntervalKind,
+    pub source: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub local_start: String,
+    pub local_end: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RawExportRows {
+    pub intervals: Vec<RawInterval>,
+    pub session_intervals: Vec<RawSessionInterval>,
+    pub system_intervals: Vec<RawSystemInterval>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PurgeReport {
+    pub dry_run: bool,
+    pub cutoff_ts: Option<i64>,
+    pub cutoff_local: Option<String>,
+    pub intervals_deleted: i64,
+    pub session_intervals_deleted: i64,
+    pub system_intervals_deleted: i64,
+    pub daemon_events_deleted: i64,
+    pub daemon_runs_deleted: i64,
+    pub intervals_trimmed: i64,
+    pub session_intervals_trimmed: i64,
+    pub system_intervals_trimmed: i64,
+    pub vacuumed: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ActiveSessionInterval {
     pub id: i64,
     pub kind: SessionIntervalKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonRunStart {
+    pub run_id: i64,
+    pub recovery: Option<DaemonRecovery>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonRecovery {
+    pub previous_run_id: Option<i64>,
+    pub closed_at: i64,
+    pub unobserved_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +302,50 @@ pub struct Storage {
     path: PathBuf,
 }
 
+struct Migration {
+    version: i64,
+    description: &'static str,
+    up: fn(&Transaction<'_>) -> rusqlite::Result<()>,
+}
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "create app interval tables",
+        up: migrate_0001_create_intervals,
+    },
+    Migration {
+        version: 2,
+        description: "create session interval tables",
+        up: migrate_0002_create_session_intervals,
+    },
+    Migration {
+        version: 3,
+        description: "add interval workspace metadata",
+        up: migrate_0003_add_interval_workspace,
+    },
+    Migration {
+        version: 4,
+        description: "add interval monitor metadata",
+        up: migrate_0004_add_interval_monitor,
+    },
+    Migration {
+        version: 5,
+        description: "add daemon lifecycle and unobserved intervals",
+        up: migrate_0005_add_daemon_lifecycle,
+    },
+    Migration {
+        version: 6,
+        description: "record sleep intervals separately from unobserved gaps",
+        up: migrate_0006_expand_system_intervals,
+    },
+    Migration {
+        version: 7,
+        description: "add report rollup query indexes",
+        up: migrate_0007_add_report_indexes,
+    },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageOpenMode {
     ReadWriteMigrate,
@@ -163,6 +359,44 @@ impl Storage {
 
     pub fn open_read_only(explicit_path: Option<&Path>, config: &Config) -> Result<Self> {
         Self::open_with_mode(explicit_path, config, StorageOpenMode::ReadOnly)
+    }
+
+    pub fn diagnose(explicit_path: Option<&Path>) -> StorageDiagnostic {
+        let path = explicit_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_db_path_for_mode(StorageOpenMode::ReadOnly));
+
+        if !path.exists() {
+            return StorageDiagnostic {
+                path,
+                exists: false,
+                schema_status: StorageSchemaStatus::Missing,
+                quick_check: StorageQuickCheck::Skipped("database file does not exist".to_string()),
+            };
+        }
+
+        let conn = match Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(conn) => conn,
+            Err(error) => {
+                return StorageDiagnostic {
+                    path,
+                    exists: true,
+                    schema_status: StorageSchemaStatus::Unreadable {
+                        error: format!("{error:#}"),
+                    },
+                    quick_check: StorageQuickCheck::Skipped(
+                        "database could not be opened read-only".to_string(),
+                    ),
+                };
+            }
+        };
+
+        StorageDiagnostic {
+            path,
+            exists: true,
+            schema_status: diagnose_schema(&conn),
+            quick_check: sqlite_quick_check(&conn),
+        }
     }
 
     pub fn open_with_mode(
@@ -198,7 +432,7 @@ impl Storage {
 
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open database {}", path.display()))?;
-        let storage = Self { conn, path };
+        let mut storage = Self { conn, path };
         storage.migrate()?;
         Ok(storage)
     }
@@ -302,6 +536,190 @@ impl Storage {
             "UPDATE session_intervals SET ended_at = ?1 WHERE ended_at IS NULL",
             params![ended_at],
         )?;
+        Ok(())
+    }
+
+    pub fn close_observed_intervals(&self, ended_at: i64) -> Result<()> {
+        self.conn.execute(
+            "
+            UPDATE intervals
+            SET ended_at = MAX(started_at, ?1)
+            WHERE ended_at IS NULL
+            ",
+            params![ended_at],
+        )?;
+        self.conn.execute(
+            "
+            UPDATE session_intervals
+            SET ended_at = MAX(started_at, ?1)
+            WHERE ended_at IS NULL
+            ",
+            params![ended_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn start_system_interval(
+        &self,
+        kind: SystemIntervalKind,
+        source: Option<&str>,
+        started_at: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "
+            INSERT INTO unobserved_intervals (kind, source, started_at)
+            VALUES (?1, ?2, ?3)
+            ",
+            params![kind.as_str(), source, started_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn close_system_interval(&self, id: i64, ended_at: i64) -> Result<()> {
+        self.conn.execute(
+            "
+            UPDATE unobserved_intervals
+            SET ended_at = MAX(started_at, ?1)
+            WHERE id = ?2
+              AND ended_at IS NULL
+            ",
+            params![ended_at, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn start_daemon_run(&mut self, now: i64) -> Result<DaemonRunStart> {
+        let tx = self.conn.transaction()?;
+        let previous_run = latest_daemon_run(&tx)?;
+        let stale_boundary = latest_unclosed_interval_start(&tx)?;
+        let active_sleep_started_at = earliest_active_system_interval_start(&tx, "sleep")?;
+        let previous_unclosed = previous_run
+            .as_ref()
+            .is_some_and(|run| run.stopped_at.is_none());
+        let needs_recovery =
+            previous_unclosed || stale_boundary.is_some() || active_sleep_started_at.is_some();
+
+        let recovery = if needs_recovery {
+            let previous_run_id = previous_run
+                .as_ref()
+                .filter(|run| run.stopped_at.is_none())
+                .map(|run| run.id);
+            let (closed_at, unobserved_seconds) =
+                if let Some(sleep_started_at) = active_sleep_started_at {
+                    close_unclosed_observed_intervals_tx(&tx, sleep_started_at)?;
+                    close_unclosed_system_intervals_tx(&tx, "sleep", now)?;
+                    (now, 0)
+                } else {
+                    let heartbeat_boundary = previous_run
+                        .as_ref()
+                        .filter(|run| run.stopped_at.is_none())
+                        .map(|run| run.last_heartbeat_at);
+                    let closed_at = heartbeat_boundary
+                        .into_iter()
+                        .chain(stale_boundary)
+                        .max()
+                        .unwrap_or(now)
+                        .min(now);
+                    close_unclosed_observed_intervals_tx(&tx, closed_at)?;
+                    let unobserved_seconds = if now > closed_at {
+                        tx.execute(
+                            "
+                        INSERT INTO unobserved_intervals (kind, source, started_at, ended_at)
+                        VALUES ('unobserved', 'daemon-recovery', ?1, ?2)
+                        ",
+                            params![closed_at, now],
+                        )?;
+                        now - closed_at
+                    } else {
+                        0
+                    };
+                    (closed_at, unobserved_seconds)
+                };
+
+            if let Some(run_id) = previous_run_id {
+                tx.execute(
+                    "
+                    UPDATE daemon_runs
+                    SET stopped_at = MAX(started_at, ?1),
+                        stop_kind = 'recovered'
+                    WHERE id = ?2
+                      AND stopped_at IS NULL
+                    ",
+                    params![closed_at, run_id],
+                )?;
+            }
+
+            Some(DaemonRecovery {
+                previous_run_id,
+                closed_at,
+                unobserved_seconds,
+            })
+        } else {
+            None
+        };
+
+        tx.execute(
+            "
+            INSERT INTO daemon_runs (started_at, last_heartbeat_at)
+            VALUES (?1, ?1)
+            ",
+            params![now],
+        )?;
+        let run_id = tx.last_insert_rowid();
+
+        if let Some(recovery) = &recovery {
+            let detail = match recovery.previous_run_id {
+                Some(previous_run_id) => format!(
+                    "recovered run {previous_run_id}; closed stale intervals at {}; unobserved {}s",
+                    recovery.closed_at, recovery.unobserved_seconds
+                ),
+                None => format!(
+                    "recovered legacy stale intervals at {}; unobserved {}s",
+                    recovery.closed_at, recovery.unobserved_seconds
+                ),
+            };
+            insert_daemon_event_tx(&tx, run_id, "recovery", now, Some(&detail))?;
+        }
+        insert_daemon_event_tx(&tx, run_id, "start", now, None)?;
+
+        tx.commit()?;
+        Ok(DaemonRunStart { run_id, recovery })
+    }
+
+    pub fn record_daemon_heartbeat(&mut self, run_id: i64, now: i64) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
+            "
+            UPDATE daemon_runs
+            SET last_heartbeat_at = MAX(last_heartbeat_at, ?1)
+            WHERE id = ?2
+              AND stopped_at IS NULL
+            ",
+            params![now, run_id],
+        )?;
+        if updated == 0 {
+            anyhow::bail!("daemon run {run_id} is not active");
+        }
+        insert_daemon_event_tx(&tx, run_id, "heartbeat", now, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_daemon_run(&mut self, run_id: i64, now: i64) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "
+            UPDATE daemon_runs
+            SET last_heartbeat_at = MAX(last_heartbeat_at, ?1),
+                stopped_at = MAX(started_at, ?1),
+                stop_kind = 'clean'
+            WHERE id = ?2
+              AND stopped_at IS NULL
+            ",
+            params![now, run_id],
+        )?;
+        insert_daemon_event_tx(&tx, run_id, "clean-stop", now, None)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -464,6 +882,8 @@ impl Storage {
                     open_seconds: 0,
                     idle_seconds: 0,
                     locked_seconds: 0,
+                    sleep_seconds: 0,
+                    unobserved_seconds: 0,
                 }
             })
             .collect::<Vec<_>>();
@@ -541,6 +961,40 @@ impl Storage {
             }
         }
 
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                kind,
+                MAX(started_at, ?1) AS bounded_start,
+                MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
+            FROM unobserved_intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ",
+        )?;
+        let unobserved_intervals = stmt
+            .query_map(params![range_start.timestamp(), query_end], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        for (kind, started_at, ended_at) in unobserved_intervals {
+            for (index, window) in boundaries.windows(2).enumerate() {
+                let overlap = ended_at.min(window[1]).min(query_end) - started_at.max(window[0]);
+                if overlap > 0 {
+                    match kind.as_str() {
+                        "sleep" => output[index].sleep_seconds += overlap,
+                        "unobserved" => output[index].unobserved_seconds += overlap,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         Ok(output)
     }
 
@@ -575,6 +1029,9 @@ impl Storage {
                         open_active: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
                         idle_active: 0,
                         locked_active: 0,
+                        sleep_active: 0,
+                        daemon_active: 0,
+                        last_heartbeat_at: None,
                     })
                 },
             )
@@ -596,6 +1053,59 @@ impl Storage {
                 },
             )
             .context("failed to read session storage status")?;
+
+        let session_last_event_at = self
+            .conn
+            .query_row(
+                "SELECT MAX(COALESCE(ended_at, started_at)) FROM session_intervals",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .context("failed to read session event status")?;
+        status.last_event_at = latest_timestamp(status.last_event_at, session_last_event_at);
+
+        self.conn
+            .query_row(
+                "
+                SELECT
+                    SUM(CASE WHEN ended_at IS NULL AND kind = 'sleep' THEN 1 ELSE 0 END),
+                    MAX(COALESCE(ended_at, started_at))
+                FROM unobserved_intervals
+                ",
+                [],
+                |row| {
+                    status.sleep_active = row.get::<_, Option<i64>>(0)?.unwrap_or(0);
+                    let last_system_event_at = row.get::<_, Option<i64>>(1)?;
+                    status.last_event_at =
+                        latest_timestamp(status.last_event_at, last_system_event_at);
+                    Ok(())
+                },
+            )
+            .context("failed to read system interval status")?;
+
+        let daemon_last_event_at = self
+            .conn
+            .query_row("SELECT MAX(occurred_at) FROM daemon_events", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .context("failed to read daemon event status")?;
+        status.last_event_at = latest_timestamp(status.last_event_at, daemon_last_event_at);
+
+        self.conn
+            .query_row(
+                "
+                SELECT COUNT(*), MAX(last_heartbeat_at)
+                FROM daemon_runs
+                WHERE stopped_at IS NULL
+                ",
+                [],
+                |row| {
+                    status.daemon_active = row.get(0)?;
+                    status.last_heartbeat_at = row.get(1)?;
+                    Ok(())
+                },
+            )
+            .context("failed to read daemon storage status")?;
 
         Ok(status)
     }
@@ -810,6 +1320,154 @@ impl Storage {
             .collect())
     }
 
+    pub fn focused_rollups_between(
+        &self,
+        start: i64,
+        end: i64,
+        workspace_limit: usize,
+        app_workspace_limit: usize,
+    ) -> Result<FocusedRollups> {
+        let mut heatmap = BTreeMap::<(u32, u32), i64>::new();
+        for weekday in 0..7 {
+            for hour in 0..24 {
+                heatmap.insert((weekday, hour), 0);
+            }
+        }
+
+        if end <= start {
+            return Ok(FocusedRollups {
+                heatmap: heatmap
+                    .into_iter()
+                    .map(|((weekday, hour), focused_seconds)| FocusHeatCell {
+                        weekday,
+                        hour,
+                        focused_seconds,
+                    })
+                    .collect(),
+                ..FocusedRollups::default()
+            });
+        }
+
+        let (range_start, days) = local_day_range(start, end)?;
+        let boundaries = (0..=days)
+            .map(|offset| (range_start + chrono::Duration::days(offset as i64)).timestamp())
+            .collect::<Vec<_>>();
+        let labels = (0..days)
+            .map(|offset| {
+                let day = range_start + chrono::Duration::days(offset as i64);
+                (
+                    day.format("%Y-%m-%d").to_string(),
+                    day.format("%b %-d").to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut daily_apps = BTreeMap::<(usize, String), i64>::new();
+        let mut workspaces = BTreeMap::<String, i64>::new();
+        let mut app_workspaces = BTreeMap::<(String, String), i64>::new();
+        let mut focus_intervals = Vec::new();
+
+        for interval in self.focused_interval_metadata_between(start, end)? {
+            let duration = interval.ended_at.saturating_sub(interval.started_at);
+            if duration <= 0 {
+                continue;
+            }
+
+            focus_intervals.push(TimelineInterval {
+                kind: IntervalKind::Focused,
+                app_class: interval.app_class.clone(),
+                started_at: interval.started_at,
+                ended_at: interval.ended_at,
+            });
+            add_daily_app_rollup(
+                &mut daily_apps,
+                &boundaries,
+                &interval.app_class,
+                interval.started_at,
+                interval.ended_at,
+                start,
+                end,
+            );
+            add_hourly_focus_rollup(&mut heatmap, interval.started_at, interval.ended_at);
+
+            if let Some(workspace) = interval
+                .workspace
+                .as_deref()
+                .map(str::trim)
+                .filter(|workspace| !workspace.is_empty())
+            {
+                *workspaces.entry(workspace.to_string()).or_default() += duration;
+                *app_workspaces
+                    .entry((workspace.to_string(), interval.app_class.clone()))
+                    .or_default() += duration;
+            }
+        }
+
+        let mut daily_apps = daily_apps
+            .into_iter()
+            .map(|((index, app_class), focused_seconds)| AppDayTotals {
+                date: labels[index].0.clone(),
+                label: labels[index].1.clone(),
+                app_class,
+                focused_seconds,
+            })
+            .collect::<Vec<_>>();
+        daily_apps.sort_by(|left, right| {
+            left.date
+                .cmp(&right.date)
+                .then_with(|| right.focused_seconds.cmp(&left.focused_seconds))
+                .then_with(|| left.app_class.cmp(&right.app_class))
+        });
+
+        let mut workspaces = workspaces
+            .into_iter()
+            .map(|(workspace, focused_seconds)| WorkspaceTotals {
+                workspace,
+                focused_seconds,
+            })
+            .collect::<Vec<_>>();
+        workspaces.sort_by(|left, right| {
+            right
+                .focused_seconds
+                .cmp(&left.focused_seconds)
+                .then_with(|| left.workspace.cmp(&right.workspace))
+        });
+        workspaces.truncate(workspace_limit.max(1));
+
+        let mut app_workspaces = app_workspaces
+            .into_iter()
+            .map(
+                |((workspace, app_class), focused_seconds)| AppWorkspaceTotals {
+                    workspace,
+                    app_class,
+                    focused_seconds,
+                },
+            )
+            .collect::<Vec<_>>();
+        app_workspaces.sort_by(|left, right| {
+            right
+                .focused_seconds
+                .cmp(&left.focused_seconds)
+                .then_with(|| left.workspace.cmp(&right.workspace))
+                .then_with(|| left.app_class.cmp(&right.app_class))
+        });
+        app_workspaces.truncate(app_workspace_limit.max(1));
+
+        Ok(FocusedRollups {
+            focus_intervals,
+            daily_apps,
+            heatmap: heatmap
+                .into_iter()
+                .map(|((weekday, hour), focused_seconds)| FocusHeatCell {
+                    weekday,
+                    hour,
+                    focused_seconds,
+                })
+                .collect(),
+            workspaces,
+            app_workspaces,
+        })
+    }
+
     pub fn focus_heatmap_between(&self, start: i64, end: i64) -> Result<Vec<FocusHeatCell>> {
         let mut totals = BTreeMap::<(u32, u32), i64>::new();
         for weekday in 0..7 {
@@ -900,6 +1558,48 @@ impl Storage {
         Ok(rows)
     }
 
+    pub fn focused_app_workspace_totals_between(
+        &self,
+        start: i64,
+        end: i64,
+        limit: usize,
+    ) -> Result<Vec<AppWorkspaceTotals>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                workspace,
+                app_class,
+                SUM(overlap_seconds) AS focused_seconds
+            FROM (
+                SELECT
+                    trim(workspace) AS workspace,
+                    app_class,
+                    MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
+                FROM intervals
+                WHERE kind = 'focused'
+                  AND workspace IS NOT NULL
+                  AND trim(workspace) <> ''
+                  AND started_at < ?2
+                  AND COALESCE(ended_at, ?2) > ?1
+            )
+            WHERE overlap_seconds > 0
+            GROUP BY workspace, app_class
+            ORDER BY focused_seconds DESC, workspace ASC, app_class ASC
+            LIMIT ?3
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end, limit.max(1) as i64], |row| {
+                Ok(AppWorkspaceTotals {
+                    workspace: row.get(0)?,
+                    app_class: row.get(1)?,
+                    focused_seconds: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn session_totals_between(&self, start: i64, end: i64) -> Result<SessionTotals> {
         let mut totals = SessionTotals::default();
         if end <= start {
@@ -931,6 +1631,34 @@ impl Storage {
             match kind.as_str() {
                 "idle" => totals.idle_seconds += seconds,
                 "locked" => totals.locked_seconds += seconds,
+                _ => {}
+            }
+        }
+
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT kind, SUM(overlap_seconds)
+            FROM (
+                SELECT
+                    kind,
+                    MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
+                FROM unobserved_intervals
+                WHERE started_at < ?2
+                  AND COALESCE(ended_at, ?2) > ?1
+            )
+            WHERE overlap_seconds > 0
+            GROUP BY kind
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (kind, seconds) in rows {
+            match kind.as_str() {
+                "sleep" => totals.sleep_seconds += seconds,
+                "unobserved" => totals.unobserved_seconds += seconds,
                 _ => {}
             }
         }
@@ -1036,99 +1764,522 @@ impl Storage {
         })
     }
 
-    fn migrate(&self) -> Result<()> {
+    fn migrate(&mut self) -> Result<()> {
         self.conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA busy_timeout = 250;
             PRAGMA foreign_keys = ON;
+            ",
+        )?;
+        self.ensure_migration_table()?;
 
+        let mut applied = self.applied_migration_versions().with_context(|| {
+            format!(
+                "failed to read schema migrations for database {}",
+                self.path.display()
+            )
+        })?;
+        self.validate_known_migrations(&applied)?;
+
+        for migration in MIGRATIONS {
+            if applied.contains(&migration.version) {
+                continue;
+            }
+
+            let tx = self.conn.transaction().with_context(|| {
+                format!(
+                    "failed to start migration {} ({})",
+                    migration.version, migration.description
+                )
+            })?;
+            (migration.up)(&tx).with_context(|| {
+                format!(
+                    "failed to apply migration {} ({})",
+                    migration.version, migration.description
+                )
+            })?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, unixepoch())",
+                params![migration.version],
+            )
+            .with_context(|| {
+                format!(
+                    "failed to record migration {} ({})",
+                    migration.version, migration.description
+                )
+            })?;
+            tx.commit().with_context(|| {
+                format!(
+                    "failed to commit migration {} ({})",
+                    migration.version, migration.description
+                )
+            })?;
+            applied.insert(migration.version);
+        }
+
+        Ok(())
+    }
+
+    fn ensure_migration_table(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at INTEGER NOT NULL
             );
-
-            CREATE TABLE IF NOT EXISTS intervals (
-                id INTEGER PRIMARY KEY,
-                kind TEXT NOT NULL CHECK (kind IN ('focused', 'open')),
-                app_class TEXT NOT NULL,
-                window_address TEXT,
-                title TEXT,
-                started_at INTEGER NOT NULL,
-                ended_at INTEGER,
-                CHECK (ended_at IS NULL OR ended_at >= started_at)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_intervals_kind_app
-                ON intervals(kind, app_class);
-            CREATE INDEX IF NOT EXISTS idx_intervals_time
-                ON intervals(started_at, ended_at);
-            CREATE INDEX IF NOT EXISTS idx_intervals_open
-                ON intervals(ended_at)
-                WHERE ended_at IS NULL;
-            INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES (1, unixepoch());
-
-            CREATE TABLE IF NOT EXISTS session_intervals (
-                id INTEGER PRIMARY KEY,
-                kind TEXT NOT NULL CHECK (kind IN ('idle', 'locked')),
-                source TEXT,
-                started_at INTEGER NOT NULL,
-                ended_at INTEGER,
-                CHECK (ended_at IS NULL OR ended_at >= started_at)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_session_intervals_kind
-                ON session_intervals(kind);
-            CREATE INDEX IF NOT EXISTS idx_session_intervals_time
-                ON session_intervals(started_at, ended_at);
-            CREATE INDEX IF NOT EXISTS idx_session_intervals_open
-                ON session_intervals(ended_at)
-                WHERE ended_at IS NULL;
-            INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES (2, unixepoch());
             ",
         )?;
-        self.add_column_if_missing("intervals", "workspace", "TEXT")?;
-        self.add_column_if_missing("intervals", "monitor", "TEXT")?;
         Ok(())
     }
 
     fn validate_schema(&self) -> Result<()> {
-        for statement in [
-            "SELECT id, kind, app_class, window_address, title, workspace, monitor, started_at, ended_at FROM intervals LIMIT 0",
-            "SELECT id, kind, source, started_at, ended_at FROM session_intervals LIMIT 0",
-        ] {
-            self.conn.prepare(statement).with_context(|| {
-                format!(
-                    "database {} is not initialized or needs migration; start omastatd once with write access before running read-only reports",
-                    self.path.display()
-                )
-            })?;
+        let applied = self.applied_migration_versions().with_context(|| {
+            format!(
+                "database {} is not initialized or needs migration; start omastatd once with write access before running read-only reports",
+                self.path.display()
+            )
+        })?;
+        self.validate_known_migrations(&applied)?;
+        if let Some(migration) = missing_migration(&applied) {
+            anyhow::bail!(
+                "database {} is not initialized or needs migration (missing migration {}: {}); start omastatd once with write access before running read-only reports",
+                self.path.display(),
+                migration.version,
+                migration.description
+            );
         }
+
+        validate_required_schema(&self.conn).with_context(|| {
+            format!(
+                "database {} is not initialized or needs migration; start omastatd once with write access before running read-only reports",
+                self.path.display()
+            )
+        })?;
         Ok(())
     }
 
-    fn add_column_if_missing(&self, table: &str, column: &str, column_type: &str) -> Result<()> {
-        if self.column_exists(table, column)? {
-            return Ok(());
+    fn applied_migration_versions(&self) -> Result<BTreeSet<i64>> {
+        read_applied_migration_versions(&self.conn)
+    }
+
+    fn validate_known_migrations(&self, applied: &BTreeSet<i64>) -> Result<()> {
+        if let Some(version) = unknown_migration_version(applied) {
+            anyhow::bail!(
+                "database {} has unknown schema migration {}; update Omastat before using this database",
+                self.path.display(),
+                version
+            );
         }
-        self.conn.execute(
-            &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
-            [],
-        )?;
         Ok(())
     }
+}
 
-    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
-        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
-        let columns = stmt
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(columns.iter().any(|name| name == column))
+struct DaemonRunRow {
+    id: i64,
+    last_heartbeat_at: i64,
+    stopped_at: Option<i64>,
+}
+
+fn latest_daemon_run(tx: &Transaction<'_>) -> rusqlite::Result<Option<DaemonRunRow>> {
+    tx.query_row(
+        "
+        SELECT id, last_heartbeat_at, stopped_at
+        FROM daemon_runs
+        ORDER BY id DESC
+        LIMIT 1
+        ",
+        [],
+        |row| {
+            Ok(DaemonRunRow {
+                id: row.get(0)?,
+                last_heartbeat_at: row.get(1)?,
+                stopped_at: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+fn latest_unclosed_interval_start(tx: &Transaction<'_>) -> rusqlite::Result<Option<i64>> {
+    tx.query_row(
+        "
+        SELECT MAX(started_at)
+        FROM (
+            SELECT started_at FROM intervals WHERE ended_at IS NULL
+            UNION ALL
+            SELECT started_at FROM session_intervals WHERE ended_at IS NULL
+        )
+        ",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn earliest_active_system_interval_start(
+    tx: &Transaction<'_>,
+    kind: &str,
+) -> rusqlite::Result<Option<i64>> {
+    tx.query_row(
+        "
+        SELECT MIN(started_at)
+        FROM unobserved_intervals
+        WHERE kind = ?1
+          AND ended_at IS NULL
+        ",
+        params![kind],
+        |row| row.get(0),
+    )
+}
+
+fn close_unclosed_observed_intervals_tx(
+    tx: &Transaction<'_>,
+    closed_at: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "
+        UPDATE intervals
+        SET ended_at = MAX(started_at, ?1)
+        WHERE ended_at IS NULL
+        ",
+        params![closed_at],
+    )?;
+    tx.execute(
+        "
+        UPDATE session_intervals
+        SET ended_at = MAX(started_at, ?1)
+        WHERE ended_at IS NULL
+        ",
+        params![closed_at],
+    )?;
+    Ok(())
+}
+
+fn close_unclosed_system_intervals_tx(
+    tx: &Transaction<'_>,
+    kind: &str,
+    closed_at: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "
+        UPDATE unobserved_intervals
+        SET ended_at = MAX(started_at, ?2)
+        WHERE kind = ?1
+          AND ended_at IS NULL
+        ",
+        params![kind, closed_at],
+    )?;
+    Ok(())
+}
+
+fn insert_daemon_event_tx(
+    tx: &Transaction<'_>,
+    run_id: i64,
+    kind: &str,
+    occurred_at: i64,
+    detail: Option<&str>,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "
+        INSERT INTO daemon_events (run_id, kind, occurred_at, detail)
+        VALUES (?1, ?2, ?3, ?4)
+        ",
+        params![run_id, kind, occurred_at, detail],
+    )?;
+    Ok(())
+}
+
+fn diagnose_schema(conn: &Connection) -> StorageSchemaStatus {
+    match table_exists(conn, "schema_migrations") {
+        Ok(true) => {}
+        Ok(false) => {
+            return StorageSchemaStatus::NotInitialized {
+                reason: "schema_migrations table is missing".to_string(),
+            };
+        }
+        Err(error) => {
+            return StorageSchemaStatus::Invalid {
+                error: format!("{error:#}"),
+            };
+        }
     }
 
+    let applied = match read_applied_migration_versions(conn) {
+        Ok(applied) => applied,
+        Err(error) => {
+            return StorageSchemaStatus::Invalid {
+                error: format!("{error:#}"),
+            };
+        }
+    };
+    let applied_migrations = applied.iter().copied().collect::<Vec<_>>();
+
+    if let Some(version) = unknown_migration_version(&applied) {
+        return StorageSchemaStatus::UnknownMigration {
+            version,
+            applied_migrations,
+        };
+    }
+
+    if let Some(migration) = missing_migration(&applied) {
+        return StorageSchemaStatus::NeedsMigration {
+            version: migration.version,
+            description: migration.description.to_string(),
+            applied_migrations,
+        };
+    }
+
+    if let Err(error) = validate_required_schema(conn) {
+        return StorageSchemaStatus::Invalid {
+            error: format!("{error:#}"),
+        };
+    }
+
+    StorageSchemaStatus::Current { applied_migrations }
+}
+
+fn sqlite_quick_check(conn: &Connection) -> StorageQuickCheck {
+    match conn.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0)) {
+        Ok(value) if value.eq_ignore_ascii_case("ok") => StorageQuickCheck::Ok,
+        Ok(value) => StorageQuickCheck::Problem(value),
+        Err(error) => StorageQuickCheck::Error(format!("{error:#}")),
+    }
+}
+
+fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "
+        SELECT EXISTS(
+            SELECT 1
+            FROM sqlite_schema
+            WHERE type = 'table'
+              AND name = ?1
+        )
+        ",
+        params![table],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )
+}
+
+fn validate_required_schema(conn: &Connection) -> rusqlite::Result<()> {
+    for statement in [
+        "SELECT id, kind, app_class, window_address, title, workspace, monitor, started_at, ended_at FROM intervals LIMIT 0",
+        "SELECT id, kind, source, started_at, ended_at FROM session_intervals LIMIT 0",
+        "SELECT id, started_at, last_heartbeat_at, stopped_at, stop_kind FROM daemon_runs LIMIT 0",
+        "SELECT id, run_id, kind, occurred_at, detail FROM daemon_events LIMIT 0",
+        "SELECT id, kind, source, started_at, ended_at FROM unobserved_intervals LIMIT 0",
+    ] {
+        conn.prepare(statement)?;
+    }
+    Ok(())
+}
+
+fn read_applied_migration_versions(conn: &Connection) -> Result<BTreeSet<i64>> {
+    let mut stmt = conn.prepare("SELECT version FROM schema_migrations ORDER BY version ASC")?;
+    let versions = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    Ok(versions)
+}
+
+fn migrate_0001_create_intervals(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS intervals (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('focused', 'open')),
+            app_class TEXT NOT NULL,
+            window_address TEXT,
+            title TEXT,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            CHECK (ended_at IS NULL OR ended_at >= started_at)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_intervals_kind_app
+            ON intervals(kind, app_class);
+        CREATE INDEX IF NOT EXISTS idx_intervals_time
+            ON intervals(started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_intervals_open
+            ON intervals(ended_at)
+            WHERE ended_at IS NULL;
+        ",
+    )
+}
+
+fn migrate_0002_create_session_intervals(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS session_intervals (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('idle', 'locked')),
+            source TEXT,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            CHECK (ended_at IS NULL OR ended_at >= started_at)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_intervals_kind
+            ON session_intervals(kind);
+        CREATE INDEX IF NOT EXISTS idx_session_intervals_time
+            ON session_intervals(started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_session_intervals_open
+            ON session_intervals(ended_at)
+            WHERE ended_at IS NULL;
+        ",
+    )
+}
+
+fn migrate_0003_add_interval_workspace(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    add_column_if_missing(tx, "intervals", "workspace", "TEXT")
+}
+
+fn migrate_0004_add_interval_monitor(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    add_column_if_missing(tx, "intervals", "monitor", "TEXT")
+}
+
+fn migrate_0005_add_daemon_lifecycle(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS daemon_runs (
+            id INTEGER PRIMARY KEY,
+            started_at INTEGER NOT NULL,
+            last_heartbeat_at INTEGER NOT NULL,
+            stopped_at INTEGER,
+            stop_kind TEXT CHECK (stop_kind IS NULL OR stop_kind IN ('clean', 'recovered')),
+            CHECK (last_heartbeat_at >= started_at),
+            CHECK (stopped_at IS NULL OR stopped_at >= started_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS daemon_events (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER,
+            kind TEXT NOT NULL CHECK (kind IN ('start', 'heartbeat', 'clean-stop', 'recovery')),
+            occurred_at INTEGER NOT NULL,
+            detail TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS unobserved_intervals (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('sleep', 'unobserved')),
+            source TEXT,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            CHECK (ended_at IS NULL OR ended_at >= started_at)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_daemon_runs_active
+            ON daemon_runs(stopped_at)
+            WHERE stopped_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_daemon_events_time
+            ON daemon_events(occurred_at);
+        CREATE INDEX IF NOT EXISTS idx_daemon_events_kind
+            ON daemon_events(kind);
+        CREATE INDEX IF NOT EXISTS idx_unobserved_intervals_time
+            ON unobserved_intervals(started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_unobserved_intervals_open
+            ON unobserved_intervals(kind, ended_at)
+            WHERE ended_at IS NULL;
+        ",
+    )
+}
+
+fn migrate_0006_expand_system_intervals(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "
+        ALTER TABLE unobserved_intervals RENAME TO unobserved_intervals_old;
+
+        CREATE TABLE unobserved_intervals (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('sleep', 'unobserved')),
+            source TEXT,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            CHECK (ended_at IS NULL OR ended_at >= started_at)
+        );
+
+        INSERT INTO unobserved_intervals (id, kind, source, started_at, ended_at)
+        SELECT id, kind, source, started_at, ended_at
+        FROM unobserved_intervals_old
+        WHERE kind IN ('sleep', 'unobserved');
+
+        DROP TABLE unobserved_intervals_old;
+
+        CREATE INDEX IF NOT EXISTS idx_unobserved_intervals_time
+            ON unobserved_intervals(started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_unobserved_intervals_open
+            ON unobserved_intervals(kind, ended_at)
+            WHERE ended_at IS NULL;
+        ",
+    )
+}
+
+fn migrate_0007_add_report_indexes(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_intervals_kind_time
+            ON intervals(kind, started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_intervals_kind_app_time
+            ON intervals(kind, app_class, started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_intervals_focused_workspace_time
+            ON intervals(workspace, started_at, ended_at)
+            WHERE kind = 'focused' AND workspace IS NOT NULL AND trim(workspace) <> '';
+        CREATE INDEX IF NOT EXISTS idx_session_intervals_kind_time
+            ON session_intervals(kind, started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_unobserved_intervals_kind_time
+            ON unobserved_intervals(kind, started_at, ended_at);
+        ",
+    )
+}
+
+fn add_column_if_missing(
+    tx: &Transaction<'_>,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> rusqlite::Result<()> {
+    if column_exists(tx, table, column)? {
+        return Ok(());
+    }
+    tx.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
+        [],
+    )?;
+    Ok(())
+}
+
+fn column_exists(tx: &Transaction<'_>, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|name| name == column))
+}
+
+fn missing_migration(applied: &BTreeSet<i64>) -> Option<&'static Migration> {
+    MIGRATIONS
+        .iter()
+        .find(|migration| !applied.contains(&migration.version))
+}
+
+fn unknown_migration_version(applied: &BTreeSet<i64>) -> Option<i64> {
+    applied.iter().copied().find(|version| {
+        !MIGRATIONS
+            .iter()
+            .any(|migration| migration.version == *version)
+    })
+}
+
+#[derive(Debug, Clone)]
+struct FocusedIntervalMetadata {
+    app_class: String,
+    workspace: Option<String>,
+    started_at: i64,
+    ended_at: i64,
+}
+
+impl Storage {
     fn app_class_counts(&self) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "
@@ -1182,6 +2333,159 @@ impl Storage {
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                 ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn raw_intervals_between(&self, start: i64, end: i64) -> Result<Vec<RawInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                kind,
+                app_class,
+                window_address,
+                title,
+                workspace,
+                monitor,
+                started_at,
+                ended_at
+            FROM intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY started_at ASC, COALESCE(ended_at, ?2) ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                let kind = row.get::<_, String>(0)?;
+                let kind = IntervalKind::from_str(&kind).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "kind".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                let started_at = row.get::<_, i64>(6)?;
+                let ended_at = row.get::<_, Option<i64>>(7)?;
+                Ok(RawInterval {
+                    kind,
+                    app_class: row.get(1)?,
+                    window_address: row.get(2)?,
+                    title: row.get(3)?,
+                    workspace: row.get(4)?,
+                    monitor: row.get(5)?,
+                    started_at,
+                    ended_at,
+                    local_start: local_timestamp(started_at),
+                    local_end: ended_at.map(local_timestamp),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn raw_session_intervals_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<RawSessionInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT kind, source, started_at, ended_at
+            FROM session_intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY started_at ASC, COALESCE(ended_at, ?2) ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                let kind = row.get::<_, String>(0)?;
+                let kind = SessionIntervalKind::from_str(&kind).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "kind".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                let started_at = row.get::<_, i64>(2)?;
+                let ended_at = row.get::<_, Option<i64>>(3)?;
+                Ok(RawSessionInterval {
+                    kind,
+                    source: row.get(1)?,
+                    started_at,
+                    ended_at,
+                    local_start: local_timestamp(started_at),
+                    local_end: ended_at.map(local_timestamp),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn raw_system_intervals_between(&self, start: i64, end: i64) -> Result<Vec<RawSystemInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT kind, source, started_at, ended_at
+            FROM unobserved_intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY started_at ASC, COALESCE(ended_at, ?2) ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                let kind = row.get::<_, String>(0)?;
+                let kind = SystemIntervalKind::from_str(&kind).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "kind".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                let started_at = row.get::<_, i64>(2)?;
+                let ended_at = row.get::<_, Option<i64>>(3)?;
+                Ok(RawSystemInterval {
+                    kind,
+                    source: row.get(1)?,
+                    started_at,
+                    ended_at,
+                    local_start: local_timestamp(started_at),
+                    local_end: ended_at.map(local_timestamp),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn focused_interval_metadata_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<FocusedIntervalMetadata>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                app_class,
+                workspace,
+                MAX(started_at, ?1) AS bounded_start,
+                MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
+            FROM intervals
+            WHERE kind = 'focused'
+              AND started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY bounded_start ASC, bounded_end ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                Ok(FocusedIntervalMetadata {
+                    app_class: row.get(0)?,
+                    workspace: row.get(1)?,
+                    started_at: row.get(2)?,
+                    ended_at: row.get(3)?,
+                })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -1243,7 +2547,7 @@ impl Storage {
             "
             SELECT title
             FROM intervals
-            WHERE kind = 'focused'
+            WHERE kind = 'focused' AND title IS NOT NULL
             ORDER BY id ASC
             ",
         )?;
@@ -1322,6 +2626,163 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    pub fn system_timeline_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<SystemTimelineInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                kind,
+                source,
+                MAX(started_at, ?1) AS bounded_start,
+                MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
+            FROM unobserved_intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY bounded_start ASC, bounded_end ASC, id ASC
+            ",
+        )?;
+
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                let kind = row.get::<_, String>(0)?;
+                let kind = SystemIntervalKind::from_str(&kind).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "kind".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                Ok(SystemTimelineInterval {
+                    kind,
+                    source: row.get(1)?,
+                    started_at: row.get(2)?,
+                    ended_at: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn raw_export_between(&self, start: i64, end: i64) -> Result<RawExportRows> {
+        Ok(RawExportRows {
+            intervals: self.raw_intervals_between(start, end)?,
+            session_intervals: self.raw_session_intervals_between(start, end)?,
+            system_intervals: self.raw_system_intervals_between(start, end)?,
+        })
+    }
+
+    pub fn purge_before(
+        &mut self,
+        cutoff_ts: Option<i64>,
+        dry_run: bool,
+        vacuum: bool,
+    ) -> Result<PurgeReport> {
+        let cutoff_local = cutoff_ts.map(local_timestamp);
+        let mut report = PurgeReport {
+            dry_run,
+            cutoff_ts,
+            cutoff_local,
+            intervals_deleted: 0,
+            session_intervals_deleted: 0,
+            system_intervals_deleted: 0,
+            daemon_events_deleted: 0,
+            daemon_runs_deleted: 0,
+            intervals_trimmed: 0,
+            session_intervals_trimmed: 0,
+            system_intervals_trimmed: 0,
+            vacuumed: false,
+        };
+
+        if dry_run {
+            report.intervals_deleted = purge_delete_count(
+                &self.conn,
+                "intervals",
+                cutoff_ts,
+                "ended_at IS NOT NULL AND ended_at <= ?1",
+            )?;
+            report.session_intervals_deleted = purge_delete_count(
+                &self.conn,
+                "session_intervals",
+                cutoff_ts,
+                "ended_at IS NOT NULL AND ended_at <= ?1",
+            )?;
+            report.system_intervals_deleted = purge_delete_count(
+                &self.conn,
+                "unobserved_intervals",
+                cutoff_ts,
+                "ended_at IS NOT NULL AND ended_at <= ?1",
+            )?;
+            report.daemon_events_deleted =
+                purge_delete_count(&self.conn, "daemon_events", cutoff_ts, "occurred_at < ?1")?;
+            report.daemon_runs_deleted = purge_delete_count(
+                &self.conn,
+                "daemon_runs",
+                cutoff_ts,
+                "stopped_at IS NOT NULL AND stopped_at <= ?1",
+            )?;
+            report.intervals_trimmed = purge_trim_count(&self.conn, "intervals", cutoff_ts)?;
+            report.session_intervals_trimmed =
+                purge_trim_count(&self.conn, "session_intervals", cutoff_ts)?;
+            report.system_intervals_trimmed =
+                purge_trim_count(&self.conn, "unobserved_intervals", cutoff_ts)?;
+            return Ok(report);
+        }
+
+        {
+            let tx = self.conn.transaction()?;
+            match cutoff_ts {
+                Some(cutoff) => {
+                    report.intervals_deleted = tx.execute(
+                        "DELETE FROM intervals WHERE ended_at IS NOT NULL AND ended_at <= ?1",
+                        params![cutoff],
+                    )? as i64;
+                    report.session_intervals_deleted = tx.execute(
+                        "DELETE FROM session_intervals WHERE ended_at IS NOT NULL AND ended_at <= ?1",
+                        params![cutoff],
+                    )? as i64;
+                    report.system_intervals_deleted = tx.execute(
+                        "DELETE FROM unobserved_intervals WHERE ended_at IS NOT NULL AND ended_at <= ?1",
+                        params![cutoff],
+                    )? as i64;
+                    report.daemon_events_deleted = tx.execute(
+                        "DELETE FROM daemon_events WHERE occurred_at < ?1",
+                        params![cutoff],
+                    )? as i64;
+                    report.daemon_runs_deleted = tx.execute(
+                        "DELETE FROM daemon_runs WHERE stopped_at IS NOT NULL AND stopped_at <= ?1",
+                        params![cutoff],
+                    )? as i64;
+                    report.intervals_trimmed = trim_table_start(&tx, "intervals", cutoff)?;
+                    report.session_intervals_trimmed =
+                        trim_table_start(&tx, "session_intervals", cutoff)?;
+                    report.system_intervals_trimmed =
+                        trim_table_start(&tx, "unobserved_intervals", cutoff)?;
+                }
+                None => {
+                    report.intervals_deleted = tx.execute("DELETE FROM intervals", [])? as i64;
+                    report.session_intervals_deleted =
+                        tx.execute("DELETE FROM session_intervals", [])? as i64;
+                    report.system_intervals_deleted =
+                        tx.execute("DELETE FROM unobserved_intervals", [])? as i64;
+                    report.daemon_events_deleted =
+                        tx.execute("DELETE FROM daemon_events", [])? as i64;
+                    report.daemon_runs_deleted = tx.execute("DELETE FROM daemon_runs", [])? as i64;
+                }
+            }
+            tx.commit()?;
+        }
+
+        if vacuum {
+            self.conn.execute_batch("VACUUM")?;
+            report.vacuumed = true;
+        }
+
+        Ok(report)
+    }
 }
 
 impl IntervalKind {
@@ -1353,6 +2814,23 @@ impl SessionIntervalKind {
         match value {
             "idle" => Some(Self::Idle),
             "locked" => Some(Self::Locked),
+            _ => None,
+        }
+    }
+}
+
+impl SystemIntervalKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sleep => "sleep",
+            Self::Unobserved => "unobserved",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "sleep" => Some(Self::Sleep),
+            "unobserved" => Some(Self::Unobserved),
             _ => None,
         }
     }
@@ -1403,6 +2881,56 @@ fn copy_legacy_db_if_needed(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn latest_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn local_timestamp(timestamp: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S %:z").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn purge_delete_count(
+    conn: &Connection,
+    table: &str,
+    cutoff_ts: Option<i64>,
+    predicate: &str,
+) -> Result<i64> {
+    let sql = match cutoff_ts {
+        Some(_) => format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"),
+        None => format!("SELECT COUNT(*) FROM {table}"),
+    };
+    let count = match cutoff_ts {
+        Some(cutoff) => conn.query_row(&sql, params![cutoff], |row| row.get(0))?,
+        None => conn.query_row(&sql, [], |row| row.get(0))?,
+    };
+    Ok(count)
+}
+
+fn purge_trim_count(conn: &Connection, table: &str, cutoff_ts: Option<i64>) -> Result<i64> {
+    let Some(cutoff) = cutoff_ts else {
+        return Ok(0);
+    };
+    let sql = format!(
+        "SELECT COUNT(*) FROM {table} WHERE started_at < ?1 AND (ended_at IS NULL OR ended_at > ?1)"
+    );
+    Ok(conn.query_row(&sql, params![cutoff], |row| row.get(0))?)
+}
+
+fn trim_table_start(tx: &Transaction<'_>, table: &str, cutoff: i64) -> rusqlite::Result<i64> {
+    let sql = format!(
+        "UPDATE {table} SET started_at = ?1 WHERE started_at < ?1 AND (ended_at IS NULL OR ended_at > ?1)"
+    );
+    tx.execute(&sql, params![cutoff]).map(|rows| rows as i64)
+}
+
 fn local_day_range(start: i64, end: i64) -> Result<(chrono::DateTime<Local>, usize)> {
     let start_local = Local
         .timestamp_opt(start, 0)
@@ -1426,13 +2954,254 @@ fn local_day_range(start: i64, end: i64) -> Result<(chrono::DateTime<Local>, usi
     Ok((range_start, days))
 }
 
+fn add_daily_app_rollup(
+    totals: &mut BTreeMap<(usize, String), i64>,
+    boundaries: &[i64],
+    app_class: &str,
+    started_at: i64,
+    ended_at: i64,
+    start: i64,
+    end: i64,
+) {
+    for (index, window) in boundaries.windows(2).enumerate() {
+        let overlap = ended_at.min(window[1]).min(end) - started_at.max(window[0]).max(start);
+        if overlap > 0 {
+            *totals.entry((index, app_class.to_string())).or_default() += overlap;
+        }
+    }
+}
+
+fn add_hourly_focus_rollup(totals: &mut BTreeMap<(u32, u32), i64>, started_at: i64, ended_at: i64) {
+    let mut cursor = started_at;
+    while cursor < ended_at {
+        let Some(local) = Local.timestamp_opt(cursor, 0).single() else {
+            break;
+        };
+        let Some(hour_start) = Local
+            .with_ymd_and_hms(local.year(), local.month(), local.day(), local.hour(), 0, 0)
+            .single()
+        else {
+            break;
+        };
+        let next_hour = (hour_start + chrono::Duration::hours(1)).timestamp();
+        let segment_end = next_hour.min(ended_at);
+        let overlap = segment_end - cursor;
+        if overlap > 0 {
+            let key = (local.weekday().num_days_from_monday(), local.hour());
+            *totals.entry(key).or_default() += overlap;
+        }
+        cursor = segment_end.max(cursor + 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IntervalKind, IntervalMetadata, SessionIntervalKind, Storage};
+    use super::{
+        DaemonRecovery, IntervalKind, IntervalMetadata, SessionIntervalKind, Storage,
+        StorageQuickCheck, StorageSchemaStatus, SystemIntervalKind,
+    };
     use crate::config::Config;
     use crate::steam::SteamResolver;
     use chrono::{Datelike, Local, TimeZone};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
+    use std::time::{Duration as StdDuration, Instant};
+
+    fn migration_versions(conn: &Connection) -> Vec<i64> {
+        conn.prepare("SELECT version FROM schema_migrations ORDER BY version ASC")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+        conn.prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn explain_plan(conn: &Connection, sql: &str) -> Vec<String> {
+        conn.prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn create_legacy_usage_schema(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            );
+            INSERT INTO schema_migrations(version, applied_at)
+                VALUES (1, 1), (2, 2);
+
+            CREATE TABLE intervals (
+                id INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('focused', 'open')),
+                app_class TEXT NOT NULL,
+                window_address TEXT,
+                title TEXT,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                CHECK (ended_at IS NULL OR ended_at >= started_at)
+            );
+            CREATE INDEX idx_intervals_kind_app
+                ON intervals(kind, app_class);
+            CREATE INDEX idx_intervals_time
+                ON intervals(started_at, ended_at);
+            CREATE INDEX idx_intervals_open
+                ON intervals(ended_at)
+                WHERE ended_at IS NULL;
+
+            CREATE TABLE session_intervals (
+                id INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('idle', 'locked')),
+                source TEXT,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                CHECK (ended_at IS NULL OR ended_at >= started_at)
+            );
+            CREATE INDEX idx_session_intervals_kind
+                ON session_intervals(kind);
+            CREATE INDEX idx_session_intervals_time
+                ON session_intervals(started_at, ended_at);
+            CREATE INDEX idx_session_intervals_open
+                ON session_intervals(ended_at)
+                WHERE ended_at IS NULL;
+            ",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fresh_database_records_full_migration_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        let interval_columns = table_columns(&storage.conn, "intervals");
+        assert!(interval_columns.iter().any(|column| column == "workspace"));
+        assert!(interval_columns.iter().any(|column| column == "monitor"));
+    }
+
+    #[test]
+    fn migrates_legacy_database_without_workspace_monitor_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        {
+            let conn = Connection::open(&db).unwrap();
+            create_legacy_usage_schema(&conn);
+            conn.execute(
+                "
+                INSERT INTO intervals(kind, app_class, started_at, ended_at)
+                VALUES ('focused', 'firefox', 100, 160)
+                ",
+                [],
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        let interval_columns = table_columns(&storage.conn, "intervals");
+        assert!(interval_columns.iter().any(|column| column == "workspace"));
+        assert!(interval_columns.iter().any(|column| column == "monitor"));
+        let rows = storage.totals_between(100, 200).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].focused_seconds, 60);
+    }
+
+    #[test]
+    fn records_workspace_monitor_migrations_when_columns_already_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        {
+            let conn = Connection::open(&db).unwrap();
+            create_legacy_usage_schema(&conn);
+            conn.execute_batch(
+                "
+                ALTER TABLE intervals ADD COLUMN workspace TEXT;
+                ALTER TABLE intervals ADD COLUMN monitor TEXT;
+                ",
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn migrates_version_five_unobserved_table_for_sleep_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        {
+            let conn = Connection::open(&db).unwrap();
+            create_legacy_usage_schema(&conn);
+            conn.execute_batch(
+                "
+                ALTER TABLE intervals ADD COLUMN workspace TEXT;
+                ALTER TABLE intervals ADD COLUMN monitor TEXT;
+                INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (3, 3), (4, 4), (5, 5);
+
+                CREATE TABLE daemon_runs (
+                    id INTEGER PRIMARY KEY,
+                    started_at INTEGER NOT NULL,
+                    last_heartbeat_at INTEGER NOT NULL,
+                    stopped_at INTEGER,
+                    stop_kind TEXT CHECK (stop_kind IS NULL OR stop_kind IN ('clean', 'recovered')),
+                    CHECK (last_heartbeat_at >= started_at),
+                    CHECK (stopped_at IS NULL OR stopped_at >= started_at)
+                );
+                CREATE TABLE daemon_events (
+                    id INTEGER PRIMARY KEY,
+                    run_id INTEGER,
+                    kind TEXT NOT NULL CHECK (kind IN ('start', 'heartbeat', 'clean-stop', 'recovery')),
+                    occurred_at INTEGER NOT NULL,
+                    detail TEXT
+                );
+                CREATE TABLE unobserved_intervals (
+                    id INTEGER PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK (kind IN ('unobserved')),
+                    source TEXT,
+                    started_at INTEGER NOT NULL,
+                    ended_at INTEGER NOT NULL,
+                    CHECK (ended_at >= started_at)
+                );
+                INSERT INTO unobserved_intervals(kind, source, started_at, ended_at)
+                    VALUES ('unobserved', 'test', 100, 160);
+                ",
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        let sleep = storage
+            .start_system_interval(SystemIntervalKind::Sleep, Some("test"), 200)
+            .unwrap();
+        storage.close_system_interval(sleep, 260).unwrap();
+        let totals = storage.session_totals_between(0, 300).unwrap();
+        assert_eq!(totals.unobserved_seconds, 60);
+        assert_eq!(totals.sleep_seconds, 60);
+    }
 
     #[test]
     fn aggregates_overlapping_intervals() {
@@ -1587,6 +3356,209 @@ mod tests {
     }
 
     #[test]
+    fn app_workspace_totals_keep_app_affinity_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let ghostty_code = storage
+            .start_interval_with_metadata(
+                IntervalKind::Focused,
+                "ghostty",
+                IntervalMetadata {
+                    window_address: Some("0x1"),
+                    workspace: Some("code"),
+                    monitor: Some("0"),
+                    ..IntervalMetadata::default()
+                },
+                100,
+            )
+            .unwrap();
+        storage.close_interval(ghostty_code, 220).unwrap();
+        let ghostty_chat = storage
+            .start_interval_with_metadata(
+                IntervalKind::Focused,
+                "ghostty",
+                IntervalMetadata {
+                    window_address: Some("0x2"),
+                    workspace: Some("chat"),
+                    monitor: Some("0"),
+                    ..IntervalMetadata::default()
+                },
+                200,
+            )
+            .unwrap();
+        storage.close_interval(ghostty_chat, 260).unwrap();
+        let firefox_code = storage
+            .start_interval_with_metadata(
+                IntervalKind::Focused,
+                "firefox",
+                IntervalMetadata {
+                    window_address: Some("0x3"),
+                    workspace: Some("code"),
+                    monitor: Some("0"),
+                    ..IntervalMetadata::default()
+                },
+                120,
+            )
+            .unwrap();
+        storage.close_interval(firefox_code, 180).unwrap();
+        let legacy = storage
+            .start_interval(IntervalKind::Focused, "legacy", None, None, 100)
+            .unwrap();
+        storage.close_interval(legacy, 300).unwrap();
+
+        let rows = storage
+            .focused_app_workspace_totals_between(150, 240, 8)
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].workspace, "code");
+        assert_eq!(rows[0].app_class, "ghostty");
+        assert_eq!(rows[0].focused_seconds, 70);
+        assert_eq!(rows[1].workspace, "chat");
+        assert_eq!(rows[1].app_class, "ghostty");
+        assert_eq!(rows[1].focused_seconds, 40);
+        assert_eq!(rows[2].workspace, "code");
+        assert_eq!(rows[2].app_class, "firefox");
+        assert_eq!(rows[2].focused_seconds, 30);
+    }
+
+    #[test]
+    fn focused_rollups_handle_high_volume_with_one_bounded_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        for index in 0..12_000 {
+            let started_at = 1_700_000_000 + index * 120;
+            let app_class = format!("app-{}", index % 24);
+            let workspace = format!("ws-{}", index % 6);
+            let id = storage
+                .start_interval_with_metadata(
+                    IntervalKind::Focused,
+                    &app_class,
+                    IntervalMetadata {
+                        workspace: Some(&workspace),
+                        ..IntervalMetadata::default()
+                    },
+                    started_at,
+                )
+                .unwrap();
+            storage.close_interval(id, started_at + 90).unwrap();
+        }
+
+        let started = Instant::now();
+        let rollups = storage
+            .focused_rollups_between(1_700_000_000, 1_700_000_000 + 12_000 * 120, 8, 64)
+            .unwrap();
+
+        assert!(started.elapsed() < StdDuration::from_secs(5));
+        assert_eq!(rollups.focus_intervals.len(), 12_000);
+        assert!(!rollups.daily_apps.is_empty());
+        assert_eq!(rollups.heatmap.len(), 7 * 24);
+        assert_eq!(rollups.workspaces.len(), 6);
+        assert!(!rollups.app_workspaces.is_empty());
+    }
+
+    #[test]
+    fn report_indexes_are_available_to_bounded_interval_queries() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let plan = explain_plan(
+            &storage.conn,
+            "
+            EXPLAIN QUERY PLAN
+            SELECT app_class
+            FROM intervals
+            WHERE kind = 'focused'
+              AND started_at < 200
+              AND COALESCE(ended_at, 200) > 100
+            ",
+        );
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_intervals_kind_time")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn raw_export_includes_local_timestamps_and_system_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let focused = storage
+            .start_interval_with_metadata(
+                IntervalKind::Focused,
+                "ghostty",
+                IntervalMetadata {
+                    title: Some("Plan"),
+                    workspace: Some("code"),
+                    ..IntervalMetadata::default()
+                },
+                100,
+            )
+            .unwrap();
+        storage.close_interval(focused, 200).unwrap();
+        let idle = storage
+            .start_session_interval(SessionIntervalKind::Idle, Some("test"), 150)
+            .unwrap();
+        storage.close_session_interval(idle, 180).unwrap();
+        let sleep = storage
+            .start_system_interval(SystemIntervalKind::Sleep, Some("logind"), 160)
+            .unwrap();
+        storage.close_system_interval(sleep, 190).unwrap();
+
+        let raw = storage.raw_export_between(0, 300).unwrap();
+
+        assert_eq!(raw.intervals.len(), 1);
+        assert!(!raw.intervals[0].local_start.is_empty());
+        assert_eq!(raw.session_intervals.len(), 1);
+        assert_eq!(raw.system_intervals.len(), 1);
+        assert_eq!(raw.system_intervals[0].kind, SystemIntervalKind::Sleep);
+    }
+
+    #[test]
+    fn purge_before_deletes_old_rows_and_trims_overlaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        let old = storage
+            .start_interval(IntervalKind::Focused, "old", None, None, 100)
+            .unwrap();
+        storage.close_interval(old, 150).unwrap();
+        let overlap = storage
+            .start_interval(IntervalKind::Focused, "overlap", None, None, 100)
+            .unwrap();
+        storage.close_interval(overlap, 300).unwrap();
+        let system = storage
+            .start_system_interval(SystemIntervalKind::Unobserved, Some("test"), 100)
+            .unwrap();
+        storage.close_system_interval(system, 150).unwrap();
+
+        let report = storage.purge_before(Some(200), false, false).unwrap();
+
+        assert_eq!(report.intervals_deleted, 1);
+        assert_eq!(report.intervals_trimmed, 1);
+        assert_eq!(report.system_intervals_deleted, 1);
+        let rows = storage.totals_between(0, 400).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].app_class, "overlap");
+        assert_eq!(rows[0].focused_seconds, 100);
+    }
+
+    #[test]
     fn read_only_open_reads_existing_schema_without_migration() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("test.db");
@@ -1640,6 +3612,348 @@ mod tests {
         let message = format!("{error:#}");
 
         assert!(message.contains("needs migration"), "{message}");
+    }
+
+    #[test]
+    fn read_only_open_reports_schema_with_unrecorded_migrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("legacy-columns.db");
+        let config = Config::default();
+        {
+            let conn = Connection::open(&db).unwrap();
+            create_legacy_usage_schema(&conn);
+            conn.execute_batch(
+                "
+                ALTER TABLE intervals ADD COLUMN workspace TEXT;
+                ALTER TABLE intervals ADD COLUMN monitor TEXT;
+                ",
+            )
+            .unwrap();
+        }
+
+        let error = match Storage::open_read_only(Some(&db), &config) {
+            Ok(_) => panic!("read-only open unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+
+        assert!(message.contains("needs migration"), "{message}");
+        assert!(message.contains("missing migration 3"), "{message}");
+    }
+
+    #[test]
+    fn diagnose_reports_missing_database_without_creating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("missing.db");
+
+        let diagnostic = Storage::diagnose(Some(&db));
+
+        assert_eq!(diagnostic.path, db);
+        assert!(!diagnostic.exists);
+        assert!(matches!(
+            diagnostic.schema_status,
+            StorageSchemaStatus::Missing
+        ));
+        assert!(matches!(
+            diagnostic.quick_check,
+            StorageQuickCheck::Skipped(_)
+        ));
+        assert!(!diagnostic.path.exists());
+    }
+
+    #[test]
+    fn diagnose_reports_empty_database_as_not_initialized() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("empty.db");
+        drop(Connection::open(&db).unwrap());
+
+        let diagnostic = Storage::diagnose(Some(&db));
+
+        assert!(diagnostic.exists);
+        assert!(matches!(
+            diagnostic.schema_status,
+            StorageSchemaStatus::NotInitialized { .. }
+        ));
+        assert_eq!(diagnostic.quick_check, StorageQuickCheck::Ok);
+    }
+
+    #[test]
+    fn diagnose_reports_current_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("current.db");
+        let config = Config::default();
+        drop(Storage::open(Some(&db), &config).unwrap());
+
+        let diagnostic = Storage::diagnose(Some(&db));
+
+        assert!(diagnostic.exists);
+        assert_eq!(diagnostic.quick_check, StorageQuickCheck::Ok);
+        assert_eq!(
+            diagnostic.schema_status,
+            StorageSchemaStatus::Current {
+                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7]
+            }
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_migration_need() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("legacy.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            create_legacy_usage_schema(&conn);
+        }
+
+        let diagnostic = Storage::diagnose(Some(&db));
+
+        assert!(diagnostic.exists);
+        assert_eq!(
+            diagnostic.schema_status,
+            StorageSchemaStatus::NeedsMigration {
+                version: 3,
+                description: "add interval workspace metadata".to_string(),
+                applied_migrations: vec![1, 2]
+            }
+        );
+    }
+
+    #[test]
+    fn daemon_lifecycle_records_start_heartbeat_and_clean_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        let started = storage.start_daemon_run(100).unwrap();
+        assert_eq!(started.recovery, None);
+        storage
+            .record_daemon_heartbeat(started.run_id, 130)
+            .unwrap();
+        storage.finish_daemon_run(started.run_id, 160).unwrap();
+
+        let events = storage
+            .conn
+            .prepare("SELECT kind, occurred_at FROM daemon_events ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![
+                ("start".to_string(), 100),
+                ("heartbeat".to_string(), 130),
+                ("clean-stop".to_string(), 160)
+            ]
+        );
+
+        let run = storage
+            .conn
+            .query_row(
+                "SELECT last_heartbeat_at, stopped_at, stop_kind FROM daemon_runs WHERE id = ?1",
+                params![started.run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(run, (160, Some(160), Some("clean".to_string())));
+    }
+
+    #[test]
+    fn daemon_recovery_closes_stale_intervals_at_last_observed_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        let first = storage.start_daemon_run(100).unwrap();
+        storage.record_daemon_heartbeat(first.run_id, 150).unwrap();
+        let open = storage
+            .start_interval(IntervalKind::Open, "code", None, None, 110)
+            .unwrap();
+        let idle = storage
+            .start_session_interval(SessionIntervalKind::Idle, Some("test"), 140)
+            .unwrap();
+        let focused = storage
+            .start_interval(IntervalKind::Focused, "code", None, None, 170)
+            .unwrap();
+
+        let second = storage.start_daemon_run(400).unwrap();
+
+        assert_ne!(second.run_id, first.run_id);
+        assert_eq!(
+            second.recovery,
+            Some(DaemonRecovery {
+                previous_run_id: Some(first.run_id),
+                closed_at: 170,
+                unobserved_seconds: 230,
+            })
+        );
+        assert_eq!(
+            storage
+                .conn
+                .query_row(
+                    "SELECT ended_at FROM intervals WHERE id = ?1",
+                    params![open],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            170
+        );
+        assert_eq!(
+            storage
+                .conn
+                .query_row(
+                    "SELECT ended_at FROM intervals WHERE id = ?1",
+                    params![focused],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            170
+        );
+        assert_eq!(
+            storage
+                .conn
+                .query_row(
+                    "SELECT ended_at FROM session_intervals WHERE id = ?1",
+                    params![idle],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            170
+        );
+
+        let rows = storage.totals_between(100, 400).unwrap();
+        assert_eq!(rows[0].open_seconds, 60);
+        assert_eq!(rows[0].focused_seconds, 0);
+        let totals = storage.session_totals_between(100, 400).unwrap();
+        assert_eq!(totals.idle_seconds, 30);
+        assert_eq!(totals.unobserved_seconds, 230);
+    }
+
+    #[test]
+    fn daemon_recovery_closes_active_sleep_as_sleep_not_unobserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        let first = storage.start_daemon_run(100).unwrap();
+        storage.record_daemon_heartbeat(first.run_id, 150).unwrap();
+        let sleep = storage
+            .start_system_interval(SystemIntervalKind::Sleep, Some("logind"), 180)
+            .unwrap();
+
+        let second = storage.start_daemon_run(400).unwrap();
+
+        assert_eq!(
+            second.recovery,
+            Some(DaemonRecovery {
+                previous_run_id: Some(first.run_id),
+                closed_at: 400,
+                unobserved_seconds: 0,
+            })
+        );
+        assert_eq!(
+            storage
+                .conn
+                .query_row(
+                    "SELECT ended_at FROM unobserved_intervals WHERE id = ?1",
+                    params![sleep],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            400
+        );
+        let totals = storage.session_totals_between(100, 450).unwrap();
+        assert_eq!(totals.sleep_seconds, 220);
+        assert_eq!(totals.unobserved_seconds, 0);
+    }
+
+    #[test]
+    fn system_timeline_between_returns_bounded_sleep_and_offline_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+
+        let sleep = storage
+            .start_system_interval(SystemIntervalKind::Sleep, Some("logind"), 100)
+            .unwrap();
+        storage.close_system_interval(sleep, 220).unwrap();
+        let unobserved = storage
+            .start_system_interval(SystemIntervalKind::Unobserved, Some("daemon-recovery"), 260)
+            .unwrap();
+        storage.close_system_interval(unobserved, 420).unwrap();
+
+        let rows = storage.system_timeline_between(150, 360).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].kind, SystemIntervalKind::Sleep);
+        assert_eq!(rows[0].source.as_deref(), Some("logind"));
+        assert_eq!(rows[0].started_at, 150);
+        assert_eq!(rows[0].ended_at, 220);
+        assert_eq!(rows[1].kind, SystemIntervalKind::Unobserved);
+        assert_eq!(rows[1].source.as_deref(), Some("daemon-recovery"));
+        assert_eq!(rows[1].started_at, 260);
+        assert_eq!(rows[1].ended_at, 360);
+    }
+
+    #[test]
+    fn daily_totals_include_unobserved_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+        let date = Local::now().date_naive();
+        let day_start = Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap();
+        let started_at = (day_start + chrono::Duration::hours(1)).timestamp();
+        let ended_at = (day_start + chrono::Duration::hours(2)).timestamp();
+
+        storage
+            .conn
+            .execute(
+                "
+                INSERT INTO unobserved_intervals(kind, source, started_at, ended_at)
+                VALUES ('unobserved', 'test', ?1, ?2)
+                ",
+                params![started_at, ended_at],
+            )
+            .unwrap();
+        let sleep = storage
+            .start_system_interval(SystemIntervalKind::Sleep, Some("test"), ended_at)
+            .unwrap();
+        storage
+            .close_system_interval(sleep, ended_at + 30 * 60)
+            .unwrap();
+
+        let days = storage
+            .daily_totals_for_local_dates(date, 1, ended_at)
+            .unwrap();
+        assert_eq!(days[0].unobserved_seconds, 3600);
+        assert_eq!(days[0].sleep_seconds, 0);
+        let days = storage
+            .daily_totals_for_local_dates(date, 1, ended_at + 30 * 60)
+            .unwrap();
+        assert_eq!(days[0].unobserved_seconds, 3600);
+        assert_eq!(days[0].sleep_seconds, 1800);
+        let totals = storage
+            .session_totals_between(started_at, ended_at + 30 * 60)
+            .unwrap();
+        assert_eq!(totals.unobserved_seconds, 3600);
+        assert_eq!(totals.sleep_seconds, 1800);
     }
 
     #[test]

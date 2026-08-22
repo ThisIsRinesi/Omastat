@@ -1,10 +1,11 @@
 use crate::{
+    config::Config,
     hyprland,
     report::{self, Lens, UsageReport},
     steam::SteamResolver,
     storage::{
-        AppDayTotals, FocusHeatCell, Storage, StorageStatus, TimelineInterval, TitleTotals,
-        WorkspaceTotals,
+        AppDayTotals, AppWorkspaceTotals, FocusHeatCell, Storage, StorageStatus,
+        SystemTimelineInterval, TimelineInterval, TitleTotals, WorkspaceTotals,
     },
 };
 use anyhow::Result;
@@ -19,9 +20,11 @@ pub(super) struct DashboardData {
     pub(super) report: UsageReport,
     pub(super) lens_totals: [Option<(i64, i64)>; Lens::ALL.len()],
     pub(super) timeline_intervals: Vec<TimelineInterval>,
+    pub(super) system_intervals: Vec<SystemTimelineInterval>,
     pub(super) daily_apps: Vec<AppDayTotals>,
     pub(super) heatmap: Vec<FocusHeatCell>,
     pub(super) workspaces: Vec<WorkspaceTotals>,
+    pub(super) app_workspaces: Vec<AppWorkspaceTotals>,
     pub(super) titles: Vec<TitleTotals>,
     pub(super) stats: DashboardStats,
 }
@@ -142,13 +145,14 @@ impl DashboardStats {
 pub(super) fn load_dashboard_data(
     storage: &Storage,
     steam: &mut SteamResolver,
+    config: &Config,
     lens: Lens,
     offset: i32,
 ) -> Result<DashboardData> {
     let report = if lens == Lens::Day && offset == 0 {
-        report::usage_report(storage, steam, lens, lens.history_days())?
+        report::usage_report(storage, steam, config, lens, lens.history_days())?
     } else {
-        report::usage_report_for_period(storage, steam, lens, offset)?
+        report::usage_report_for_period(storage, steam, config, lens, offset)?
     };
     let lens_totals = load_lens_totals(storage, steam);
     let timeline_intervals = storage
@@ -159,25 +163,29 @@ pub(super) fn load_dashboard_data(
             interval
         })
         .collect();
-    let focus_intervals = storage
-        .focused_timeline_between(report.query_start_ts, report.query_end_ts)?
+    let system_intervals =
+        storage.system_timeline_between(report.query_start_ts, report.query_end_ts)?;
+    let rollups =
+        storage.focused_rollups_between(report.query_start_ts, report.query_end_ts, 8, 64)?;
+    let focus_intervals = rollups
+        .focus_intervals
         .into_iter()
         .map(|mut interval| {
             interval.app_class = steam.resolve_class(&interval.app_class);
             interval
         })
         .collect::<Vec<_>>();
-    let daily_apps = storage
-        .focused_app_daily_totals_between(report.query_start_ts, report.query_end_ts)?
+    let daily_apps = rollups
+        .daily_apps
         .into_iter()
         .map(|mut row| {
             row.app_class = steam.resolve_class(&row.app_class);
             row
         })
         .collect();
-    let heatmap = storage.focus_heatmap_between(report.query_start_ts, report.query_end_ts)?;
-    let workspaces =
-        storage.focused_workspace_totals_between(report.query_start_ts, report.query_end_ts, 8)?;
+    let heatmap = rollups.heatmap;
+    let workspaces = rollups.workspaces;
+    let app_workspaces = resolve_app_workspace_totals(rollups.app_workspaces, steam);
     let titles = storage
         .focused_title_totals_by_app_between(
             report.query_start_ts,
@@ -191,9 +199,11 @@ pub(super) fn load_dashboard_data(
         report,
         lens_totals,
         timeline_intervals,
+        system_intervals,
         daily_apps,
         heatmap,
         workspaces,
+        app_workspaces,
         titles,
         stats,
     })
@@ -234,6 +244,36 @@ fn resolve_title_totals(rows: Vec<TitleTotals>, steam: &mut SteamResolver) -> Ve
     rows
 }
 
+fn resolve_app_workspace_totals(
+    rows: Vec<AppWorkspaceTotals>,
+    steam: &mut SteamResolver,
+) -> Vec<AppWorkspaceTotals> {
+    let mut totals = BTreeMap::<(String, String), i64>::new();
+    for row in rows {
+        let app_class = steam.resolve_class(&row.app_class);
+        *totals.entry((row.workspace, app_class)).or_default() += row.focused_seconds.max(0);
+    }
+
+    let mut rows = totals
+        .into_iter()
+        .map(
+            |((workspace, app_class), focused_seconds)| AppWorkspaceTotals {
+                workspace,
+                app_class,
+                focused_seconds,
+            },
+        )
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .focused_seconds
+            .cmp(&left.focused_seconds)
+            .then_with(|| left.workspace.cmp(&right.workspace))
+            .then_with(|| left.app_class.cmp(&right.app_class))
+    });
+    rows
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct HealthSnapshot {
     pub(super) storage: StorageStatus,
@@ -265,12 +305,24 @@ impl HealthSnapshot {
             return "empty db".to_string();
         }
         format!(
-            "{} focus / {} open / {} idle / {} locked",
+            "{} focus / {} open / {} idle / {} locked / {} sleep / {} daemon",
             self.storage.focused_active,
             self.storage.open_active,
             self.storage.idle_active,
-            self.storage.locked_active
+            self.storage.locked_active,
+            self.storage.sleep_active,
+            self.storage.daemon_active
         )
+    }
+
+    pub(super) fn last_heartbeat_label(&self) -> String {
+        match self.storage.last_heartbeat_at {
+            Some(timestamp) => format!(
+                "{} ago",
+                super::widgets::compact_duration(Local::now().timestamp() - timestamp)
+            ),
+            None => "never".to_string(),
+        }
     }
 
     #[cfg(test)]

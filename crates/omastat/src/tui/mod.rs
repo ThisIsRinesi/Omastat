@@ -5,7 +5,7 @@ mod views;
 mod widgets;
 
 use self::app::{App, View};
-use crate::{report::Lens, storage::Storage};
+use crate::{config::Config, report::Lens, storage::Storage};
 use anyhow::Result;
 use crossterm::{
     cursor,
@@ -22,7 +22,7 @@ use std::{
 const CLOCK_REFRESH: Duration = Duration::from_secs(1);
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
 
-pub fn run(storage: Storage) -> Result<()> {
+pub fn run(storage: Storage, config: Config) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -30,7 +30,7 @@ pub fn run(storage: Storage) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    run_app(&mut terminal, &storage)
+    run_app(&mut terminal, &storage, config)
 }
 
 struct TerminalCleanup;
@@ -43,8 +43,12 @@ impl Drop for TerminalCleanup {
     }
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, storage: &Storage) -> Result<()> {
-    let mut app = App::load(storage)?;
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    storage: &Storage,
+    config: Config,
+) -> Result<()> {
+    let mut app = App::load(storage, config)?;
     let mut next_clock = Instant::now() + CLOCK_REFRESH;
 
     loop {
@@ -121,6 +125,7 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     views::render_header(frame, header, app, &theme);
     match app.view() {
         View::Overview => views::render_overview(frame, body, app, &theme),
+        View::Insights => views::render_insights(frame, body, app, &theme),
         View::Apps => views::render_apps(frame, body, app, &theme),
         View::Timeline => views::render_timeline(frame, body, app, &theme),
         View::System => views::render_system(frame, body, app, &theme),
@@ -146,11 +151,16 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 mod tests {
     use super::*;
     use crate::{
+        insights::{
+            Insight, InsightCategory, InsightConfidence, InsightEvidence, InsightKind,
+            InsightSupport, InsightTone,
+        },
         report::{self, UsageReport},
         steam::SteamResolver,
         storage::{
-            AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, StorageStatus,
-            TimelineInterval, TitleTotals, WorkspaceTotals,
+            AppDayTotals, AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, IntervalKind,
+            StorageStatus, SystemIntervalKind, SystemTimelineInterval, TimelineInterval,
+            TitleTotals, WorkspaceTotals,
         },
         tui::theme::Theme,
     };
@@ -168,6 +178,7 @@ mod tests {
         let rendered = rendered_text(&terminal);
         for label in [
             "Overview",
+            "Insights",
             "Apps",
             "Timeline",
             "System",
@@ -181,6 +192,54 @@ mod tests {
         ] {
             assert!(rendered.contains(label), "missing {label}");
         }
+    }
+
+    #[test]
+    fn insights_view_renders_grouped_list_and_selected_detail() {
+        let backend = TestBackend::new(128, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = sample_app(View::Insights);
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let rendered = rendered_text(&terminal);
+        for label in [
+            "Insights",
+            "Insight Details",
+            "Patterns",
+            "Focus Quality",
+            "Apps",
+            "System Signals",
+            "Top app share",
+            "Ghostty",
+            "Observed",
+        ] {
+            assert!(rendered.contains(label), "missing {label}");
+        }
+    }
+
+    #[test]
+    fn insights_view_empty_state_explains_insufficient_data() {
+        let backend = TestBackend::new(96, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = sample_app_with_insights(View::Insights, Vec::new());
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("No evaluated insights for this period yet"));
+        assert!(rendered.contains("broader lens"));
+    }
+
+    #[test]
+    fn insights_selection_does_not_move_selected_app() {
+        let mut app = sample_app(View::Insights);
+        app.selected = 2;
+
+        app.move_selection(1);
+
+        assert_eq!(app.selected, 2);
+        assert_eq!(app.selected_insight_index(), 1);
     }
 
     #[test]
@@ -206,8 +265,28 @@ mod tests {
     }
 
     #[test]
+    fn apps_view_renders_selected_app_facts() {
+        let backend = TestBackend::new(128, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = sample_app(View::Apps);
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let rendered = rendered_text(&terminal);
+        for label in [
+            "Typical hour",
+            "Longest block",
+            "Fragment",
+            "Workspace",
+            "code",
+        ] {
+            assert!(rendered.contains(label), "missing {label}");
+        }
+    }
+
+    #[test]
     fn timeline_view_renders_canvas_and_interval_table() {
-        let backend = TestBackend::new(112, 26);
+        let backend = TestBackend::new(112, 34);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = sample_app(View::Timeline);
 
@@ -215,8 +294,11 @@ mod tests {
 
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("Activity Canvas"));
+        assert!(rendered.contains("Excluded Gaps"));
         assert!(rendered.contains("Intervals"));
         assert!(rendered.contains("Ghostty"));
+        assert!(rendered.contains("System sleep"));
+        assert!(rendered.contains("Offline gap"));
     }
 
     #[test]
@@ -258,6 +340,10 @@ mod tests {
     }
 
     fn sample_app(view: View) -> App {
+        sample_app_with_insights(view, sample_insights())
+    }
+
+    fn sample_app_with_insights(view: View, insights: Vec<Insight>) -> App {
         let rows = vec![
             AppTotals {
                 app_class: "com.mitchellh.ghostty".to_string(),
@@ -283,6 +369,8 @@ mod tests {
                 open_seconds: (index as i64 + 2) * 500,
                 idle_seconds: index as i64 * 120,
                 locked_seconds: 0,
+                sleep_seconds: if index == 4 { 1800 } else { 0 },
+                unobserved_seconds: if index == 2 { 900 } else { 0 },
             })
             .collect::<Vec<_>>();
         let apps = report::app_breakdown(&rows, 6);
@@ -303,19 +391,13 @@ mod tests {
             total_open_seconds: report::open_total(&rows),
             total_idle_seconds: daily.iter().map(|day| day.idle_seconds).sum(),
             total_locked_seconds: 0,
+            total_sleep_seconds: daily.iter().map(|day| day.sleep_seconds).sum(),
+            total_unobserved_seconds: daily.iter().map(|day| day.unobserved_seconds).sum(),
             rows,
             apps,
             daily,
-            insights: vec![
-                report::InsightRow {
-                    label: "Top app".to_string(),
-                    value: "Ghostty - 8h".to_string(),
-                },
-                report::InsightRow {
-                    label: "Focus density".to_string(),
-                    value: "66%".to_string(),
-                },
-            ],
+            insights,
+            widget_insight: None,
         };
 
         let now = Local::now().timestamp();
@@ -331,6 +413,20 @@ mod tests {
                 app_class: "discord".to_string(),
                 started_at: now - 2000,
                 ended_at: now - 1200,
+            },
+        ];
+        let system_intervals = vec![
+            SystemTimelineInterval {
+                kind: SystemIntervalKind::Sleep,
+                source: Some("logind".to_string()),
+                started_at: now - 2300,
+                ended_at: now - 2100,
+            },
+            SystemTimelineInterval {
+                kind: SystemIntervalKind::Unobserved,
+                source: Some("daemon-recovery".to_string()),
+                started_at: now - 1800,
+                ended_at: now - 1600,
             },
         ];
         let daily_apps = vec![
@@ -375,6 +471,18 @@ mod tests {
                 focused_seconds: 3600,
             },
         ];
+        let app_workspaces = vec![
+            AppWorkspaceTotals {
+                workspace: "code".to_string(),
+                app_class: "com.mitchellh.ghostty".to_string(),
+                focused_seconds: 7 * 3600,
+            },
+            AppWorkspaceTotals {
+                workspace: "chat".to_string(),
+                app_class: "discord".to_string(),
+                focused_seconds: 3600,
+            },
+        ];
 
         App::from_parts_for_test(app::TestAppParts {
             view,
@@ -387,13 +495,110 @@ mod tests {
                 Some((500 * 3600, 900 * 3600)),
             ],
             timeline_intervals: timeline,
+            system_intervals,
             daily_apps,
             heatmap,
             workspaces,
+            app_workspaces,
             titles,
             storage: StorageStatus::default(),
             steam: SteamResolver::default(),
             theme: Theme::fallback(),
         })
+    }
+
+    fn sample_insights() -> Vec<Insight> {
+        vec![
+            sample_insight(
+                InsightKind::TopApp,
+                InsightCategory::Apps,
+                InsightTone::Neutral,
+                "Top app share",
+                "Ghostty - 8h (73%)",
+                "The app with the largest share of focused time in this period.",
+                InsightSupport {
+                    period_label: Some("Week of Jan 12, 2026".to_string()),
+                    app_class: Some("com.mitchellh.ghostty".to_string()),
+                    app_label: Some("Ghostty".to_string()),
+                    focused_seconds: Some(8 * 3600),
+                    open_seconds: Some(12 * 3600),
+                    share: Some(0.73),
+                    ..InsightSupport::default()
+                },
+            ),
+            sample_insight(
+                InsightKind::PeriodComparison,
+                InsightCategory::Patterns,
+                InsightTone::Positive,
+                "vs previous week",
+                "+2h",
+                "Compares focused time for this week with the previous week.",
+                InsightSupport {
+                    period_label: Some("Week of Jan 12, 2026".to_string()),
+                    comparison_label: Some("Previous week".to_string()),
+                    focused_seconds: Some(11 * 3600),
+                    comparison_seconds: Some(9 * 3600),
+                    delta_seconds: Some(2 * 3600),
+                    ..InsightSupport::default()
+                },
+            ),
+            sample_insight(
+                InsightKind::DeepWorkBlocks,
+                InsightCategory::FocusQuality,
+                InsightTone::Positive,
+                "Deep work blocks",
+                "4 blocks / 3h 20m",
+                "Counts focused blocks at or above the deep-work threshold.",
+                InsightSupport {
+                    block_count: Some(4),
+                    total_seconds: Some(12_000),
+                    longest_seconds: Some(3_600),
+                    median_seconds: Some(2_400),
+                    threshold_seconds: Some(25 * 60),
+                    ..InsightSupport::default()
+                },
+            ),
+            sample_insight(
+                InsightKind::UnobservedExcluded,
+                InsightCategory::SystemSignals,
+                InsightTone::Caution,
+                "Unobserved time excluded",
+                "15m excluded",
+                "Daemon downtime was excluded from focused time.",
+                InsightSupport {
+                    unobserved_seconds: Some(900),
+                    excluded_seconds: Some(900),
+                    share: Some(0.03),
+                    ..InsightSupport::default()
+                },
+            ),
+        ]
+    }
+
+    fn sample_insight(
+        kind: InsightKind,
+        category: InsightCategory,
+        tone: InsightTone,
+        title: &str,
+        value: &str,
+        explanation: &str,
+        supporting: InsightSupport,
+    ) -> Insight {
+        Insight {
+            kind,
+            category,
+            tone,
+            title: title.to_string(),
+            value: value.to_string(),
+            explanation: explanation.to_string(),
+            confidence: InsightConfidence::High,
+            evidence: InsightEvidence {
+                data_points: 7,
+                minimum_data_points: 2,
+                observed_focus_seconds: 11 * 3600,
+                observed_open_seconds: 21 * 3600,
+            },
+            supporting,
+        }
     }
 }

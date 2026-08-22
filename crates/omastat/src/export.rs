@@ -1,11 +1,20 @@
 use crate::{
+    config::Config,
+    insights::{Insight, InsightCategory, InsightTone},
     report::{self, Lens, UsageReport},
     steam::SteamResolver,
-    storage::{AppDayTotals, AppTotals, DayTotals, FocusHeatCell, Storage, TitleTotals},
+    storage::{
+        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, RawExportRows, Storage, TitleTotals,
+    },
 };
 use anyhow::Result;
 use chrono::{Datelike, Local, TimeZone, Timelike};
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 const PALETTE: [&str; 10] = [
     "#4de8ff", "#8f7aff", "#46d369", "#ffd166", "#ff667d", "#25c2a0", "#ff9f43", "#c084fc",
@@ -19,17 +28,55 @@ pub struct ExportOptions {
     pub title: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataExportScope {
+    All,
+    Raw,
+    Aggregate,
+}
+
+#[derive(Debug, Clone)]
+pub struct DataExportOptions {
+    pub lens: Lens,
+    pub offset: i32,
+    pub scope: DataExportScope,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DataExport {
+    pub schema_version: u32,
+    pub generated_at: i64,
+    pub timezone: String,
+    pub query_start_ts: i64,
+    pub query_end_ts: i64,
+    pub period: report::Period,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<AggregateExport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawExportRows>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AggregateExport {
+    pub app_totals: Vec<AppTotals>,
+    pub app_breakdown: Vec<report::AppBreakdown>,
+    pub daily_totals: Vec<DayTotals>,
+    pub insights: Vec<Insight>,
+}
+
 pub fn render_html(
     storage: &Storage,
     steam: &mut SteamResolver,
+    config: &Config,
     options: ExportOptions,
 ) -> Result<String> {
-    let report = report::usage_report_for_period(storage, steam, options.lens, options.offset)?;
+    let report =
+        report::usage_report_for_period(storage, steam, config, options.lens, options.offset)?;
     let (start_ts, end_ts) = (report.query_start_ts, report.query_end_ts);
     let titles = storage.focused_title_totals_between(start_ts, end_ts, 12)?;
     let daily_apps = storage.focused_app_daily_totals_between(start_ts, end_ts)?;
     let heatmap = storage.focus_heatmap_between(start_ts, end_ts)?;
-    let lens_cards = lens_cards(storage, steam)?;
+    let lens_cards = lens_cards(storage, steam, config)?;
     let page_title = options
         .title
         .unwrap_or_else(|| format!("Omastat Replay - {}", report.period.label));
@@ -44,11 +91,172 @@ pub fn render_html(
     ))
 }
 
-fn lens_cards(storage: &Storage, steam: &mut SteamResolver) -> Result<Vec<UsageReport>> {
+pub fn build_data_export(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    options: DataExportOptions,
+) -> Result<DataExport> {
+    let report =
+        report::usage_report_for_period(storage, steam, config, options.lens, options.offset)?;
+    let raw = matches!(options.scope, DataExportScope::All | DataExportScope::Raw)
+        .then(|| storage.raw_export_between(report.query_start_ts, report.query_end_ts))
+        .transpose()?;
+    let aggregate = matches!(
+        options.scope,
+        DataExportScope::All | DataExportScope::Aggregate
+    )
+    .then(|| AggregateExport {
+        app_totals: report.rows.clone(),
+        app_breakdown: report.apps.clone(),
+        daily_totals: report.daily.clone(),
+        insights: report.insights.clone(),
+    });
+
+    Ok(DataExport {
+        schema_version: 1,
+        generated_at: report.generated_at,
+        timezone: Local::now().offset().to_string(),
+        query_start_ts: report.query_start_ts,
+        query_end_ts: report.query_end_ts,
+        period: report.period,
+        aggregate,
+        raw,
+    })
+}
+
+pub fn write_data_export_csv(export: &DataExport, output_dir: &Path) -> Result<()> {
+    fs::create_dir_all(output_dir)?;
+    fs::write(
+        output_dir.join("metadata.json"),
+        serde_json::to_string_pretty(&ExportMetadata::from(export))?,
+    )?;
+
+    if let Some(aggregate) = &export.aggregate {
+        write_csv(output_dir.join("app_totals.csv"), &aggregate.app_totals)?;
+        write_csv(
+            output_dir.join("app_breakdown.csv"),
+            &aggregate.app_breakdown,
+        )?;
+        write_csv(output_dir.join("daily_totals.csv"), &aggregate.daily_totals)?;
+        let insight_rows = aggregate
+            .insights
+            .iter()
+            .map(InsightCsvRow::from)
+            .collect::<Vec<_>>();
+        write_csv(output_dir.join("insights.csv"), &insight_rows)?;
+    }
+
+    if let Some(raw) = &export.raw {
+        write_csv(output_dir.join("raw_intervals.csv"), &raw.intervals)?;
+        write_csv(
+            output_dir.join("raw_session_intervals.csv"),
+            &raw.session_intervals,
+        )?;
+        write_csv(
+            output_dir.join("raw_system_intervals.csv"),
+            &raw.system_intervals,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn lens_cards(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+) -> Result<Vec<UsageReport>> {
     Lens::ALL
         .into_iter()
-        .map(|lens| report::usage_report_for_period(storage, steam, lens, 0))
+        .map(|lens| report::usage_report_for_period(storage, steam, config, lens, 0))
         .collect()
+}
+
+#[derive(Debug, Serialize)]
+struct ExportMetadata {
+    schema_version: u32,
+    generated_at: i64,
+    timezone: String,
+    query_start_ts: i64,
+    query_end_ts: i64,
+    period_label: String,
+    period_start_date: Option<String>,
+    period_end_date: Option<String>,
+}
+
+impl From<&DataExport> for ExportMetadata {
+    fn from(export: &DataExport) -> Self {
+        Self {
+            schema_version: export.schema_version,
+            generated_at: export.generated_at,
+            timezone: export.timezone.clone(),
+            query_start_ts: export.query_start_ts,
+            query_end_ts: export.query_end_ts,
+            period_label: export.period.label.clone(),
+            period_start_date: export.period.start_date.clone(),
+            period_end_date: export.period.end_date.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct InsightCsvRow {
+    kind: String,
+    category: String,
+    tone: String,
+    confidence: String,
+    title: String,
+    value: String,
+    explanation: String,
+    data_points: usize,
+    minimum_data_points: usize,
+    observed_focus_seconds: i64,
+    observed_open_seconds: i64,
+    app_class: Option<String>,
+    app_label: Option<String>,
+    workspace: Option<String>,
+    focused_seconds: Option<i64>,
+    open_seconds: Option<i64>,
+    excluded_seconds: Option<i64>,
+    share: Option<f64>,
+}
+
+impl From<&Insight> for InsightCsvRow {
+    fn from(insight: &Insight) -> Self {
+        Self {
+            kind: serde_json::to_value(insight.kind)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{:?}", insight.kind)),
+            category: insight_category_label(insight.category).to_string(),
+            tone: insight_tone_label(insight.tone).to_string(),
+            confidence: format!("{:?}", insight.confidence).to_lowercase(),
+            title: insight.title.clone(),
+            value: insight.value.clone(),
+            explanation: insight.explanation.clone(),
+            data_points: insight.evidence.data_points,
+            minimum_data_points: insight.evidence.minimum_data_points,
+            observed_focus_seconds: insight.evidence.observed_focus_seconds,
+            observed_open_seconds: insight.evidence.observed_open_seconds,
+            app_class: insight.supporting.app_class.clone(),
+            app_label: insight.supporting.app_label.clone(),
+            workspace: insight.supporting.workspace.clone(),
+            focused_seconds: insight.supporting.focused_seconds,
+            open_seconds: insight.supporting.open_seconds,
+            excluded_seconds: insight.supporting.excluded_seconds,
+            share: insight.supporting.share,
+        }
+    }
+}
+
+fn write_csv<T: Serialize>(path: PathBuf, rows: &[T]) -> Result<()> {
+    let mut writer = csv::Writer::from_path(path)?;
+    for row in rows {
+        writer.serialize(row)?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn document(
@@ -64,6 +272,8 @@ fn document(
     let open = report::format_duration(report.total_open_seconds);
     let idle = report::format_duration(report.total_idle_seconds);
     let locked = report::format_duration(report.total_locked_seconds);
+    let sleep = report::format_duration(report.total_sleep_seconds);
+    let unobserved = report::format_duration(report.total_unobserved_seconds);
     let density = report::percent(ratio(
         report.total_focused_seconds,
         report.total_open_seconds.max(1),
@@ -87,6 +297,7 @@ fn document(
     let peak_day_duration = peak_day
         .map(|day| report::format_duration(day.focused_seconds))
         .unwrap_or_else(|| "no focus".to_string());
+    let insights_html = insight_rows(&report.insights);
     let mut number_card_rows = vec![
         NumberCard::new("Open time", &open, "tracked beside focus"),
         NumberCard::new("Apps", &app_count_label, "with focused time"),
@@ -105,6 +316,16 @@ fn document(
             "Locked excluded",
             &locked,
             "session locked",
+        ));
+    }
+    if report.total_sleep_seconds > 0 {
+        number_card_rows.push(NumberCard::new("Sleep excluded", &sleep, "system sleep"));
+    }
+    if report.total_unobserved_seconds > 0 {
+        number_card_rows.push(NumberCard::new(
+            "Unobserved excluded",
+            &unobserved,
+            "daemon offline",
         ));
     }
     let number_cards_html = number_cards(&number_card_rows);
@@ -200,6 +421,16 @@ fn document(
     <article class="panel">
       <div class="panel-heading compact">
         <div>
+          <span class="kicker">Evaluated facts</span>
+          <h2>Period insights</h2>
+        </div>
+      </div>
+      {insights}
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading compact">
+        <div>
           <span class="kicker">Captured titles</span>
           <h2>Captured moments</h2>
         </div>
@@ -239,6 +470,7 @@ fn document(
         constellation = app_constellation(&report.rows, report.total_focused_seconds),
         heatmap_chart = heatmap_chart(heatmap),
         radar = behavior_radar(report, heatmap),
+        insights = insights_html,
         title_rows = title_rows(titles),
         lens_cards = lens_cards_html(lens_cards),
     )
@@ -393,7 +625,7 @@ h2 {
 }
 .grid-main { grid-template-columns: minmax(0, 1.5fr) minmax(330px, 0.7fr); }
 .grid-secondary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.grid-tertiary { grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1fr) minmax(300px, 0.9fr); }
+.grid-tertiary { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .panel {
   min-width: 0;
   padding: 18px;
@@ -442,7 +674,7 @@ h2 {
   border-radius: 6px;
   box-shadow: 0 0 16px currentColor;
 }
-.ranked-list, .title-list, .lens-list {
+.ranked-list, .title-list, .lens-list, .insight-list {
   display: grid;
   gap: 12px;
 }
@@ -494,6 +726,36 @@ h2 {
   border-bottom: 1px solid rgba(255,255,255,0.08);
 }
 .title-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.insight-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.insight-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.insight-title {
+  margin-top: 2px;
+  font-weight: 950;
+}
+.insight-explanation {
+  margin-top: 5px;
+  color: #dfd1c3;
+  font-size: 0.82rem;
+  line-height: 1.3;
+}
+.insight-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+.insight-value {
+  color: var(--cyan);
+  font-weight: 950;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
 .lens-card {
   display: grid;
   grid-template-columns: 76px 1fr;
@@ -1003,6 +1265,59 @@ fn title_rows(titles: &[TitleTotals]) -> String {
     format!(r#"<div class="title-list">{}</div>"#, rows.join("\n"))
 }
 
+fn insight_rows(insights: &[Insight]) -> String {
+    if insights.is_empty() {
+        return r#"<div class="insight-list">No evaluated insights for this period yet.</div>"#
+            .to_string();
+    }
+
+    let rows = insights
+        .iter()
+        .take(6)
+        .map(|insight| {
+            format!(
+                r#"<div class="insight-row">
+  <div>
+    <div class="insight-meta">{meta}</div>
+    <div class="insight-title">{title}</div>
+    <div class="insight-explanation">{explanation}</div>
+  </div>
+  <div class="insight-value">{value}</div>
+</div>"#,
+                meta = escape_html(&format!(
+                    "{} / {}",
+                    insight_category_label(insight.category),
+                    insight_tone_label(insight.tone)
+                )),
+                title = escape_html(&insight.title),
+                explanation = escape_html(&insight.explanation),
+                value = escape_html(&insight.value),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    format!(r#"<div class="insight-list">{}</div>"#, rows.join("\n"))
+}
+
+fn insight_category_label(category: InsightCategory) -> &'static str {
+    match category {
+        InsightCategory::Patterns => "Patterns",
+        InsightCategory::FocusQuality => "Focus quality",
+        InsightCategory::Apps => "Apps",
+        InsightCategory::SystemSignals => "System signals",
+    }
+}
+
+fn insight_tone_label(tone: InsightTone) -> &'static str {
+    match tone {
+        InsightTone::Positive => "Positive",
+        InsightTone::Negative => "Negative",
+        InsightTone::Neutral => "Neutral",
+        InsightTone::Info => "Info",
+        InsightTone::Caution => "Caution",
+    }
+}
+
 fn lens_cards_html(reports: &[UsageReport]) -> String {
     let rows = reports
         .iter()
@@ -1053,6 +1368,8 @@ fn visible_chart_days(days: &[DayTotals]) -> Vec<&DayTotals> {
                 || day.open_seconds > 0
                 || day.idle_seconds > 0
                 || day.locked_seconds > 0
+                || day.sleep_seconds > 0
+                || day.unobserved_seconds > 0
         })
         .collect()
 }
@@ -1158,7 +1475,10 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportOptions, render_html};
+    use super::{
+        DataExportOptions, DataExportScope, ExportOptions, build_data_export, render_html,
+        write_data_export_csv,
+    };
     use crate::{
         config::Config,
         report::Lens,
@@ -1190,6 +1510,7 @@ mod tests {
         let html = render_html(
             &storage,
             &mut steam,
+            &config,
             ExportOptions {
                 lens: Lens::Day,
                 offset: 0,
@@ -1200,8 +1521,71 @@ mod tests {
 
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("Focus by day"));
+        assert!(html.contains("Period insights"));
         assert!(html.contains("Week x hour heatmap"));
         assert!(html.contains("App constellation"));
         assert!(html.contains("Docs &lt;Dashboard&gt;"));
+    }
+
+    #[test]
+    fn builds_json_data_export_with_raw_and_aggregate_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+        let focused = storage
+            .start_interval(IntervalKind::Focused, "firefox", None, Some("Docs"), 100)
+            .unwrap();
+        storage.close_interval(focused, 220).unwrap();
+
+        let mut steam = SteamResolver::default();
+        let export = build_data_export(
+            &storage,
+            &mut steam,
+            &config,
+            DataExportOptions {
+                lens: Lens::Life,
+                offset: 0,
+                scope: DataExportScope::All,
+            },
+        )
+        .unwrap();
+
+        assert!(export.aggregate.as_ref().unwrap().app_totals.len() == 1);
+        assert!(export.raw.as_ref().unwrap().intervals.len() == 1);
+        let json = serde_json::to_value(&export).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert!(json["raw"]["intervals"][0]["local_start"].is_string());
+    }
+
+    #[test]
+    fn writes_csv_data_export_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+        let focused = storage
+            .start_interval(IntervalKind::Focused, "firefox", None, None, 100)
+            .unwrap();
+        storage.close_interval(focused, 200).unwrap();
+
+        let mut steam = SteamResolver::default();
+        let export = build_data_export(
+            &storage,
+            &mut steam,
+            &config,
+            DataExportOptions {
+                lens: Lens::Life,
+                offset: 0,
+                scope: DataExportScope::All,
+            },
+        )
+        .unwrap();
+        let out = dir.path().join("csv");
+        write_data_export_csv(&export, &out).unwrap();
+
+        assert!(out.join("metadata.json").exists());
+        assert!(out.join("app_totals.csv").exists());
+        assert!(out.join("raw_intervals.csv").exists());
     }
 }

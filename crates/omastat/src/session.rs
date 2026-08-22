@@ -1,10 +1,12 @@
 use anyhow::{Context, Result, anyhow};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use std::{env, path::PathBuf};
 use tokio::{
     process::Command,
     time::{Duration, timeout},
 };
+use zbus::{Connection, Proxy, proxy::SignalStream, zvariant::OwnedFd};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatus {
@@ -13,6 +15,18 @@ pub struct SessionStatus {
     pub stay_awake: bool,
     pub audio_playing: bool,
     pub source: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepEvent {
+    Preparing,
+    Resumed,
+}
+
+pub struct SleepEventMonitor {
+    proxy: Proxy<'static>,
+    stream: SignalStream<'static>,
+    delay_inhibitor: Option<OwnedFd>,
 }
 
 impl Default for SessionStatus {
@@ -32,6 +46,98 @@ impl SessionStatus {
         (pause_on_session_locked && self.locked)
             || (pause_on_session_idle && self.idle && !self.audio_playing)
     }
+}
+
+impl SleepEvent {
+    fn from_logind_active(active: bool) -> Self {
+        if active {
+            Self::Preparing
+        } else {
+            Self::Resumed
+        }
+    }
+}
+
+impl SleepEventMonitor {
+    pub async fn connect() -> Result<Self> {
+        let connection = Connection::system()
+            .await
+            .context("failed to connect to system D-Bus")?;
+        let proxy = Proxy::new_owned(
+            connection,
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )
+        .await
+        .context("failed to create logind manager proxy")?;
+        let stream = proxy
+            .receive_signal("PrepareForSleep")
+            .await
+            .context("failed to subscribe to logind PrepareForSleep")?;
+        let delay_inhibitor = match take_sleep_delay_inhibitor(&proxy).await {
+            Ok(inhibitor) => Some(inhibitor),
+            Err(error) => {
+                tracing::debug!(
+                    "logind sleep delay inhibitor unavailable; monitoring sleep passively: {error:#}"
+                );
+                None
+            }
+        };
+
+        Ok(Self {
+            proxy,
+            stream,
+            delay_inhibitor,
+        })
+    }
+
+    pub async fn next_event(&mut self) -> Result<Option<SleepEvent>> {
+        let Some(message) = self.stream.next().await else {
+            return Ok(None);
+        };
+        let active: bool = message
+            .body()
+            .deserialize()
+            .context("failed to parse logind PrepareForSleep signal")?;
+        Ok(Some(SleepEvent::from_logind_active(active)))
+    }
+
+    pub async fn mark_handled(&mut self, event: SleepEvent) -> Result<()> {
+        match event {
+            SleepEvent::Preparing => {
+                self.delay_inhibitor.take();
+            }
+            SleepEvent::Resumed => {
+                if self.delay_inhibitor.is_none() {
+                    match take_sleep_delay_inhibitor(&self.proxy).await {
+                        Ok(inhibitor) => self.delay_inhibitor = Some(inhibitor),
+                        Err(error) => {
+                            tracing::debug!(
+                                "failed to reacquire logind sleep delay inhibitor: {error:#}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn take_sleep_delay_inhibitor(proxy: &Proxy<'_>) -> Result<OwnedFd> {
+    proxy
+        .call(
+            "Inhibit",
+            &(
+                "sleep",
+                "Omastat",
+                "Record sleep interval boundaries before suspend",
+                "delay",
+            ),
+        )
+        .await
+        .context("failed to acquire logind sleep delay inhibitor")
 }
 
 pub async fn status() -> Result<SessionStatus> {
@@ -169,7 +275,7 @@ struct OmarchyIdleStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionStatus, parse_loginctl_status, parse_omarchy_idle_status,
+        SessionStatus, SleepEvent, parse_loginctl_status, parse_omarchy_idle_status,
         parse_pactl_sink_inputs_playing,
     };
 
@@ -185,6 +291,12 @@ mod tests {
                 source: "loginctl",
             }
         );
+    }
+
+    #[test]
+    fn maps_logind_sleep_signal_boolean() {
+        assert_eq!(SleepEvent::from_logind_active(true), SleepEvent::Preparing);
+        assert_eq!(SleepEvent::from_logind_active(false), SleepEvent::Resumed);
     }
 
     #[test]

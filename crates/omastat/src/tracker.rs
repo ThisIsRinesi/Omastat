@@ -3,7 +3,7 @@ use crate::{
     hyprland::{self, Event, EventStream, Snapshot, Window},
     identity, session,
     steam::SteamResolver,
-    storage::{IntervalKind, IntervalMetadata, SessionIntervalKind, Storage},
+    storage::{IntervalKind, IntervalMetadata, SessionIntervalKind, Storage, SystemIntervalKind},
     terminal,
 };
 use anyhow::Result;
@@ -16,6 +16,7 @@ pub struct Tracker {
     config: Config,
     steam: SteamResolver,
     state: TrackerState,
+    daemon_run_id: Option<i64>,
 }
 
 #[derive(Default)]
@@ -27,6 +28,7 @@ struct TrackerState {
     focused: Option<FocusedInterval>,
     focus_paused: bool,
     session_pause: Option<SessionPauseInterval>,
+    sleep_pause: Option<SleepPauseInterval>,
 }
 
 struct FocusedInterval {
@@ -43,6 +45,10 @@ struct SessionPauseInterval {
     interval_id: i64,
 }
 
+struct SleepPauseInterval {
+    interval_id: i64,
+}
+
 impl Tracker {
     pub fn new(storage: Storage, config: Config) -> Self {
         Self {
@@ -50,11 +56,19 @@ impl Tracker {
             config,
             steam: SteamResolver::default(),
             state: TrackerState::default(),
+            daemon_run_id: None,
         }
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        self.close_stale_runtime_intervals()?;
+        let daemon_start = self.storage.start_daemon_run(unix_now())?;
+        self.daemon_run_id = Some(daemon_start.run_id);
+        if let Some(recovery) = daemon_start.recovery {
+            info!(
+                "recovered stale daemon state at {}; excluded {}s of unobserved time",
+                recovery.closed_at, recovery.unobserved_seconds
+            );
+        }
         self.refresh_session_status().await?;
         self.recover_startup_state().await?;
 
@@ -78,6 +92,15 @@ impl Tracker {
         ));
         terminal_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
         terminal_timer.tick().await;
+        let mut heartbeat_timer = time::interval(Duration::from_secs(
+            self.config.tracking.heartbeat_seconds.max(15),
+        ));
+        heartbeat_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        heartbeat_timer.tick().await;
+        let mut sleep_monitor = self.connect_sleep_monitor().await;
+        let mut sleep_monitor_retry = time::interval(Duration::from_secs(60));
+        sleep_monitor_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        sleep_monitor_retry.tick().await;
 
         loop {
             let mut stream = match EventStream::connect().await {
@@ -87,6 +110,7 @@ impl Tracker {
                 }
                 Err(error) => {
                     warn!("failed to connect Hyprland event stream: {error:#}");
+                    self.record_heartbeat()?;
                     time::sleep(reconnect_backoff).await;
                     reconnect_backoff = (reconnect_backoff * 2).min(Duration::from_secs(30));
                     continue;
@@ -120,6 +144,33 @@ impl Tracker {
                     _ = terminal_timer.tick() => {
                         self.refresh_terminal_focus().await?;
                     }
+                    _ = heartbeat_timer.tick() => {
+                        self.record_heartbeat()?;
+                    }
+                    sleep_event = next_sleep_event(&mut sleep_monitor) => {
+                        match sleep_event {
+                            Ok(Some(event)) => {
+                                self.apply_sleep_event(event).await?;
+                                if let Some(monitor) = sleep_monitor.as_mut()
+                                    && let Err(error) = monitor.mark_handled(event).await
+                                {
+                                    warn!("failed to update logind sleep inhibitor: {error:#}");
+                                    sleep_monitor = None;
+                                }
+                            }
+                            Ok(None) => {
+                                warn!("logind sleep monitor disconnected");
+                                sleep_monitor = None;
+                            }
+                            Err(error) => {
+                                warn!("logind sleep monitor failed: {error:#}");
+                                sleep_monitor = None;
+                            }
+                        }
+                    }
+                    _ = sleep_monitor_retry.tick(), if sleep_monitor.is_none() => {
+                        sleep_monitor = self.connect_sleep_monitor().await;
+                    }
                     _ = &mut ctrl_c => {
                         self.shutdown()?;
                         return Ok(());
@@ -143,17 +194,6 @@ impl Tracker {
                 Ok(())
             }
         }
-    }
-
-    fn close_stale_runtime_intervals(&mut self) -> Result<()> {
-        let now = unix_now();
-        for interval in self.storage.unclosed_intervals()? {
-            if interval.kind == IntervalKind::Focused {
-                self.storage.close_interval(interval.id, now)?;
-            }
-        }
-        self.storage.close_session_intervals(now)?;
-        Ok(())
     }
 
     async fn apply_event(&mut self, event: Event) -> Result<()> {
@@ -249,12 +289,14 @@ impl Tracker {
 
         let focus_paused = self.state.focus_paused;
         let session_pause = self.state.session_pause.take();
+        let sleep_pause = self.state.sleep_pause.take();
         self.state = TrackerState {
             windows,
             app_open_counts,
             active_address,
             focus_paused,
             session_pause,
+            sleep_pause,
             ..TrackerState::default()
         };
 
@@ -409,6 +451,9 @@ impl Tracker {
     }
 
     async fn refresh_session_status(&mut self) -> Result<()> {
+        if self.state.sleep_pause.is_some() {
+            return Ok(());
+        }
         match session::status().await {
             Ok(status) => {
                 let pause_kind = self.session_pause_kind(&status);
@@ -429,6 +474,56 @@ impl Tracker {
             return Some(SessionIntervalKind::Idle);
         }
         None
+    }
+
+    async fn apply_sleep_event(&mut self, event: session::SleepEvent) -> Result<()> {
+        let now = unix_now();
+        match event {
+            session::SleepEvent::Preparing => self.start_sleep_at(now)?,
+            session::SleepEvent::Resumed => {
+                self.finish_sleep_at(now)?;
+                self.refresh_session_status().await?;
+                self.recover_startup_state().await?;
+            }
+        }
+        self.record_heartbeat()?;
+        Ok(())
+    }
+
+    async fn connect_sleep_monitor(&self) -> Option<session::SleepEventMonitor> {
+        match session::SleepEventMonitor::connect().await {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                debug!("logind sleep monitor unavailable: {error:#}");
+                None
+            }
+        }
+    }
+
+    fn start_sleep_at(&mut self, now: i64) -> Result<()> {
+        if self.state.sleep_pause.is_some() {
+            return Ok(());
+        }
+
+        self.storage.close_observed_intervals(now)?;
+        let interval_id =
+            self.storage
+                .start_system_interval(SystemIntervalKind::Sleep, Some("logind"), now)?;
+        self.state = TrackerState {
+            focus_paused: true,
+            sleep_pause: Some(SleepPauseInterval { interval_id }),
+            ..TrackerState::default()
+        };
+        Ok(())
+    }
+
+    fn finish_sleep_at(&mut self, now: i64) -> Result<()> {
+        if let Some(previous) = self.state.sleep_pause.take() {
+            self.storage
+                .close_system_interval(previous.interval_id, now)?;
+        }
+        self.state.focus_paused = false;
+        Ok(())
     }
 
     async fn refresh_window_details(&mut self, address: &str) -> Result<()> {
@@ -491,6 +586,7 @@ impl Tracker {
             .then_some(window.title.as_deref())
             .flatten()
             .and_then(|title| identity::clean_window_title(title, app_class))
+            .filter(|title| self.config.title_allowed(app_class, title))
     }
 
     fn sync_focused_interval(&mut self) -> Result<()> {
@@ -575,6 +671,16 @@ impl Tracker {
             self.storage
                 .close_session_interval(previous.interval_id, now)?;
         }
+        if let Some(run_id) = self.daemon_run_id.take() {
+            self.storage.finish_daemon_run(run_id, now)?;
+        }
+        Ok(())
+    }
+
+    fn record_heartbeat(&mut self) -> Result<()> {
+        if let Some(run_id) = self.daemon_run_id {
+            self.storage.record_daemon_heartbeat(run_id, unix_now())?;
+        }
         Ok(())
     }
 }
@@ -613,6 +719,15 @@ async fn recv_terminate_signal(signal: &mut Option<TerminateSignal>) {
     }
 
     std::future::pending::<()>().await;
+}
+
+async fn next_sleep_event(
+    monitor: &mut Option<session::SleepEventMonitor>,
+) -> Result<Option<session::SleepEvent>> {
+    match monitor {
+        Some(monitor) => monitor.next_event().await,
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(test)]
@@ -813,6 +928,37 @@ mod tests {
     }
 
     #[test]
+    fn focused_title_capture_respects_allow_and_block_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.privacy.title_capture = TitleCapture::All;
+        config.privacy.title_allowlist = vec!["issue".to_string()];
+        config.privacy.title_blocklist = vec!["secret".to_string()];
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .open_window(window_with_title(
+                "0x1",
+                "firefox",
+                "Secret Issue - Mozilla Firefox",
+            ))
+            .unwrap();
+        tracker.set_active_window(Some("0x1")).unwrap();
+        tracker
+            .open_window(window_with_title(
+                "0x1",
+                "firefox",
+                "Issue #2 - Mozilla Firefox",
+            ))
+            .unwrap();
+        tracker.sync_focused_interval().unwrap();
+
+        let titles = tracker.storage.focused_titles_for_tests().unwrap();
+        assert_eq!(titles, vec!["Issue #2"]);
+    }
+
+    #[test]
     fn steam_app_classes_use_readable_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
@@ -878,6 +1024,50 @@ mod tests {
         let totals = tracker.storage.session_totals_between(0, 300).unwrap();
         assert_eq!(totals.idle_seconds, 120);
         assert_eq!(totals.locked_seconds, 0);
+    }
+
+    #[test]
+    fn sleep_pause_splits_live_usage_and_records_sleep_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .apply_startup_snapshot(
+                Snapshot {
+                    active_address: Some("0x1".to_string()),
+                    windows: vec![window("0x1", "firefox")],
+                },
+                100,
+            )
+            .unwrap();
+        assert!(tracker.state.focused.is_some());
+        assert_eq!(tracker.state.open_interval_ids.len(), 1);
+
+        tracker.start_sleep_at(160).unwrap();
+        assert!(tracker.state.focused.is_none());
+        assert!(tracker.state.open_interval_ids.is_empty());
+        assert!(tracker.state.sleep_pause.is_some());
+
+        tracker.finish_sleep_at(280).unwrap();
+        tracker
+            .apply_startup_snapshot(
+                Snapshot {
+                    active_address: Some("0x1".to_string()),
+                    windows: vec![window("0x1", "firefox")],
+                },
+                280,
+            )
+            .unwrap();
+
+        let rows = tracker.storage.totals_between(100, 340).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].focused_seconds, 120);
+        assert_eq!(rows[0].open_seconds, 120);
+        let totals = tracker.storage.session_totals_between(100, 340).unwrap();
+        assert_eq!(totals.sleep_seconds, 120);
+        assert_eq!(totals.unobserved_seconds, 0);
     }
 
     #[test]

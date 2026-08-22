@@ -1,5 +1,5 @@
 use super::theme::Theme;
-use crate::report::{self, AppBreakdown, Lens};
+use crate::report::{AppBreakdown, Lens};
 use chrono::{Local, TimeZone};
 use ratatui::{
     Frame,
@@ -191,12 +191,4 @@ pub(super) fn app_share_line(apps: &[AppBreakdown], width: usize, theme: &Theme)
         ));
     }
     Line::from(spans)
-}
-
-pub(super) fn app_label(app_class: &str) -> String {
-    if app_class == "Other" {
-        "Other".to_string()
-    } else {
-        report::app_label(app_class)
-    }
 }

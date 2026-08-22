@@ -9,7 +9,13 @@ cargo run -p omastat --bin omastatd
 cargo run -p omastat -- today
 cargo run -p omastat -- --json today
 cargo run -p omastat -- summary
+cargo run -p omastat -- insights --lens week --json
 cargo run -p omastat -- export --lens month --output /tmp/omastat-export.html
+cargo run -p omastat -- export-data --lens week --format csv --output /tmp/omastat-export-data
+cargo run -p omastat -- goals --lens week
+cargo run -p omastat -- digest --lens week
+cargo run -p omastat -- widget-insight --json
+cargo run -p omastat -- purge --older-than-days 90 --dry-run
 cargo run -p omastat -- tui
 ```
 
@@ -55,3 +61,9 @@ the widget directly from GitHub with `omarchy plugin add`.
 
 Keep the root manifest and packaged manifest in sync, except for their
 `entryPoints.barWidget` paths.
+
+Check that the manifests remain synchronized with:
+
+```bash
+cargo test -p omastat --test manifest_sync
+```

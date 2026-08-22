@@ -9,6 +9,8 @@ Omarchy Quattro bar widget.
 
 - Focused and open time by application.
 - Idle, locked, asleep, and desktop/portal focus are excluded from focused time.
+- Daemon outages and restart recovery gaps are marked as unobserved excluded
+  time instead of being counted as active focus.
 - Active audio playback keeps idle video or music sessions counted as active
   focus.
 - Terminal windows can be attributed to the foreground process, such as `btop`
@@ -17,8 +19,16 @@ Omarchy Quattro bar widget.
 - Omarchy Quattro widget with today's total, app breakdown, 7-day patterns, and
   a shortcut into the TUI.
 - Rich terminal dashboard with app composition pies, focus-flow charts, hourly
-  peaks, heatmaps, workspace focus, focus block stats, and idle/locked signal
-  gauges.
+  peaks, heatmaps, workspace focus, focus block stats, and idle, locked, sleep,
+  and unobserved signal gauges.
+- Structured insights, goals, budgets, weekly digests, and one-line widget
+  facts reuse the same local analysis engine.
+- App aliases and categories can be configured locally for cleaner labels and
+  productive/distracting/custom budget groups.
+- Raw and aggregate JSON/CSV exports include local timestamps, app totals,
+  daily totals, insights, and excluded system gaps.
+- Retention purges support dry-run review, cutoff trimming, and optional
+  SQLite vacuuming.
 - TUI colors follow Noctalia, skwd-wall/Matugen, or the current Omarchy theme
   when those files are present.
 - Static HTML export for shareable day, week, month, year, and lifetime replays.
@@ -66,8 +76,12 @@ toggle icon-only mode.
 omastat today
 omastat week
 omastat summary
+omastat insights --json
+omastat goals --lens week
+omastat digest --lens week
 omastat tui
 omastat export --lens month --output ~/Pictures/omastat-month.html
+omastat export-data --lens month --format csv --output ~/omastat-month-csv
 ```
 
 More command examples and configuration notes are in [docs/USAGE.md](docs/USAGE.md).
@@ -85,7 +99,9 @@ workspace/monitor context when Hyprland provides it. It does not store window
 titles, page names, file names, screenshots, or browser history.
 
 Optional title capture can be enabled explicitly in the config file when richer
-replay labels are worth the extra local data. See [docs/USAGE.md](docs/USAGE.md).
+replay labels are worth the extra local data. Optional title allowlists and
+blocklists can restrict captured titles further, and `omastat purge` can remove
+older local telemetry after a dry-run review. See [docs/USAGE.md](docs/USAGE.md).
 
 ## Development
 

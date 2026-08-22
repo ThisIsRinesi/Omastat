@@ -1,7 +1,11 @@
 use crate::{
+    config::Config,
     identity,
+    insights::{
+        self, AnalysisComparisonPeriod, AnalysisInput, AnalysisLens, AnalysisPeriod, Insight,
+    },
     steam::SteamResolver,
-    storage::{AppTotals, DayTotals, Storage},
+    storage::{AppTotals, AppWorkspaceTotals, DayTotals, Storage},
 };
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
@@ -21,15 +25,10 @@ pub enum Lens {
 pub struct AppBreakdown {
     pub app_class: String,
     pub label: String,
+    pub category: String,
     pub focused_seconds: i64,
     pub open_seconds: i64,
     pub share: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct InsightRow {
-    pub label: String,
-    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,10 +52,44 @@ pub struct UsageReport {
     pub total_open_seconds: i64,
     pub total_idle_seconds: i64,
     pub total_locked_seconds: i64,
+    pub total_sleep_seconds: i64,
+    pub total_unobserved_seconds: i64,
     pub rows: Vec<AppTotals>,
     pub apps: Vec<AppBreakdown>,
     pub daily: Vec<DayTotals>,
-    pub insights: Vec<InsightRow>,
+    pub insights: Vec<Insight>,
+    pub widget_insight: Option<WidgetInsight>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InsightsReport {
+    pub schema_version: u32,
+    pub generated_at: i64,
+    pub query_start_ts: i64,
+    pub query_end_ts: i64,
+    pub lens: Lens,
+    pub lens_label: &'static str,
+    pub period: Period,
+    pub totals: InsightsTotals,
+    pub insights: Vec<Insight>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InsightsTotals {
+    pub focused_seconds: i64,
+    pub open_seconds: i64,
+    pub idle_seconds: i64,
+    pub locked_seconds: i64,
+    pub sleep_seconds: i64,
+    pub unobserved_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WidgetInsight {
+    pub title: String,
+    pub value: String,
+    pub tone: String,
+    pub text: String,
 }
 
 impl Lens {
@@ -121,24 +154,37 @@ impl Lens {
 pub fn usage_report(
     storage: &Storage,
     steam: &mut SteamResolver,
+    config: &Config,
     lens: Lens,
     days: u32,
 ) -> Result<UsageReport> {
-    usage_report_for_period_with_days(storage, steam, lens, 0, Some(days.max(1)))
+    usage_report_for_period_with_days(storage, steam, config, lens, 0, Some(days.max(1)))
 }
 
 pub fn usage_report_for_period(
     storage: &Storage,
     steam: &mut SteamResolver,
+    config: &Config,
     lens: Lens,
     offset: i32,
 ) -> Result<UsageReport> {
-    usage_report_for_period_with_days(storage, steam, lens, offset, None)
+    usage_report_for_period_with_days(storage, steam, config, lens, offset, None)
+}
+
+pub fn insights_report_for_period(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    offset: i32,
+) -> Result<InsightsReport> {
+    usage_report_for_period(storage, steam, config, lens, offset).map(InsightsReport::from)
 }
 
 fn usage_report_for_period_with_days(
     storage: &Storage,
     steam: &mut SteamResolver,
+    config: &Config,
     lens: Lens,
     offset: i32,
     trailing_days_override: Option<u32>,
@@ -153,17 +199,48 @@ fn usage_report_for_period_with_days(
         .last()
         .map(|day| day.date.clone())
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
-    let apps = app_breakdown(&rows, 6);
-    let insights = insights(
-        &rows,
-        &daily,
-        &today_key,
+    let apps = app_breakdown_with_config(&rows, 6, config);
+    let rollups = storage.focused_rollups_between(period.start_ts, period.query_end_ts, 8, 64)?;
+    let heatmap = rollups.heatmap;
+    let focus_intervals = rollups
+        .focus_intervals
+        .into_iter()
+        .map(|mut interval| {
+            interval.app_class = steam.resolve_class(&interval.app_class);
+            interval
+        })
+        .collect::<Vec<_>>();
+    let workspaces = rollups.workspaces;
+    let app_workspaces = resolve_app_workspace_totals(rollups.app_workspaces, steam);
+    let previous_period = previous_period_comparison(storage, steam, lens, offset)?;
+    let insights = insights::analyze(AnalysisInput {
+        rows: &rows,
+        daily: &daily,
+        heatmap: &heatmap,
+        focus_intervals: &focus_intervals,
+        workspaces: &workspaces,
+        app_workspaces: &app_workspaces,
+        today_key: &today_key,
+        period: AnalysisPeriod {
+            lens: lens.into(),
+            label: &period.meta.label,
+            start_date: period.meta.start_date.as_deref(),
+            end_date: period.meta.end_date.as_deref(),
+        },
+        previous_period,
         total_focused_seconds,
         total_open_seconds,
-    );
+        total_idle_seconds: session_totals.idle_seconds,
+        total_locked_seconds: session_totals.locked_seconds,
+        total_sleep_seconds: session_totals.sleep_seconds,
+        total_unobserved_seconds: session_totals.unobserved_seconds,
+    });
+
+    let generated_at = chrono::Utc::now().timestamp();
+    let widget_insight = widget_insight_for(&insights, generated_at);
 
     Ok(UsageReport {
-        generated_at: chrono::Utc::now().timestamp(),
+        generated_at,
         query_start_ts: period.start_ts,
         query_end_ts: period.query_end_ts,
         today_key,
@@ -174,11 +251,37 @@ fn usage_report_for_period_with_days(
         total_open_seconds,
         total_idle_seconds: session_totals.idle_seconds,
         total_locked_seconds: session_totals.locked_seconds,
+        total_sleep_seconds: session_totals.sleep_seconds,
+        total_unobserved_seconds: session_totals.unobserved_seconds,
         rows,
         apps,
         daily,
         insights,
+        widget_insight,
     })
+}
+
+impl From<UsageReport> for InsightsReport {
+    fn from(report: UsageReport) -> Self {
+        Self {
+            schema_version: 1,
+            generated_at: report.generated_at,
+            query_start_ts: report.query_start_ts,
+            query_end_ts: report.query_end_ts,
+            lens: report.lens,
+            lens_label: report.lens_label,
+            period: report.period,
+            totals: InsightsTotals {
+                focused_seconds: report.total_focused_seconds,
+                open_seconds: report.total_open_seconds,
+                idle_seconds: report.total_idle_seconds,
+                locked_seconds: report.total_locked_seconds,
+                sleep_seconds: report.total_sleep_seconds,
+                unobserved_seconds: report.total_unobserved_seconds,
+            },
+            insights: report.insights,
+        }
+    }
 }
 
 pub fn rows_for_lens(storage: &Storage, lens: Lens) -> Result<Vec<AppTotals>> {
@@ -207,6 +310,32 @@ pub fn open_total(rows: &[AppTotals]) -> i64 {
 }
 
 pub fn app_breakdown(rows: &[AppTotals], max_items: usize) -> Vec<AppBreakdown> {
+    app_breakdown_with_labeler(rows, max_items, |app_class| {
+        (app_label(app_class), "neutral".to_string())
+    })
+}
+
+pub fn app_breakdown_with_config(
+    rows: &[AppTotals],
+    max_items: usize,
+    config: &Config,
+) -> Vec<AppBreakdown> {
+    app_breakdown_with_labeler(rows, max_items, |app_class| {
+        (
+            config.app_label(app_class, || app_label(app_class)),
+            config.app_category(app_class),
+        )
+    })
+}
+
+fn app_breakdown_with_labeler<F>(
+    rows: &[AppTotals],
+    max_items: usize,
+    mut labeler: F,
+) -> Vec<AppBreakdown>
+where
+    F: FnMut(&str) -> (String, String),
+{
     let total = focused_total(rows).max(1) as f64;
     let max_items = max_items.max(1);
     let mut apps = Vec::new();
@@ -215,9 +344,11 @@ pub fn app_breakdown(rows: &[AppTotals], max_items: usize) -> Vec<AppBreakdown> 
         if row.focused_seconds <= 0 {
             continue;
         }
+        let (label, category) = labeler(&row.app_class);
         apps.push(AppBreakdown {
             app_class: row.app_class.clone(),
-            label: app_label(&row.app_class),
+            label,
+            category,
             focused_seconds: row.focused_seconds,
             open_seconds: row.open_seconds,
             share: row.focused_seconds as f64 / total,
@@ -238,6 +369,7 @@ pub fn app_breakdown(rows: &[AppTotals], max_items: usize) -> Vec<AppBreakdown> 
         apps.push(AppBreakdown {
             app_class: "Other".to_string(),
             label: "Other".to_string(),
+            category: "mixed".to_string(),
             focused_seconds: other_focused,
             open_seconds: other_open,
             share: other_focused as f64 / total,
@@ -251,60 +383,49 @@ pub fn app_label(app_class: &str) -> String {
     identity::display_name(app_class)
 }
 
-fn insights(
-    rows: &[AppTotals],
-    daily: &[DayTotals],
-    today_key: &str,
-    focused: i64,
-    open: i64,
-) -> Vec<InsightRow> {
-    if focused <= 0 {
-        return Vec::new();
+pub fn widget_insight_for(insights: &[Insight], generated_at: i64) -> Option<WidgetInsight> {
+    let candidates = insights
+        .iter()
+        .filter(|insight| {
+            !matches!(insight.tone, insights::InsightTone::Neutral)
+                || matches!(
+                    insight.category,
+                    insights::InsightCategory::Patterns
+                        | insights::InsightCategory::FocusQuality
+                        | insights::InsightCategory::SystemSignals
+                )
+        })
+        .collect::<Vec<_>>();
+    let candidates = if candidates.is_empty() {
+        insights.iter().collect::<Vec<_>>()
+    } else {
+        candidates
+    };
+    if candidates.is_empty() {
+        return None;
     }
 
-    let mut out = Vec::new();
-    if let Some(top) = rows.iter().find(|row| row.focused_seconds > 0) {
-        out.push(InsightRow {
-            label: "Top app".to_string(),
-            value: format!(
-                "{} - {} ({})",
-                app_label(&top.app_class),
-                format_duration(top.focused_seconds),
-                percent(top.focused_seconds as f64 / focused.max(1) as f64)
-            ),
-        });
-    }
+    let index = (generated_at.div_euclid(300) as usize) % candidates.len();
+    let insight = candidates[index];
+    let text = format!("{}: {}", insight.title, insight.value);
+    Some(WidgetInsight {
+        title: insight.title.clone(),
+        value: insight.value.clone(),
+        tone: format!("{:?}", insight.tone).to_lowercase(),
+        text,
+    })
+}
 
-    if let Some(yesterday) = yesterday_total(daily, today_key)
-        && yesterday > 0
-    {
-        out.push(InsightRow {
-            label: "vs yesterday".to_string(),
-            value: signed_duration(focused - yesterday),
-        });
+impl From<Lens> for AnalysisLens {
+    fn from(value: Lens) -> Self {
+        match value {
+            Lens::Day => Self::Day,
+            Lens::Week => Self::Week,
+            Lens::Month => Self::Month,
+            Lens::Year => Self::Year,
+            Lens::Life => Self::Life,
+        }
     }
-
-    if let Some(best) = daily.iter().max_by_key(|day| day.focused_seconds)
-        && best.focused_seconds > 0
-    {
-        out.push(InsightRow {
-            label: "Busiest day".to_string(),
-            value: format!(
-                "{} - {}",
-                relative_day_label(best, today_key),
-                format_duration(best.focused_seconds)
-            ),
-        });
-    }
-
-    if open > 0 {
-        out.push(InsightRow {
-            label: "Focus density".to_string(),
-            value: percent(focused as f64 / open.max(1) as f64),
-        });
-    }
-
-    out
 }
 
 struct PeriodBounds {
@@ -427,6 +548,57 @@ fn daily_for_period(
     storage.daily_totals_for_local_dates(start_date, period.day_count, period.query_end_ts)
 }
 
+fn previous_period_comparison(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    lens: Lens,
+    offset: i32,
+) -> Result<Option<AnalysisComparisonPeriod>> {
+    if lens != Lens::Week {
+        return Ok(None);
+    }
+
+    let previous = period_for_lens(lens, offset.saturating_sub(1))?;
+    let rows = steam.resolve_totals(rows_for_period(storage, lens, &previous)?);
+
+    Ok(Some(AnalysisComparisonPeriod {
+        label: previous.meta.label,
+        start_date: previous.meta.start_date,
+        end_date: previous.meta.end_date,
+        focused_seconds: focused_total(&rows),
+    }))
+}
+
+fn resolve_app_workspace_totals(
+    rows: Vec<AppWorkspaceTotals>,
+    steam: &mut SteamResolver,
+) -> Vec<AppWorkspaceTotals> {
+    let mut totals = std::collections::BTreeMap::<(String, String), i64>::new();
+    for row in rows {
+        let app_class = steam.resolve_class(&row.app_class);
+        *totals.entry((row.workspace, app_class)).or_default() += row.focused_seconds.max(0);
+    }
+
+    let mut rows = totals
+        .into_iter()
+        .map(
+            |((workspace, app_class), focused_seconds)| AppWorkspaceTotals {
+                workspace,
+                app_class,
+                focused_seconds,
+            },
+        )
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .focused_seconds
+            .cmp(&left.focused_seconds)
+            .then_with(|| left.workspace.cmp(&right.workspace))
+            .then_with(|| left.app_class.cmp(&right.app_class))
+    });
+    rows
+}
+
 fn local_midnight(date: NaiveDate) -> Result<chrono::DateTime<Local>> {
     Local
         .from_local_datetime(&date.and_hms_opt(0, 0, 0).context("invalid date")?)
@@ -439,36 +611,6 @@ fn add_months(date: NaiveDate, months: i32) -> Result<NaiveDate> {
     let year = month_index.div_euclid(12);
     let month0 = month_index.rem_euclid(12);
     NaiveDate::from_ymd_opt(year, month0 as u32 + 1, 1).context("failed to compute month offset")
-}
-
-fn yesterday_total(daily: &[DayTotals], today_key: &str) -> Option<i64> {
-    let today = chrono::NaiveDate::parse_from_str(today_key, "%Y-%m-%d").ok()?;
-    let yesterday = today.pred_opt()?.format("%Y-%m-%d").to_string();
-    daily
-        .iter()
-        .find(|day| day.date == yesterday)
-        .map(|day| day.focused_seconds)
-}
-
-fn relative_day_label(day: &DayTotals, today_key: &str) -> String {
-    if day.date == today_key {
-        return "Today".to_string();
-    }
-
-    if let Ok(today) = chrono::NaiveDate::parse_from_str(today_key, "%Y-%m-%d")
-        && today
-            .pred_opt()
-            .is_some_and(|yesterday| day.date == yesterday.format("%Y-%m-%d").to_string())
-    {
-        return "Yesterday".to_string();
-    }
-
-    day.label.clone()
-}
-
-fn signed_duration(seconds: i64) -> String {
-    let sign = if seconds < 0 { "-" } else { "+" };
-    format!("{sign}{}", format_duration(seconds.abs()))
 }
 
 pub fn format_duration(seconds: i64) -> String {
@@ -515,6 +657,28 @@ mod tests {
     }
 
     #[test]
+    fn app_breakdown_applies_config_alias_and_category() {
+        let mut config = Config::default();
+        config.apps.insert(
+            "code".to_string(),
+            crate::config::AppConfig {
+                alias: Some("Editor".to_string()),
+                category: Some("productive".to_string()),
+            },
+        );
+        let rows = vec![AppTotals {
+            app_class: "code".to_string(),
+            focused_seconds: 60,
+            open_seconds: 120,
+        }];
+
+        let grouped = app_breakdown_with_config(&rows, 6, &config);
+
+        assert_eq!(grouped[0].label, "Editor");
+        assert_eq!(grouped[0].category, "productive");
+    }
+
+    #[test]
     fn labels_package_names_compactly() {
         assert_eq!(app_label("com.mitchellh.ghostty"), "Ghostty");
         assert_eq!(app_label("org.omarchy.terminal"), "Terminal");
@@ -545,5 +709,64 @@ mod tests {
         let period = period_for_lens(Lens::Week, -1).unwrap();
 
         assert!(period.start_ts < period.query_end_ts);
+    }
+
+    #[test]
+    fn insights_report_json_keeps_structured_payload_compact() {
+        let usage = UsageReport {
+            generated_at: 1234,
+            query_start_ts: 1000,
+            query_end_ts: 2000,
+            today_key: "2026-08-22".to_string(),
+            lens: Lens::Week,
+            lens_label: Lens::Week.label(),
+            period: Period {
+                label: "Week of Aug 17, 2026".to_string(),
+                start_date: Some("2026-08-17".to_string()),
+                end_date: Some("2026-08-23".to_string()),
+                offset: 0,
+            },
+            total_focused_seconds: 3600,
+            total_open_seconds: 5400,
+            total_idle_seconds: 300,
+            total_locked_seconds: 0,
+            total_sleep_seconds: 0,
+            total_unobserved_seconds: 0,
+            rows: vec![AppTotals {
+                app_class: "code".to_string(),
+                focused_seconds: 3600,
+                open_seconds: 5400,
+            }],
+            apps: Vec::new(),
+            daily: Vec::new(),
+            insights: vec![Insight {
+                kind: crate::insights::InsightKind::TopApp,
+                category: crate::insights::InsightCategory::Apps,
+                tone: crate::insights::InsightTone::Neutral,
+                title: "Top app share".to_string(),
+                value: "Code - 1h (100%)".to_string(),
+                explanation: "The app with the largest share of focused time.".to_string(),
+                confidence: crate::insights::InsightConfidence::High,
+                evidence: crate::insights::InsightEvidence {
+                    data_points: 7,
+                    minimum_data_points: 1,
+                    observed_focus_seconds: 3600,
+                    observed_open_seconds: 5400,
+                },
+                supporting: crate::insights::InsightSupport::default(),
+            }],
+            widget_insight: None,
+        };
+
+        let json = serde_json::to_value(InsightsReport::from(usage)).unwrap();
+
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["lens"], "week");
+        assert_eq!(json["period"]["label"], "Week of Aug 17, 2026");
+        assert_eq!(json["totals"]["focused_seconds"], 3600);
+        assert_eq!(json["insights"][0]["kind"], "top-app");
+        assert!(json.get("rows").is_none());
+        assert!(json.get("daily").is_none());
+        assert!(json.get("apps").is_none());
     }
 }

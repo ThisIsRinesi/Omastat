@@ -4,29 +4,36 @@ use super::{
     widgets,
 };
 use crate::{
+    insights::{Insight, InsightCategory, InsightConfidence, InsightSupport, InsightTone},
     report::{self, Lens},
     storage::{
-        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, TimelineInterval,
-        TitleTotals, WorkspaceTotals,
+        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, SystemIntervalKind,
+        SystemTimelineInterval, TimelineInterval, TitleTotals, WorkspaceTotals,
     },
 };
-use chrono::{Local, TimeZone};
+use chrono::{Datelike, Local, TimeZone, Timelike};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Margin, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span, Text},
     widgets::{
         Axis, Bar, BarChart, Block, Cell, Chart, Clear, Dataset, GraphType, HighlightSpacing,
-        LineGauge, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
-        Table, Wrap, canvas,
+        LineGauge, List, ListItem, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Sparkline, Table, Wrap, canvas,
     },
 };
 use tui_piechart::{LegendLayout, LegendPosition, PieChart, PieSlice, Resolution};
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const HEAT_CHARS: [char; 8] = [' ', '·', '░', '▒', '▓', '█', '▇', '▉'];
+const INSIGHT_CATEGORIES: [InsightCategory; 4] = [
+    InsightCategory::Patterns,
+    InsightCategory::FocusQuality,
+    InsightCategory::Apps,
+    InsightCategory::SystemSignals,
+];
 
 pub(super) fn render_tiny(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let lines = vec![
@@ -150,6 +157,7 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
     };
     let left = match app.view() {
         View::Overview => "Tab view  h/l lens  [/] period  p stats/signals  ? help  q quit",
+        View::Insights => "j/k select  PgUp/PgDn jump  h/l lens  [/] period  ? help  q quit",
         View::Apps => "j/k select  PgUp/PgDn jump  h/l lens  [/] period  ? help  q quit",
         View::Timeline => "j/k highlight app  h/l lens  [/] period  ? help  q quit",
         View::System => "Tab view  h/l lens  r refresh  ? help  q quit",
@@ -246,6 +254,254 @@ pub(super) fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, them
     } else {
         render_period_signals(frame, stats, app, theme);
     }
+}
+
+pub(super) fn render_insights(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    widgets::fill_area(frame, area, theme.bg);
+    if app.insights().is_empty() {
+        let block = widgets::panel("Insights", theme, theme.primary);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        widgets::render_empty(
+            frame,
+            inner,
+            "No evaluated insights for this period yet. Track focused time or choose a broader lens.",
+            theme,
+        );
+        return;
+    }
+
+    if area.width < 98 {
+        let [list, detail] =
+            *Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area)
+        else {
+            return;
+        };
+        render_insight_list(frame, list, app, theme);
+        render_insight_detail(frame, detail, app, theme);
+        return;
+    }
+
+    let [list, detail] =
+        *Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)]).split(area)
+    else {
+        return;
+    };
+    render_insight_list(frame, list, app, theme);
+    render_insight_detail(frame, detail, app, theme);
+}
+
+fn render_insight_list(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let insights = app.insights().to_vec();
+    let selected_index = app.selected_insight_index();
+    let entries = insight_entries(&insights);
+    let selected_entry = entries
+        .iter()
+        .position(|entry| entry.insight_index() == Some(selected_index));
+    let items = entries
+        .iter()
+        .map(|entry| match *entry {
+            InsightEntry::Header { category, count } => ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{} ", insight_category_label(category)),
+                    Style::default()
+                        .fg(theme.primary)
+                        .bg(theme.panel)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({count})"),
+                    Style::default().fg(theme.dim).bg(theme.panel),
+                ),
+            ]))
+            .style(Style::default().bg(theme.panel_alt)),
+            InsightEntry::Insight { index } => {
+                let insight = &insights[index];
+                let selected = index == selected_index;
+                let color = insight_tone_color(insight.tone, theme);
+                let mut lines = vec![Line::from(vec![
+                    Span::styled(
+                        insight_tone_marker(insight.tone),
+                        Style::default().fg(color).bg(theme.panel),
+                    ),
+                    Span::styled(" ", Style::default().bg(theme.panel)),
+                    Span::styled(
+                        widgets::fit_text(&insight.title, 22),
+                        Style::default()
+                            .fg(theme.text)
+                            .bg(theme.panel)
+                            .add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                    Span::styled(" ", Style::default().bg(theme.panel)),
+                    Span::styled(
+                        widgets::fit_text(&insight.value, 28),
+                        Style::default().fg(color).bg(theme.panel),
+                    ),
+                ])];
+                if selected {
+                    lines.push(Line::from(Span::styled(
+                        widgets::fit_text(
+                            &insight.explanation,
+                            area.width.saturating_sub(6) as usize,
+                        ),
+                        Style::default().fg(theme.muted).bg(theme.panel),
+                    )));
+                }
+                ListItem::new(Text::from(lines)).style(Style::default().bg(theme.panel))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let list = List::new(items)
+        .block(widgets::panel("Insights", theme, theme.primary))
+        .style(Style::default().fg(theme.text).bg(theme.panel))
+        .highlight_style(Style::default().fg(theme.text).bg(theme.selection))
+        .highlight_symbol("▌");
+
+    let state = app.insight_state();
+    state.select(selected_entry);
+    frame.render_stateful_widget(list, area, state);
+
+    let visible_rows = area.height.saturating_sub(3) as usize;
+    if entries.len() > visible_rows {
+        let mut scrollbar_state =
+            ScrollbarState::new(entries.len()).position(selected_entry.unwrap_or_default());
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(theme.primary))
+            .track_style(Style::default().fg(theme.dim));
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = widgets::panel("Insight Details", theme, theme.secondary);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(insight) = app.selected_insight() else {
+        widgets::render_empty(
+            frame,
+            inner,
+            "Select an insight to see supporting values",
+            theme,
+        );
+        return;
+    };
+
+    if inner.height < 8 {
+        let lines = vec![
+            Line::from(Span::styled(
+                widgets::fit_text(&insight.title, inner.width as usize),
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                widgets::fit_text(&insight.value, inner.width as usize),
+                Style::default()
+                    .fg(insight_tone_color(insight.tone, theme))
+                    .bg(theme.panel),
+            )),
+            Line::from(Span::styled(
+                widgets::fit_text(&insight.explanation, inner.width as usize),
+                Style::default().fg(theme.muted).bg(theme.panel),
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme.panel))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let [summary, support] =
+        *Layout::vertical([Constraint::Length(6), Constraint::Min(4)]).split(inner)
+    else {
+        return;
+    };
+    let color = insight_tone_color(insight.tone, theme);
+    let summary_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                insight_category_label(insight.category),
+                Style::default().fg(theme.primary).bg(theme.panel),
+            ),
+            Span::styled("  ", Style::default().bg(theme.panel)),
+            Span::styled(
+                insight_tone_label(insight.tone),
+                Style::default().fg(color).bg(theme.panel),
+            ),
+            Span::styled("  ", Style::default().bg(theme.panel)),
+            Span::styled(
+                insight_confidence_label(insight.confidence),
+                Style::default().fg(theme.dim).bg(theme.panel),
+            ),
+        ]),
+        Line::from(Span::styled(
+            widgets::fit_text(&insight.title, summary.width as usize),
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.panel)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            widgets::fit_text(&insight.value, summary.width as usize),
+            Style::default().fg(color).bg(theme.panel),
+        )),
+        Line::from(Span::styled(
+            widgets::fit_text(&insight.explanation, summary.width as usize),
+            Style::default().fg(theme.muted).bg(theme.panel),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(summary_lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: true }),
+        summary,
+    );
+
+    let mut lines = insight_support_lines(&insight.supporting, support.width as usize, theme);
+    lines.push(widgets::metric_line(
+        "Data",
+        &format!(
+            "{} / {} pts",
+            insight.evidence.data_points, insight.evidence.minimum_data_points
+        ),
+        support.width as usize,
+        theme.muted,
+        theme,
+    ));
+    lines.push(widgets::metric_line(
+        "Observed",
+        &format!(
+            "{} focus / {} open",
+            report::format_duration(insight.evidence.observed_focus_seconds),
+            report::format_duration(insight.evidence.observed_open_seconds)
+        ),
+        support.width as usize,
+        theme.muted,
+        theme,
+    ));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        support,
+    );
 }
 
 fn render_kpis(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -759,6 +1015,20 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
                 theme.tertiary,
                 theme,
             ),
+            widgets::metric_line(
+                "Sleep",
+                &report::format_duration(app.report().total_sleep_seconds),
+                inner.width as usize,
+                theme.tertiary,
+                theme,
+            ),
+            widgets::metric_line(
+                "Unobserved",
+                &report::format_duration(app.report().total_unobserved_seconds),
+                inner.width as usize,
+                theme.warn,
+                theme,
+            ),
         ];
         frame.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.panel)),
@@ -781,6 +1051,8 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
         .total_focused_seconds
         .saturating_add(app.report().total_idle_seconds)
         .saturating_add(app.report().total_locked_seconds)
+        .saturating_add(app.report().total_sleep_seconds)
+        .saturating_add(app.report().total_unobserved_seconds)
         .max(1);
     let gauge_lines = Layout::vertical([
         Constraint::Length(2),
@@ -812,14 +1084,20 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     frame.render_widget(
         LineGauge::default()
             .label(format!(
-                "away signal {}",
+                "excluded signal {}",
                 report::percent(
-                    (app.report().total_idle_seconds + app.report().total_locked_seconds) as f64
+                    (app.report().total_idle_seconds
+                        + app.report().total_locked_seconds
+                        + app.report().total_sleep_seconds
+                        + app.report().total_unobserved_seconds) as f64
                         / signal_total as f64
                 )
             ))
             .ratio(
-                (app.report().total_idle_seconds + app.report().total_locked_seconds) as f64
+                (app.report().total_idle_seconds
+                    + app.report().total_locked_seconds
+                    + app.report().total_sleep_seconds
+                    + app.report().total_unobserved_seconds) as f64
                     / signal_total as f64,
             )
             .filled_style(Style::default().fg(theme.tertiary))
@@ -847,6 +1125,20 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
             &report::format_duration(app.report().total_locked_seconds),
             details.width as usize,
             theme.danger,
+            theme,
+        ),
+        widgets::metric_line(
+            "Sleep",
+            &report::format_duration(app.report().total_sleep_seconds),
+            details.width as usize,
+            theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Unobserved",
+            &report::format_duration(app.report().total_unobserved_seconds),
+            details.width as usize,
+            theme.warn,
             theme,
         ),
         widgets::metric_line(
@@ -984,7 +1276,7 @@ fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             let density = widgets::ratio(row.focused_seconds, row.open_seconds);
             Row::new(vec![
                 Cell::from(format!("{:>2}", index + 1)).style(Style::default().fg(theme.dim)),
-                Cell::from(widgets::app_label(&row.app_class)),
+                Cell::from(app.app_label(&row.app_class)),
                 Cell::from(report::format_duration(row.focused_seconds))
                     .style(Style::default().fg(theme.warn)),
                 Cell::from(report::percent(widgets::ratio(row.focused_seconds, total)))
@@ -1051,8 +1343,9 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
         row.focused_seconds,
         app.report().total_focused_seconds.max(1),
     );
+    let facts = app_detail_facts(app, row);
     let [summary, spark, titles] = *Layout::vertical([
-        Constraint::Length(9),
+        Constraint::Length(if inner.height < 20 { 9 } else { 11 }),
         Constraint::Length(5),
         Constraint::Min(5),
     ])
@@ -1061,7 +1354,7 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
     };
     let lines = vec![
         Line::from(Span::styled(
-            widgets::fit_text(&widgets::app_label(&row.app_class), summary.width as usize),
+            widgets::fit_text(&app.app_label(&row.app_class), summary.width as usize),
             Style::default()
                 .fg(theme.primary)
                 .bg(theme.panel)
@@ -1093,6 +1386,34 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
             &report::percent(share),
             summary.width as usize,
             theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Typical hour",
+            &facts.typical_hour_label,
+            summary.width as usize,
+            theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Longest block",
+            &facts.longest_block_label,
+            summary.width as usize,
+            theme.success,
+            theme,
+        ),
+        widgets::metric_line(
+            "Fragment",
+            &facts.fragmentation_label,
+            summary.width as usize,
+            theme.warn,
+            theme,
+        ),
+        widgets::metric_line(
+            "Workspace",
+            &facts.workspace_label,
+            summary.width as usize,
+            theme.primary,
             theme,
         ),
     ];
@@ -1213,12 +1534,27 @@ fn render_title_rows(frame: &mut Frame<'_>, area: Rect, titles: &[&TitleTotals],
 
 pub(super) fn render_timeline(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     widgets::fill_area(frame, area, theme.bg);
-    let [canvas_area, table_area] =
-        *Layout::vertical([Constraint::Length(10), Constraint::Min(8)]).split(area)
-    else {
+    if area.height < 22 {
+        let [canvas_area, table_area] =
+            *Layout::vertical([Constraint::Length(9), Constraint::Min(6)]).split(area)
+        else {
+            return;
+        };
+        render_activity_canvas(frame, canvas_area, app, theme);
+        render_interval_table(frame, table_area, app, theme);
+        return;
+    }
+
+    let [canvas_area, gaps_area, table_area] = *Layout::vertical([
+        Constraint::Length(10),
+        Constraint::Length(5),
+        Constraint::Min(7),
+    ])
+    .split(area) else {
         return;
     };
     render_activity_canvas(frame, canvas_area, app, theme);
+    render_gap_summary(frame, gaps_area, app, theme);
     render_interval_table(frame, table_area, app, theme);
 }
 
@@ -1228,13 +1564,16 @@ fn render_activity_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
     frame.render_widget(block, area);
     let start = app.report().query_start_ts;
     let end = app.report().query_end_ts;
-    if app.data().timeline_intervals.is_empty() || end <= start {
+    if (app.data().timeline_intervals.is_empty() && app.data().system_intervals.is_empty())
+        || end <= start
+    {
         widgets::render_empty(frame, inner, "No intervals recorded for this period", theme);
         return;
     }
     let selected = app.selected_row().map(|row| row.app_class.as_str());
     let rows = app.rows().to_vec();
     let intervals = app.data().timeline_intervals.clone();
+    let system_intervals = app.data().system_intervals.clone();
     let canvas = canvas::Canvas::default()
         .x_bounds([start as f64, end as f64])
         .y_bounds([0.0, 3.0])
@@ -1259,6 +1598,19 @@ fn render_activity_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
                 if selected == Some(interval.app_class.as_str()) {
                     color = theme.text;
                 }
+                ctx.draw(&canvas::Line {
+                    x1: interval.started_at as f64,
+                    y1: y,
+                    x2: interval.ended_at as f64,
+                    y2: y,
+                    color,
+                });
+            }
+            for interval in &system_intervals {
+                let (y, color) = match interval.kind {
+                    SystemIntervalKind::Sleep => (0.35, theme.tertiary),
+                    SystemIntervalKind::Unobserved => (0.2, theme.warn),
+                };
                 ctx.draw(&canvas::Line {
                     x1: interval.started_at as f64,
                     y1: y,
@@ -1293,10 +1645,103 @@ fn render_activity_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
     );
 }
 
+fn render_gap_summary(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let block = widgets::panel("Excluded Gaps", theme, theme.warn);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sleep_count = app
+        .data()
+        .system_intervals
+        .iter()
+        .filter(|interval| interval.kind == SystemIntervalKind::Sleep)
+        .count();
+    let unobserved_count = app
+        .data()
+        .system_intervals
+        .iter()
+        .filter(|interval| interval.kind == SystemIntervalKind::Unobserved)
+        .count();
+    let excluded = app
+        .report()
+        .total_sleep_seconds
+        .saturating_add(app.report().total_unobserved_seconds);
+    if excluded <= 0 {
+        widgets::render_empty(
+            frame,
+            inner,
+            "No sleep or offline gaps in this period",
+            theme,
+        );
+        return;
+    }
+
+    let signal_total = app
+        .report()
+        .total_focused_seconds
+        .saturating_add(app.report().total_idle_seconds)
+        .saturating_add(app.report().total_locked_seconds)
+        .saturating_add(excluded)
+        .max(1);
+    let lines = vec![
+        widgets::metric_line(
+            "Sleep",
+            &format!(
+                "{} in {} intervals",
+                report::format_duration(app.report().total_sleep_seconds),
+                sleep_count
+            ),
+            inner.width as usize,
+            theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Offline",
+            &format!(
+                "{} in {} intervals",
+                report::format_duration(app.report().total_unobserved_seconds),
+                unobserved_count
+            ),
+            inner.width as usize,
+            theme.warn,
+            theme,
+        ),
+        widgets::metric_line(
+            "Excluded",
+            &format!(
+                "{} ({})",
+                report::format_duration(excluded),
+                report::percent(excluded as f64 / signal_total as f64)
+            ),
+            inner.width as usize,
+            theme.warn,
+            theme,
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
 fn render_interval_table(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let block = widgets::panel("Intervals", theme, theme.secondary);
-    let mut intervals = app.data().timeline_intervals.clone();
-    intervals.sort_by_key(|interval| interval.started_at);
+    let mut intervals = app
+        .data()
+        .timeline_intervals
+        .iter()
+        .cloned()
+        .map(TimelineRow::App)
+        .chain(
+            app.data()
+                .system_intervals
+                .iter()
+                .cloned()
+                .map(TimelineRow::System),
+        )
+        .collect::<Vec<_>>();
+    intervals.sort_by_key(|interval| (interval.started_at(), interval.ended_at()));
     let span = app
         .report()
         .query_end_ts
@@ -1304,7 +1749,10 @@ fn render_interval_table(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     let rows = intervals
         .into_iter()
         .rev()
-        .map(|interval| interval_row(interval, span, app.rows(), theme))
+        .map(|interval| match interval {
+            TimelineRow::App(interval) => interval_row(interval, span, app, theme),
+            TimelineRow::System(interval) => system_interval_row(interval, span, theme),
+        })
         .collect::<Vec<_>>();
     let table = Table::new(
         rows,
@@ -1326,13 +1774,36 @@ fn render_interval_table(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     frame.render_widget(table, area);
 }
 
+#[derive(Debug, Clone)]
+enum TimelineRow {
+    App(TimelineInterval),
+    System(SystemTimelineInterval),
+}
+
+impl TimelineRow {
+    fn started_at(&self) -> i64 {
+        match self {
+            Self::App(interval) => interval.started_at,
+            Self::System(interval) => interval.started_at,
+        }
+    }
+
+    fn ended_at(&self) -> i64 {
+        match self {
+            Self::App(interval) => interval.ended_at,
+            Self::System(interval) => interval.ended_at,
+        }
+    }
+}
+
 fn interval_row(
     interval: TimelineInterval,
     span_seconds: i64,
-    rows: &[AppTotals],
+    app: &App,
     theme: &Theme,
 ) -> Row<'static> {
-    let rank = rows
+    let rank = app
+        .rows()
         .iter()
         .position(|row| row.app_class == interval.app_class)
         .unwrap_or(usize::MAX);
@@ -1353,13 +1824,59 @@ fn interval_row(
         ))
         .style(Style::default().fg(theme.dim)),
         Cell::from(kind).style(Style::default().fg(color)),
-        Cell::from(widgets::app_label(&interval.app_class)),
+        Cell::from(app.app_label(&interval.app_class)),
         Cell::from(widgets::compact_duration(
             interval.ended_at.saturating_sub(interval.started_at),
         ))
         .style(Style::default().fg(theme.muted)),
     ])
     .style(Style::default().fg(theme.text).bg(theme.panel))
+}
+
+fn system_interval_row(
+    interval: SystemTimelineInterval,
+    span_seconds: i64,
+    theme: &Theme,
+) -> Row<'static> {
+    let (kind, source, color) = match interval.kind {
+        SystemIntervalKind::Sleep => (
+            "sleep",
+            system_interval_source("System sleep", interval.source.as_deref()),
+            theme.tertiary,
+        ),
+        SystemIntervalKind::Unobserved => (
+            "offline",
+            system_interval_source("Offline gap", interval.source.as_deref()),
+            theme.warn,
+        ),
+    };
+    Row::new(vec![
+        Cell::from(format!(
+            "{}-{}",
+            interval_time_label(interval.started_at, span_seconds),
+            interval_time_label(interval.ended_at, span_seconds)
+        ))
+        .style(Style::default().fg(theme.dim)),
+        Cell::from(kind).style(Style::default().fg(color)),
+        Cell::from(source).style(Style::default().fg(color)),
+        Cell::from(widgets::compact_duration(
+            interval.ended_at.saturating_sub(interval.started_at),
+        ))
+        .style(Style::default().fg(theme.muted)),
+    ])
+    .style(Style::default().fg(theme.text).bg(theme.panel))
+}
+
+fn system_interval_source(label: &str, source: Option<&str>) -> String {
+    source
+        .filter(|source| !source.trim().is_empty())
+        .map(|source| {
+            format!(
+                "{label} ({})",
+                widgets::fit_text(source.trim(), 18).trim_end()
+            )
+        })
+        .unwrap_or_else(|| label.to_string())
 }
 
 pub(super) fn render_system(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -1425,6 +1942,13 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
             theme.muted,
             theme,
         ),
+        widgets::metric_line(
+            "Heartbeat",
+            &app.health().last_heartbeat_label(),
+            status.width as usize,
+            theme.muted,
+            theme,
+        ),
     ];
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme.panel)),
@@ -1434,7 +1958,9 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
     let active_total = app.health().storage.focused_active
         + app.health().storage.open_active
         + app.health().storage.idle_active
-        + app.health().storage.locked_active;
+        + app.health().storage.locked_active
+        + app.health().storage.sleep_active
+        + app.health().storage.daemon_active;
     let focus_ratio = widgets::ratio(
         app.report().total_focused_seconds,
         app.report().total_open_seconds,
@@ -1457,7 +1983,7 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
     frame.render_widget(
         LineGauge::default()
             .label(format!("active intervals {active_total}"))
-            .ratio(widgets::ratio(active_total, 4))
+            .ratio(widgets::ratio(active_total, 6))
             .filled_style(Style::default().fg(theme.primary))
             .unfilled_style(Style::default().fg(theme.dim))
             .style(Style::default().bg(theme.panel)),
@@ -1493,6 +2019,20 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
             &report::format_duration(app.report().total_locked_seconds),
             details.width as usize,
             theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Sleep",
+            &report::format_duration(app.report().total_sleep_seconds),
+            details.width as usize,
+            theme.tertiary,
+            theme,
+        ),
+        widgets::metric_line(
+            "Unobserved",
+            &report::format_duration(app.report().total_unobserved_seconds),
+            details.width as usize,
+            theme.warn,
             theme,
         ),
         widgets::metric_line(
@@ -1532,7 +2072,7 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         ]),
         Line::from(vec![
             Span::styled("j / k or ↑ / ↓", Style::default().fg(theme.primary)),
-            Span::styled("  move selected app", Style::default().fg(theme.text)),
+            Span::styled("  move selected row", Style::default().fg(theme.text)),
         ]),
         Line::from(vec![
             Span::styled("1-5", Style::default().fg(theme.primary)),
@@ -1568,6 +2108,394 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
             .wrap(Wrap { trim: true }),
         inner,
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InsightEntry {
+    Header {
+        category: InsightCategory,
+        count: usize,
+    },
+    Insight {
+        index: usize,
+    },
+}
+
+impl InsightEntry {
+    fn insight_index(self) -> Option<usize> {
+        match self {
+            Self::Header { .. } => None,
+            Self::Insight { index } => Some(index),
+        }
+    }
+}
+
+fn insight_entries(insights: &[Insight]) -> Vec<InsightEntry> {
+    let mut entries = Vec::new();
+    for category in INSIGHT_CATEGORIES {
+        let count = insights
+            .iter()
+            .filter(|insight| insight.category == category)
+            .count();
+        if count == 0 {
+            continue;
+        }
+        entries.push(InsightEntry::Header { category, count });
+        entries.extend(
+            insights
+                .iter()
+                .enumerate()
+                .filter(|(_, insight)| insight.category == category)
+                .map(|(index, _)| InsightEntry::Insight { index }),
+        );
+    }
+    entries
+}
+
+fn insight_category_label(category: InsightCategory) -> &'static str {
+    match category {
+        InsightCategory::Patterns => "Patterns",
+        InsightCategory::FocusQuality => "Focus Quality",
+        InsightCategory::Apps => "Apps",
+        InsightCategory::SystemSignals => "System Signals",
+    }
+}
+
+fn insight_tone_label(tone: InsightTone) -> &'static str {
+    match tone {
+        InsightTone::Positive => "positive",
+        InsightTone::Negative => "negative",
+        InsightTone::Neutral => "neutral",
+        InsightTone::Info => "info",
+        InsightTone::Caution => "caution",
+    }
+}
+
+fn insight_tone_marker(tone: InsightTone) -> &'static str {
+    match tone {
+        InsightTone::Positive => "+",
+        InsightTone::Negative => "-",
+        InsightTone::Neutral => "-",
+        InsightTone::Info => "i",
+        InsightTone::Caution => "!",
+    }
+}
+
+fn insight_tone_color(tone: InsightTone, theme: &Theme) -> Color {
+    match tone {
+        InsightTone::Positive => theme.success,
+        InsightTone::Negative => theme.danger,
+        InsightTone::Neutral => theme.muted,
+        InsightTone::Info => theme.secondary,
+        InsightTone::Caution => theme.warn,
+    }
+}
+
+fn insight_confidence_label(confidence: InsightConfidence) -> &'static str {
+    match confidence {
+        InsightConfidence::Low => "low confidence",
+        InsightConfidence::Medium => "medium confidence",
+        InsightConfidence::High => "high confidence",
+    }
+}
+
+fn insight_support_lines(
+    support: &InsightSupport,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    push_optional_metric(
+        &mut lines,
+        "Period",
+        support.period_label.as_deref(),
+        width,
+        theme.primary,
+        theme,
+    );
+    push_optional_metric(
+        &mut lines,
+        "App",
+        support.app_label.as_deref(),
+        width,
+        theme.warn,
+        theme,
+    );
+    push_optional_metric(
+        &mut lines,
+        "Workspace",
+        support.workspace.as_deref(),
+        width,
+        theme.primary,
+        theme,
+    );
+    push_optional_metric(
+        &mut lines,
+        "Date",
+        support.date_label.as_deref().or(support.date.as_deref()),
+        width,
+        theme.secondary,
+        theme,
+    );
+    push_optional_metric(
+        &mut lines,
+        "Compare",
+        support
+            .comparison_label
+            .as_deref()
+            .or(support.comparison_date.as_deref()),
+        width,
+        theme.secondary,
+        theme,
+    );
+    push_optional_metric(
+        &mut lines,
+        "Hour",
+        support.hour_label.as_deref(),
+        width,
+        theme.tertiary,
+        theme,
+    );
+    push_optional_metric(
+        &mut lines,
+        "Weekday",
+        support.weekday_label.as_deref(),
+        width,
+        theme.tertiary,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Focused",
+        support.focused_seconds,
+        width,
+        theme.warn,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Open",
+        support.open_seconds,
+        width,
+        theme.secondary,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Baseline",
+        support.comparison_seconds,
+        width,
+        theme.muted,
+        theme,
+    );
+    if let Some(delta) = support.delta_seconds {
+        lines.push(widgets::metric_line(
+            "Delta",
+            &format_signed_duration(delta),
+            width,
+            if delta >= 0 {
+                theme.success
+            } else {
+                theme.danger
+            },
+            theme,
+        ));
+    }
+    if let Some(share) = support.share {
+        lines.push(widgets::metric_line(
+            "Share",
+            &report::percent(share),
+            width,
+            theme.tertiary,
+            theme,
+        ));
+    }
+    if let Some(app_count) = support.app_count {
+        lines.push(widgets::metric_line(
+            "Apps",
+            &app_count.to_string(),
+            width,
+            theme.primary,
+            theme,
+        ));
+    }
+    if let Some(effective_app_count) = support.effective_app_count {
+        lines.push(widgets::metric_line(
+            "Effective",
+            &format!("{effective_app_count:.1} apps"),
+            width,
+            theme.primary,
+            theme,
+        ));
+    }
+    if let Some(block_count) = support.block_count {
+        lines.push(widgets::metric_line(
+            "Blocks",
+            &block_count.to_string(),
+            width,
+            theme.success,
+            theme,
+        ));
+    }
+    if let Some(switch_count) = support.switch_count {
+        lines.push(widgets::metric_line(
+            "Switches",
+            &switch_count.to_string(),
+            width,
+            theme.warn,
+            theme,
+        ));
+    }
+    if let Some(rate_per_hour) = support.rate_per_hour {
+        lines.push(widgets::metric_line(
+            "Rate",
+            &format!("{rate_per_hour:.1}/h"),
+            width,
+            theme.warn,
+            theme,
+        ));
+    }
+    if let Some(current_streak_days) = support.current_streak_days {
+        lines.push(widgets::metric_line(
+            "Current",
+            &format!("{current_streak_days} days"),
+            width,
+            theme.success,
+            theme,
+        ));
+    }
+    if let Some(longest_streak_days) = support.longest_streak_days {
+        lines.push(widgets::metric_line(
+            "Longest",
+            &format!("{longest_streak_days} days"),
+            width,
+            theme.success,
+            theme,
+        ));
+    }
+    push_duration_metric(
+        &mut lines,
+        "Total",
+        support.total_seconds,
+        width,
+        theme.success,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Median",
+        support.median_seconds,
+        width,
+        theme.success,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Longest",
+        support.longest_seconds,
+        width,
+        theme.success,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Threshold",
+        support.threshold_seconds,
+        width,
+        theme.dim,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Baseline",
+        support.baseline_seconds,
+        width,
+        theme.dim,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Excluded",
+        support.excluded_seconds,
+        width,
+        theme.warn,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Idle",
+        support.idle_seconds,
+        width,
+        theme.tertiary,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Locked",
+        support.locked_seconds,
+        width,
+        theme.danger,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Sleep",
+        support.sleep_seconds,
+        width,
+        theme.tertiary,
+        theme,
+    );
+    push_duration_metric(
+        &mut lines,
+        "Unobserved",
+        support.unobserved_seconds,
+        width,
+        theme.warn,
+        theme,
+    );
+    lines
+}
+
+fn push_optional_metric(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: Option<&str>,
+    width: usize,
+    color: Color,
+    theme: &Theme,
+) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        lines.push(widgets::metric_line(label, value, width, color, theme));
+    }
+}
+
+fn push_duration_metric(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    seconds: Option<i64>,
+    width: usize,
+    color: Color,
+    theme: &Theme,
+) {
+    if let Some(seconds) = seconds {
+        lines.push(widgets::metric_line(
+            label,
+            &report::format_duration(seconds),
+            width,
+            color,
+            theme,
+        ));
+    }
+}
+
+fn format_signed_duration(seconds: i64) -> String {
+    if seconds > 0 {
+        format!("+{}", report::format_duration(seconds))
+    } else if seconds < 0 {
+        format!("-{}", report::format_duration(seconds.saturating_abs()))
+    } else {
+        report::format_duration(0)
+    }
 }
 
 fn daily_points<F>(days: &[DayTotals], value: F) -> Vec<(f64, f64)>
@@ -1660,6 +2588,129 @@ fn app_daily_values(daily_apps: &[AppDayTotals], days: &[DayTotals], app_class: 
                 .sum()
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+struct AppDetailFacts {
+    typical_hour_label: String,
+    longest_block_label: String,
+    fragmentation_label: String,
+    workspace_label: String,
+}
+
+fn app_detail_facts(app: &App, row: &AppTotals) -> AppDetailFacts {
+    let focus_intervals = app
+        .data()
+        .timeline_intervals
+        .iter()
+        .filter(|interval| {
+            interval.kind == IntervalKind::Focused && interval.app_class == row.app_class
+        })
+        .collect::<Vec<_>>();
+    let typical_hour_label = app_typical_hour_label(&focus_intervals);
+    let longest_block_seconds = focus_intervals
+        .iter()
+        .map(|interval| interval.ended_at.saturating_sub(interval.started_at))
+        .max()
+        .unwrap_or_default();
+    let longest_block_label = if longest_block_seconds > 0 {
+        report::format_duration(longest_block_seconds)
+    } else {
+        "none".to_string()
+    };
+    let block_count = focus_intervals.len();
+    let blocks_per_hour = if row.focused_seconds > 0 {
+        block_count as f64 / (row.focused_seconds as f64 / 3600.0)
+    } else {
+        0.0
+    };
+    let fragmentation_label = if block_count > 0 {
+        format!("{block_count} blocks ({blocks_per_hour:.1}/h)")
+    } else {
+        "none".to_string()
+    };
+    let workspace_label = app_workspace_label(app, row);
+
+    AppDetailFacts {
+        typical_hour_label,
+        longest_block_label,
+        fragmentation_label,
+        workspace_label,
+    }
+}
+
+fn app_typical_hour_label(intervals: &[&TimelineInterval]) -> String {
+    let mut totals = [0_i64; 24];
+    for interval in intervals {
+        add_hourly_overlap(&mut totals, interval.started_at, interval.ended_at);
+    }
+    totals
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(&left.0)))
+        .filter(|(_, seconds)| **seconds > 0)
+        .map(|(hour, seconds)| {
+            format!(
+                "{} ({})",
+                hour_label(hour as u32),
+                report::format_duration(*seconds)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn add_hourly_overlap(totals: &mut [i64; 24], started_at: i64, ended_at: i64) {
+    let mut cursor = started_at;
+    while cursor < ended_at {
+        let Some(local) = Local.timestamp_opt(cursor, 0).single() else {
+            break;
+        };
+        let Some(hour_start) = Local
+            .with_ymd_and_hms(local.year(), local.month(), local.day(), local.hour(), 0, 0)
+            .single()
+        else {
+            break;
+        };
+        let next_hour = (hour_start + chrono::Duration::hours(1)).timestamp();
+        let segment_end = next_hour.min(ended_at);
+        let overlap = segment_end.saturating_sub(cursor);
+        if overlap > 0
+            && let Some(total) = totals.get_mut(local.hour() as usize)
+        {
+            *total += overlap;
+        }
+        cursor = segment_end.max(cursor + 1);
+    }
+}
+
+fn app_workspace_label(app: &App, row: &AppTotals) -> String {
+    let matches = app
+        .data()
+        .app_workspaces
+        .iter()
+        .filter(|workspace| workspace.app_class == row.app_class)
+        .collect::<Vec<_>>();
+    let total = matches
+        .iter()
+        .map(|workspace| workspace.focused_seconds.max(0))
+        .sum::<i64>();
+    let Some(best) = matches
+        .into_iter()
+        .max_by(|left, right| {
+            left.focused_seconds
+                .cmp(&right.focused_seconds)
+                .then_with(|| right.workspace.cmp(&left.workspace))
+        })
+        .filter(|workspace| workspace.focused_seconds > 0)
+    else {
+        return "none".to_string();
+    };
+    let share = widgets::ratio(best.focused_seconds, total.max(1));
+    format!(
+        "{} ({})",
+        widgets::fit_text(&best.workspace, 14).trim_end(),
+        report::percent(share)
+    )
 }
 
 fn timeline_label(timestamp: i64, span_seconds: i64) -> String {

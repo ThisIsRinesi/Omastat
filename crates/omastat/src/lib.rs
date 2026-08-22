@@ -3,6 +3,7 @@ pub mod config;
 pub mod export;
 pub mod hyprland;
 pub mod identity;
+pub mod insights;
 pub mod report;
 pub mod session;
 pub mod steam;

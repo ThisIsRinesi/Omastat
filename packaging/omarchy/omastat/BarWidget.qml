@@ -18,6 +18,7 @@ BarWidget {
   property var rows: []
   property var reportApps: []
   property var reportInsights: []
+  property var widgetInsight: null
   property var daily: []
   property string todayKey: ""
   property string periodLabel: "Today"
@@ -42,6 +43,7 @@ BarWidget {
   onRowsChanged: injectPanel()
   onReportAppsChanged: injectPanel()
   onReportInsightsChanged: injectPanel()
+  onWidgetInsightChanged: injectPanel()
   onDailyChanged: injectPanel()
   onTodayKeyChanged: injectPanel()
   onPeriodLabelChanged: injectPanel()
@@ -151,6 +153,7 @@ BarWidget {
       rows = []
       reportApps = []
       reportInsights = []
+      widgetInsight = null
       daily = []
       todayKey = ""
       periodLabel = "Today"
@@ -167,6 +170,7 @@ BarWidget {
       rows = parsed
       reportApps = []
       reportInsights = []
+      widgetInsight = null
       daily = []
       todayKey = ""
       periodLabel = "Today"
@@ -176,6 +180,7 @@ BarWidget {
       rows = Array.isArray(parsed.rows) ? parsed.rows : []
       reportApps = Array.isArray(parsed.apps) ? normalizeApps(parsed.apps) : []
       reportInsights = Array.isArray(parsed.insights) ? normalizeInsights(parsed.insights) : []
+      widgetInsight = parsed.widget_insight && typeof parsed.widget_insight === "object" ? parsed.widget_insight : null
       daily = Array.isArray(parsed.daily) ? parsed.daily : []
       todayKey = String(parsed.today_key || "")
       periodLabel = parsed.period && typeof parsed.period === "object" ? String(parsed.period.label || "Today") : "Today"
@@ -185,6 +190,7 @@ BarWidget {
       rows = []
       reportApps = []
       reportInsights = []
+      widgetInsight = null
       daily = []
       todayKey = ""
       periodLabel = "Today"
@@ -207,7 +213,11 @@ BarWidget {
       + "\nOpen: " + formatDuration(totalOpen)
       + "\nTop: " + topAppLabel(top)
       + " (" + formatDuration(topAppSeconds(top)) + ")"
-    statusText = Math.max(rows.length, reportApps.length) + " apps tracked"
+    if (widgetInsight && widgetInsight.text)
+      tooltip += "\nInsight: " + String(widgetInsight.text)
+    statusText = widgetInsight && widgetInsight.text
+      ? String(widgetInsight.text)
+      : Math.max(rows.length, reportApps.length) + " apps tracked"
     errorText = ""
   }
 
@@ -221,6 +231,7 @@ BarWidget {
     if ("rows" in target) target.rows = root.rows
     if ("reportApps" in target) target.reportApps = root.reportApps
     if ("reportInsights" in target) target.reportInsights = root.reportInsights
+    if ("widgetInsight" in target) target.widgetInsight = root.widgetInsight
     if ("daily" in target) target.daily = root.daily
     if ("todayKey" in target) target.todayKey = root.todayKey
     if ("periodLabel" in target) target.periodLabel = root.periodLabel
@@ -306,7 +317,7 @@ BarWidget {
     var output = []
     for (var i = 0; i < list.length; i++) {
       var item = list[i] || {}
-      var label = String(item.label || "")
+      var label = String(item.title || item.label || item.kind || "")
       var value = String(item.value || "")
       if (label.length === 0 && value.length === 0) continue
       output.push({ label: label, value: value })

@@ -14,6 +14,7 @@ Panel {
   property var rows: []
   property var reportApps: []
   property var reportInsights: []
+  property var widgetInsight: null
   property var daily: []
   property string todayKey: ""
   property string periodLabel: "Today"
