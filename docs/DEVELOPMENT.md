@@ -17,6 +17,7 @@ cargo run -p omastat -- digest --lens week
 cargo run -p omastat -- widget-insight --json
 cargo run -p omastat -- purge --older-than-days 90 --dry-run
 cargo run -p omastat -- tui
+packaging/dev/check-widget-qml.sh
 ```
 
 ## Local Auto-Update

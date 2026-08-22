@@ -4,7 +4,9 @@ use super::{
     widgets,
 };
 use crate::{
-    insights::{Insight, InsightCategory, InsightConfidence, InsightSupport, InsightTone},
+    insights::{
+        Insight, InsightCategory, InsightConfidence, InsightKind, InsightSupport, InsightTone,
+    },
     report::{self, Lens},
     storage::{
         AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, SystemIntervalKind,
@@ -156,7 +158,9 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
         format!("{} back", app.period_offset().abs())
     };
     let left = match app.view() {
-        View::Overview => "Tab view  h/l lens  [/] period  p stats/signals  ? help  q quit",
+        View::Overview => {
+            "j/k inspect day  h/l lens  [/] period  p sessions/time mix  ? help  q quit"
+        }
         View::Insights => "j/k select  PgUp/PgDn jump  h/l lens  [/] period  ? help  q quit",
         View::Apps => "j/k select  PgUp/PgDn jump  h/l lens  [/] period  ? help  q quit",
         View::Timeline => "j/k highlight app  h/l lens  [/] period  ? help  q quit",
@@ -223,30 +227,52 @@ pub(super) fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, them
     else {
         return;
     };
-    let [top, bottom] =
-        *Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)]).split(body)
+    render_kpis(frame, kpis, app, theme);
+    if body.height < 20 {
+        let [flow, lower] =
+            *Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(body)
+        else {
+            return;
+        };
+        let [composition, stats] =
+            *Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+                .split(lower)
+        else {
+            return;
+        };
+        render_focus_chart(frame, flow, app, theme);
+        render_focus_composition(frame, composition, app, theme);
+        if app.show_trends() {
+            render_focus_stats(frame, stats, app, theme);
+        } else {
+            render_period_signals(frame, stats, app, theme);
+        }
+        return;
+    }
+
+    let [primary, context] =
+        *Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).split(body)
     else {
         return;
     };
-    let [flow, composition] =
-        *Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(top)
+    let [flow, heat] =
+        *Layout::vertical([Constraint::Percentage(43), Constraint::Percentage(57)]).split(primary)
     else {
         return;
     };
-    let [heat, hours, workspaces, stats] = *Layout::horizontal([
-        Constraint::Percentage(34),
-        Constraint::Percentage(22),
-        Constraint::Percentage(22),
-        Constraint::Percentage(22),
+    let [composition, hours, workspaces, stats] = *Layout::vertical([
+        Constraint::Percentage(36),
+        Constraint::Percentage(20),
+        Constraint::Percentage(18),
+        Constraint::Percentage(26),
     ])
-    .split(bottom) else {
+    .split(context) else {
         return;
     };
 
-    render_kpis(frame, kpis, app, theme);
     render_focus_chart(frame, flow, app, theme);
-    render_focus_composition(frame, composition, app, theme);
     render_heatmap(frame, heat, app, theme);
+    render_focus_composition(frame, composition, app, theme);
     render_peak_hours(frame, hours, app, theme);
     render_workspace_focus(frame, workspaces, app, theme);
     if app.show_trends() {
@@ -319,6 +345,7 @@ fn render_insight_list(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                 let insight = &insights[index];
                 let selected = index == selected_index;
                 let color = insight_tone_color(insight.tone, theme);
+                let title = insight_display_title(insight);
                 let mut lines = vec![Line::from(vec![
                     Span::styled(
                         insight_tone_marker(insight.tone),
@@ -326,7 +353,7 @@ fn render_insight_list(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                     ),
                     Span::styled(" ", Style::default().bg(theme.panel)),
                     Span::styled(
-                        widgets::fit_text(&insight.title, 22),
+                        widgets::fit_text(&title, 22),
                         Style::default()
                             .fg(theme.text)
                             .bg(theme.panel)
@@ -343,11 +370,9 @@ fn render_insight_list(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                     ),
                 ])];
                 if selected {
+                    let explanation = insight_display_explanation(insight);
                     lines.push(Line::from(Span::styled(
-                        widgets::fit_text(
-                            &insight.explanation,
-                            area.width.saturating_sub(6) as usize,
-                        ),
+                        widgets::fit_text(&explanation, area.width.saturating_sub(6) as usize),
                         Style::default().fg(theme.muted).bg(theme.panel),
                     )));
                 }
@@ -397,11 +422,13 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
         );
         return;
     };
+    let title = insight_display_title(insight);
+    let explanation = insight_display_explanation(insight);
 
     if inner.height < 8 {
         let lines = vec![
             Line::from(Span::styled(
-                widgets::fit_text(&insight.title, inner.width as usize),
+                widgets::fit_text(&title, inner.width as usize),
                 Style::default()
                     .fg(theme.text)
                     .bg(theme.panel)
@@ -414,7 +441,7 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
                     .bg(theme.panel),
             )),
             Line::from(Span::styled(
-                widgets::fit_text(&insight.explanation, inner.width as usize),
+                widgets::fit_text(&explanation, inner.width as usize),
                 Style::default().fg(theme.muted).bg(theme.panel),
             )),
         ];
@@ -451,7 +478,7 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
             ),
         ]),
         Line::from(Span::styled(
-            widgets::fit_text(&insight.title, summary.width as usize),
+            widgets::fit_text(&title, summary.width as usize),
             Style::default()
                 .fg(theme.text)
                 .bg(theme.panel)
@@ -462,7 +489,7 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
             Style::default().fg(color).bg(theme.panel),
         )),
         Line::from(Span::styled(
-            widgets::fit_text(&insight.explanation, summary.width as usize),
+            widgets::fit_text(&explanation, summary.width as usize),
             Style::default().fg(theme.muted).bg(theme.panel),
         )),
     ];
@@ -475,9 +502,9 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
 
     let mut lines = insight_support_lines(&insight.supporting, support.width as usize, theme);
     lines.push(widgets::metric_line(
-        "Data",
+        "Samples",
         &format!(
-            "{} / {} pts",
+            "{} / {} needed",
             insight.evidence.data_points, insight.evidence.minimum_data_points
         ),
         support.width as usize,
@@ -527,7 +554,7 @@ fn render_kpis(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     render_kpi(
         frame,
         chunks[1],
-        "Active Avg",
+        "Daily Avg",
         &report::format_duration(stats.active_day_average_seconds),
         &format!("{} tracked days", stats.total_days),
         theme.success,
@@ -538,7 +565,7 @@ fn render_kpis(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         chunks[2],
         "Longest",
         &report::format_duration(stats.longest_block_seconds),
-        &format!("{} focus blocks", stats.focus_block_count),
+        &format!("{} focus sessions", stats.focus_block_count),
         theme.secondary,
         theme,
     );
@@ -587,17 +614,28 @@ fn render_kpi(
 }
 
 fn render_focus_chart(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Focus Flow", theme, theme.success);
+    let block = widgets::panel("Daily Pattern", theme, theme.success);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if app.report().daily.is_empty() {
         widgets::render_empty(frame, inner, "No daily focus yet", theme);
         return;
     }
+    let legend_height = if inner.height >= 9 { 2 } else { 1 };
+    let [legend, chart_area] =
+        *Layout::vertical([Constraint::Length(legend_height), Constraint::Min(3)]).split(inner)
+    else {
+        return;
+    };
     let focused = daily_points(&app.report().daily, |day| day.focused_seconds);
     let open = daily_points(&app.report().daily, |day| day.open_seconds);
     let idle = daily_points(&app.report().daily, |day| day.idle_seconds);
     let locked = daily_points(&app.report().daily, |day| day.locked_seconds);
+    let selected_focus = focused
+        .get(app.selected_day_index())
+        .copied()
+        .into_iter()
+        .collect::<Vec<_>>();
     let max = app
         .report()
         .daily
@@ -614,7 +652,8 @@ fn render_focus_chart(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
         .unwrap_or(1)
         .max(1) as f64;
     let labels = chart_labels(&app.report().daily);
-    let datasets = vec![
+    render_focus_flow_legend(frame, legend, app, theme);
+    let mut datasets = vec![
         Dataset::default()
             .name("focus")
             .marker(symbols::Marker::Braille)
@@ -641,6 +680,16 @@ fn render_focus_chart(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             .style(Style::default().fg(theme.danger))
             .data(&locked),
     ];
+    if !selected_focus.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .name("selected")
+                .marker(symbols::Marker::Block)
+                .graph_type(GraphType::Scatter)
+                .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD))
+                .data(&selected_focus),
+        );
+    }
     let chart = Chart::new(datasets)
         .x_axis(
             Axis::default()
@@ -652,18 +701,99 @@ fn render_focus_chart(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             Axis::default()
                 .style(Style::default().fg(theme.dim).bg(theme.panel))
                 .bounds([0.0, max])
-                .labels([
-                    Line::from("0"),
-                    Line::from(widgets::compact_duration(max as i64)),
-                ]),
+                .labels(flow_y_axis_labels(max, chart_area.height)),
         )
         .legend_position(None)
         .style(Style::default().bg(theme.panel));
-    frame.render_widget(chart, inner);
+    frame.render_widget(chart, chart_area);
+}
+
+fn render_focus_flow_legend(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    if area.height == 0 {
+        return;
+    }
+    let mut lines = vec![Line::from(vec![
+        Span::styled("focus", Style::default().fg(theme.warn).bg(theme.panel)),
+        Span::styled(
+            "  open",
+            Style::default().fg(theme.secondary).bg(theme.panel),
+        ),
+        Span::styled(
+            "  idle",
+            Style::default().fg(theme.tertiary).bg(theme.panel),
+        ),
+        Span::styled(
+            "  locked",
+            Style::default().fg(theme.danger).bg(theme.panel),
+        ),
+    ])];
+    if area.height > 1 {
+        lines.push(Line::from(Span::styled(
+            widgets::fit_text(&focus_flow_summary(app), area.width as usize),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        area,
+    );
+}
+
+fn focus_flow_summary(app: &App) -> String {
+    let focus_share = widgets::ratio(
+        app.report().total_focused_seconds,
+        app.report().total_open_seconds,
+    );
+    let selected = app
+        .selected_day()
+        .map(|day| {
+            let day_share = widgets::ratio(day.focused_seconds, day.open_seconds);
+            format!(
+                "{}: {} focus, {} open, {} focused while open",
+                day.label,
+                report::format_duration(day.focused_seconds),
+                report::format_duration(day.open_seconds),
+                report::percent(day_share)
+            )
+        })
+        .unwrap_or_else(|| "No day selected".to_string());
+    let best = app
+        .stats()
+        .best_day_label
+        .as_ref()
+        .map(|label| {
+            format!(
+                "best {label} {}",
+                report::format_duration(app.stats().best_day_seconds)
+            )
+        })
+        .unwrap_or_else(|| "best none".to_string());
+    format!(
+        "{selected} | {} days with focus | daily avg {} | focus share {} | {best}",
+        app.stats().active_days,
+        report::format_duration(app.stats().active_day_average_seconds),
+        report::percent(focus_share)
+    )
+}
+
+fn flow_y_axis_labels(max: f64, height: u16) -> Vec<Line<'static>> {
+    let max_seconds = max.round() as i64;
+    if height >= 8 {
+        vec![
+            Line::from("0"),
+            Line::from(widgets::compact_duration(max_seconds / 2)),
+            Line::from(widgets::compact_duration(max_seconds)),
+        ]
+    } else {
+        vec![
+            Line::from("0"),
+            Line::from(widgets::compact_duration(max_seconds)),
+        ]
+    }
 }
 
 fn render_focus_sparkline(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Focus Spark", theme, theme.success);
+    let block = widgets::panel("Daily Pattern", theme, theme.success);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let values = app
@@ -703,16 +833,23 @@ fn render_focus_sparkline(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         .last()
         .map(|day| day.label.as_str())
         .unwrap_or("");
+    let selected = app
+        .selected_day()
+        .map(|day| format!("selected {}", day.label))
+        .unwrap_or_else(|| "no day selected".to_string());
     frame.render_widget(
-        Paragraph::new(format!("{first} -> {last}"))
-            .style(Style::default().fg(theme.dim).bg(theme.panel))
-            .alignment(Alignment::Center),
+        Paragraph::new(widgets::fit_text(
+            &format!("{first} -> {last} | {selected}"),
+            caption.width as usize,
+        ))
+        .style(Style::default().fg(theme.dim).bg(theme.panel))
+        .alignment(Alignment::Center),
         caption,
     );
 }
 
 fn render_focus_composition(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Focus Composition", theme, theme.warn);
+    let block = widgets::panel("App Mix", theme, theme.warn);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if app.report().apps.is_empty() {
@@ -720,84 +857,77 @@ fn render_focus_composition(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
         return;
     }
 
-    if inner.width < 42 || inner.height < 9 {
-        render_composition_list(frame, inner, app, theme);
-        return;
-    }
-
-    let labels = app
-        .report()
-        .apps
-        .iter()
-        .map(|row| widgets::fit_text(&row.label, 15).trim_end().to_string())
-        .collect::<Vec<_>>();
-    let slices = app
-        .report()
-        .apps
-        .iter()
-        .enumerate()
-        .zip(labels.iter())
-        .filter(|((_, row), _)| row.focused_seconds > 0)
-        .map(|((index, row), label)| {
-            PieSlice::new(
-                label.as_str(),
-                row.focused_seconds.max(0) as f64,
-                widgets::rank_color(index, theme),
-            )
-        })
-        .collect::<Vec<_>>();
-    let legend_position = if inner.width < 56 {
-        LegendPosition::Bottom
-    } else {
-        LegendPosition::Right
-    };
-    let pie = PieChart::new(slices)
-        .style(Style::default().bg(theme.panel).fg(theme.text))
-        .resolution(Resolution::Braille)
-        .show_legend(true)
-        .show_percentages(true)
-        .legend_position(legend_position)
-        .legend_layout(if legend_position == LegendPosition::Bottom {
-            LegendLayout::Horizontal
-        } else {
-            LegendLayout::Vertical
-        })
-        .legend_marker("■")
-        .pie_char('█');
-    frame.render_widget(pie, inner);
+    render_composition_list(frame, inner, app, theme);
 }
 
 fn render_composition_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let [bar, list] = *Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area)
+    let header_height = if area.height >= 7 { 2 } else { 1 };
+    let [summary, list] =
+        *Layout::vertical([Constraint::Length(header_height), Constraint::Min(1)]).split(area)
     else {
         return;
     };
+    let mut summary_lines = vec![widgets::app_share_line(
+        &app.report().apps,
+        summary.width as usize,
+        theme,
+    )];
+    if summary.height > 1 {
+        let top = app.report().apps.first();
+        let text = top
+            .map(|row| {
+                let density = widgets::ratio(row.focused_seconds, row.open_seconds);
+                format!(
+                    "top {} {} ({}) | focus share {}",
+                    row.label,
+                    report::format_duration(row.focused_seconds),
+                    report::percent(row.share),
+                    report::percent(density)
+                )
+            })
+            .unwrap_or_else(|| "no focused app time".to_string());
+        summary_lines.push(Line::from(Span::styled(
+            widgets::fit_text(&text, summary.width as usize),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        )));
+    }
     frame.render_widget(
-        Paragraph::new(vec![widgets::app_share_line(
-            &app.report().apps,
-            bar.width as usize,
-            theme,
-        )])
-        .style(Style::default().bg(theme.panel)),
-        bar,
+        Paragraph::new(summary_lines).style(Style::default().bg(theme.panel)),
+        summary,
     );
+    let label_width = if list.width < 40 { 12 } else { 16 };
     let bars = app
         .report()
         .apps
         .iter()
         .enumerate()
-        .take(list.height.saturating_sub(1) as usize)
+        .take(list.height as usize)
         .map(|(index, row)| {
             Bar::with_label(
-                widgets::fit_text(&row.label, 16),
+                widgets::fit_text(&row.label, label_width),
                 row.focused_seconds.max(0) as u64,
             )
-            .text_value(report::format_duration(row.focused_seconds))
+            .text_value(format!(
+                "{} {}",
+                widgets::compact_duration(row.focused_seconds),
+                report::percent(row.share)
+            ))
             .style(Style::default().fg(widgets::rank_color(index, theme)))
             .value_style(Style::default().fg(theme.text))
         })
         .collect::<Vec<_>>();
+    let max = app
+        .report()
+        .apps
+        .iter()
+        .map(|row| row.focused_seconds)
+        .max()
+        .unwrap_or(1)
+        .max(1) as u64;
     let chart = BarChart::horizontal(bars)
+        .max(max)
+        .bar_width(1)
+        .bar_gap(0)
         .bar_style(Style::default().fg(theme.warn).bg(theme.panel))
         .value_style(Style::default().fg(theme.text).bg(theme.panel))
         .label_style(Style::default().fg(theme.muted).bg(theme.panel))
@@ -806,7 +936,7 @@ fn render_composition_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
 }
 
 fn render_peak_hours(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Peak Hours", theme, theme.secondary);
+    let block = widgets::panel("Top Hours", theme, theme.secondary);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let hours = hour_totals(&app.data().heatmap);
@@ -875,7 +1005,7 @@ fn render_workspace_focus(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
 }
 
 fn render_focus_stats(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Focus Stats", theme, theme.primary);
+    let block = widgets::panel("Focus Sessions", theme, theme.primary);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let stats = app.stats();
@@ -923,35 +1053,35 @@ fn render_focus_stats(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             theme,
         ),
         widgets::metric_line(
-            "Peak hour",
+            "Top hour",
             &peak_hour,
             inner.width as usize,
             theme.secondary,
             theme,
         ),
         widgets::metric_line(
-            "Peak weekday",
+            "Top weekday",
             &peak_day,
             inner.width as usize,
             theme.tertiary,
             theme,
         ),
         widgets::metric_line(
-            "Avg block",
+            "Average session",
             &report::format_duration(stats.average_block_seconds),
             inner.width as usize,
             theme.success,
             theme,
         ),
         widgets::metric_line(
-            "Median block",
+            "Typical session",
             &report::format_duration(stats.median_block_seconds),
             inner.width as usize,
             theme.success,
             theme,
         ),
         widgets::metric_line(
-            "Deep focus",
+            "Long sessions",
             &format!(
                 "{} / {}",
                 stats.deep_block_count,
@@ -962,7 +1092,7 @@ fn render_focus_stats(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             theme,
         ),
         widgets::metric_line(
-            "Switches",
+            "App changes",
             &format!("{} ({switch_rate:.1}/h)", stats.app_switch_count),
             inner.width as usize,
             theme.muted,
@@ -985,20 +1115,20 @@ fn render_focus_stats(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
 }
 
 fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Period Signals", theme, theme.success);
+    let block = widgets::panel("Time Breakdown", theme, theme.success);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 6 {
-        let density = widgets::ratio(
+        let focus_share = widgets::ratio(
             app.report().total_focused_seconds,
             app.report().total_open_seconds,
         );
         let lines = vec![
             widgets::metric_line(
-                "Density",
-                &report::percent(density),
+                "Focus share",
+                &report::percent(focus_share),
                 inner.width as usize,
-                widgets::density_color(density, theme),
+                widgets::density_color(focus_share, theme),
                 theme,
             ),
             widgets::metric_line(
@@ -1009,7 +1139,7 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
                 theme,
             ),
             widgets::metric_line(
-                "Idle",
+                "Away",
                 &report::format_duration(app.report().total_idle_seconds),
                 inner.width as usize,
                 theme.tertiary,
@@ -1023,7 +1153,7 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
                 theme,
             ),
             widgets::metric_line(
-                "Unobserved",
+                "Tracker off",
                 &report::format_duration(app.report().total_unobserved_seconds),
                 inner.width as usize,
                 theme.warn,
@@ -1042,7 +1172,7 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     else {
         return;
     };
-    let focus_density = widgets::ratio(
+    let focus_share = widgets::ratio(
         app.report().total_focused_seconds,
         app.report().total_open_seconds,
     );
@@ -1062,9 +1192,12 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     .split(gauges);
     frame.render_widget(
         LineGauge::default()
-            .label(format!("focus/open {}", report::percent(focus_density)))
-            .ratio(focus_density)
-            .filled_style(Style::default().fg(widgets::density_color(focus_density, theme)))
+            .label(format!(
+                "focused while open {}",
+                report::percent(focus_share)
+            ))
+            .ratio(focus_share)
+            .filled_style(Style::default().fg(widgets::density_color(focus_share, theme)))
             .unfilled_style(Style::default().fg(theme.dim))
             .style(Style::default().bg(theme.panel)),
         gauge_lines[0],
@@ -1072,7 +1205,7 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     frame.render_widget(
         LineGauge::default()
             .label(format!(
-                "focus signal {}",
+                "focus time {}",
                 report::percent(app.report().total_focused_seconds as f64 / signal_total as f64)
             ))
             .ratio(app.report().total_focused_seconds as f64 / signal_total as f64)
@@ -1084,7 +1217,7 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     frame.render_widget(
         LineGauge::default()
             .label(format!(
-                "excluded signal {}",
+                "not counted {}",
                 report::percent(
                     (app.report().total_idle_seconds
                         + app.report().total_locked_seconds
@@ -1114,7 +1247,7 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
             theme,
         ),
         widgets::metric_line(
-            "Idle total",
+            "Away total",
             &report::format_duration(app.report().total_idle_seconds),
             details.width as usize,
             theme.tertiary,
@@ -1135,14 +1268,14 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
             theme,
         ),
         widgets::metric_line(
-            "Unobserved",
+            "Tracker off",
             &report::format_duration(app.report().total_unobserved_seconds),
             details.width as usize,
             theme.warn,
             theme,
         ),
         widgets::metric_line(
-            "Daily avg",
+            "Daily average",
             &report::format_duration(app.stats().daily_average_seconds),
             details.width as usize,
             theme.success,
@@ -1158,11 +1291,11 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
 }
 
 fn render_heatmap(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Focus Heat", theme, theme.tertiary);
+    let block = widgets::panel("When Focus Happens", theme, theme.tertiary);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.width < 32 || inner.height < 5 {
-        widgets::render_empty(frame, inner, "Need more space for heatmap", theme);
+    if inner.width < 32 || inner.height < 8 {
+        widgets::render_empty(frame, inner, "Need more space for hourly view", theme);
         return;
     }
     let max = app
@@ -1176,36 +1309,37 @@ fn render_heatmap(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         widgets::render_empty(frame, inner, "No hourly focus data for this period", theme);
         return;
     }
+    let label_width = 4_usize;
+    let available = (inner.width as usize).saturating_sub(label_width).max(24);
+    let cell_width = (available / 24).clamp(1, 6);
+    let heat_width = cell_width * 24;
+    let left_pad = available.saturating_sub(heat_width) / 2;
+    let layout = HeatmapLayout {
+        max,
+        label_width,
+        left_pad,
+        cell_width,
+    };
+    let leading_width = layout.label_width + layout.left_pad;
+    let summary_height = usize::from(inner.height >= 10);
+    let day_space = (inner.height as usize).saturating_sub(1 + summary_height);
+    let row_height = (day_space / 7).clamp(1, 2);
+
     let mut rows = Vec::new();
-    rows.push(Line::from(vec![
-        Span::styled("    ", Style::default().bg(theme.panel)),
-        Span::styled(
-            "00 03 06 09 12 15 18 21",
-            Style::default().fg(theme.dim).bg(theme.panel),
-        ),
-    ]));
+    rows.push(heatmap_axis_line(leading_width, cell_width, theme));
     for weekday in 0..7 {
-        let mut spans = vec![Span::styled(
-            format!("{:<3} ", WEEKDAYS[weekday as usize]),
-            Style::default().fg(theme.dim).bg(theme.panel),
-        )];
-        for hour in 0..24 {
-            let seconds = heat_value(&app.data().heatmap, weekday, hour);
-            let bucket = ((seconds as f64 / max as f64) * (HEAT_CHARS.len() as f64 - 1.0))
-                .round()
-                .clamp(0.0, HEAT_CHARS.len() as f64 - 1.0) as usize;
-            spans.push(Span::styled(
-                HEAT_CHARS[bucket].to_string(),
-                Style::default()
-                    .fg(if seconds > 0 {
-                        widgets::density_color(seconds as f64 / max as f64, theme)
-                    } else {
-                        theme.dim
-                    })
-                    .bg(theme.panel),
+        for repeat in 0..row_height {
+            rows.push(heatmap_weekday_line(
+                &app.data().heatmap,
+                weekday,
+                layout,
+                repeat == 0,
+                theme,
             ));
         }
-        rows.push(Line::from(spans));
+    }
+    if summary_height > 0 {
+        rows.push(heatmap_summary_line(&app.data().heatmap, max, theme));
     }
     frame.render_widget(
         Paragraph::new(rows)
@@ -1213,6 +1347,109 @@ fn render_heatmap(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+fn heatmap_axis_line(leading_width: usize, cell_width: usize, theme: &Theme) -> Line<'static> {
+    let mut axis = vec![' '; cell_width * 24];
+    for hour in (0..24).step_by(3) {
+        let start = hour * cell_width;
+        let label = format!("{hour:02}");
+        for (offset, ch) in label.chars().enumerate() {
+            if let Some(slot) = axis.get_mut(start + offset) {
+                *slot = ch;
+            }
+        }
+    }
+    Line::from(vec![
+        Span::styled(" ".repeat(leading_width), Style::default().bg(theme.panel)),
+        Span::styled(
+            axis.into_iter().collect::<String>(),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        ),
+    ])
+}
+
+#[derive(Clone, Copy)]
+struct HeatmapLayout {
+    max: i64,
+    label_width: usize,
+    left_pad: usize,
+    cell_width: usize,
+}
+
+fn heatmap_weekday_line(
+    cells: &[FocusHeatCell],
+    weekday: u32,
+    layout: HeatmapLayout,
+    show_label: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(
+            if show_label {
+                format!("{:<3} ", WEEKDAYS[weekday as usize])
+            } else {
+                " ".repeat(layout.label_width)
+            },
+            Style::default().fg(theme.dim).bg(theme.panel),
+        ),
+        Span::styled(
+            " ".repeat(layout.left_pad),
+            Style::default().bg(theme.panel),
+        ),
+    ];
+    for hour in 0..24 {
+        let seconds = heat_value(cells, weekday, hour);
+        let intensity = seconds as f64 / layout.max as f64;
+        let bucket = (intensity * (HEAT_CHARS.len() as f64 - 1.0))
+            .round()
+            .clamp(0.0, HEAT_CHARS.len() as f64 - 1.0) as usize;
+        let glyph = if seconds > 0 {
+            HEAT_CHARS[bucket]
+        } else {
+            HEAT_CHARS[0]
+        };
+        spans.push(Span::styled(
+            glyph.to_string().repeat(layout.cell_width),
+            Style::default()
+                .fg(if seconds > 0 {
+                    widgets::density_color(intensity, theme)
+                } else {
+                    theme.dim
+                })
+                .bg(theme.panel),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn heatmap_summary_line(cells: &[FocusHeatCell], max: i64, theme: &Theme) -> Line<'static> {
+    let peak = cells
+        .iter()
+        .max_by_key(|cell| cell.focused_seconds)
+        .filter(|cell| cell.focused_seconds > 0);
+    let peak_label = peak
+        .map(|cell| {
+            format!(
+                "peak {} {} {}",
+                weekday_label(cell.weekday),
+                hour_label(cell.hour),
+                report::format_duration(cell.focused_seconds)
+            )
+        })
+        .unwrap_or_else(|| "peak none".to_string());
+    let max_label = format!("darkest = {}", report::format_duration(max));
+    Line::from(vec![
+        Span::styled("lighter ", Style::default().fg(theme.dim).bg(theme.panel)),
+        Span::styled("░", Style::default().fg(theme.secondary).bg(theme.panel)),
+        Span::styled("▒", Style::default().fg(theme.success).bg(theme.panel)),
+        Span::styled("▓", Style::default().fg(theme.warn).bg(theme.panel)),
+        Span::styled("█", Style::default().fg(theme.warn).bg(theme.panel)),
+        Span::styled(" darker  ", Style::default().fg(theme.dim).bg(theme.panel)),
+        Span::styled(peak_label, Style::default().fg(theme.text).bg(theme.panel)),
+        Span::styled("  ", Style::default().bg(theme.panel)),
+        Span::styled(max_label, Style::default().fg(theme.dim).bg(theme.panel)),
+    ])
 }
 
 fn render_lens_totals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -1301,7 +1538,7 @@ fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         ],
     )
     .header(
-        Row::new(["#", "Application", "Focused", "Share", "Dense", "Open"])
+        Row::new(["#", "Application", "Focused", "Share", "Focus %", "Open"])
             .style(Style::default().fg(theme.muted).bg(theme.panel_alt))
             .bottom_margin(1),
     )
@@ -1375,7 +1612,7 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
             theme,
         ),
         widgets::metric_line(
-            "Density",
+            "Focus share",
             &report::percent(density),
             summary.width as usize,
             widgets::density_color(density, theme),
@@ -1396,14 +1633,14 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
             theme,
         ),
         widgets::metric_line(
-            "Longest block",
+            "Best session",
             &facts.longest_block_label,
             summary.width as usize,
             theme.success,
             theme,
         ),
         widgets::metric_line(
-            "Fragment",
+            "Interruptions",
             &facts.fragmentation_label,
             summary.width as usize,
             theme.warn,
@@ -1646,7 +1883,7 @@ fn render_activity_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
 }
 
 fn render_gap_summary(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let block = widgets::panel("Excluded Gaps", theme, theme.warn);
+    let block = widgets::panel("Not Counted", theme, theme.warn);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let sleep_count = app
@@ -1669,7 +1906,7 @@ fn render_gap_summary(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
         widgets::render_empty(
             frame,
             inner,
-            "No sleep or offline gaps in this period",
+            "No sleep or tracker-off gaps in this period",
             theme,
         );
         return;
@@ -1695,7 +1932,7 @@ fn render_gap_summary(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             theme,
         ),
         widgets::metric_line(
-            "Offline",
+            "Tracker off",
             &format!(
                 "{} in {} intervals",
                 report::format_duration(app.report().total_unobserved_seconds),
@@ -1706,7 +1943,7 @@ fn render_gap_summary(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             theme,
         ),
         widgets::metric_line(
-            "Excluded",
+            "Not counted",
             &format!(
                 "{} ({})",
                 report::format_duration(excluded),
@@ -1845,8 +2082,8 @@ fn system_interval_row(
             theme.tertiary,
         ),
         SystemIntervalKind::Unobserved => (
-            "offline",
-            system_interval_source("Offline gap", interval.source.as_deref()),
+            "tracker",
+            system_interval_source("Tracker off gap", interval.source.as_deref()),
             theme.warn,
         ),
     };
@@ -1973,7 +2210,7 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
     .split(gauges);
     frame.render_widget(
         LineGauge::default()
-            .label(format!("density {}", report::percent(focus_ratio)))
+            .label(format!("focus share {}", report::percent(focus_ratio)))
             .ratio(focus_ratio)
             .filled_style(Style::default().fg(widgets::density_color(focus_ratio, theme)))
             .unfilled_style(Style::default().fg(theme.dim))
@@ -2008,7 +2245,7 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
             theme,
         ),
         widgets::metric_line(
-            "Idle",
+            "Away",
             &report::format_duration(app.report().total_idle_seconds),
             details.width as usize,
             theme.secondary,
@@ -2029,7 +2266,7 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
             theme,
         ),
         widgets::metric_line(
-            "Unobserved",
+            "Tracker off",
             &report::format_duration(app.report().total_unobserved_seconds),
             details.width as usize,
             theme.warn,
@@ -2072,7 +2309,10 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         ]),
         Line::from(vec![
             Span::styled("j / k or ↑ / ↓", Style::default().fg(theme.primary)),
-            Span::styled("  move selected row", Style::default().fg(theme.text)),
+            Span::styled(
+                "  inspect day or move selection",
+                Style::default().fg(theme.text),
+            ),
         ]),
         Line::from(vec![
             Span::styled("1-5", Style::default().fg(theme.primary)),
@@ -2084,7 +2324,7 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         Line::from(vec![
             Span::styled("p", Style::default().fg(theme.primary)),
             Span::styled(
-                "  toggle overview stats / signals",
+                "  toggle overview sessions / time mix",
                 Style::default().fg(theme.text),
             ),
         ]),
@@ -2155,9 +2395,92 @@ fn insight_entries(insights: &[Insight]) -> Vec<InsightEntry> {
 fn insight_category_label(category: InsightCategory) -> &'static str {
     match category {
         InsightCategory::Patterns => "Patterns",
-        InsightCategory::FocusQuality => "Focus Quality",
+        InsightCategory::FocusQuality => "Focus",
         InsightCategory::Apps => "Apps",
-        InsightCategory::SystemSignals => "System Signals",
+        InsightCategory::SystemSignals => "System",
+    }
+}
+
+fn insight_display_title(insight: &Insight) -> String {
+    match insight.kind {
+        InsightKind::TopApp => "Top app".to_string(),
+        InsightKind::DayComparison => "Compared with yesterday".to_string(),
+        InsightKind::PeriodComparison => "Compared with last period".to_string(),
+        InsightKind::BestDay => "Best day".to_string(),
+        InsightKind::WorstActiveDay => "Lightest day".to_string(),
+        InsightKind::CurrentStreak => "Current streak".to_string(),
+        InsightKind::LongestStreak => "Best streak".to_string(),
+        InsightKind::PeakFocusHour => "Top hour".to_string(),
+        InsightKind::PeakFocusWeekday => "Top weekday".to_string(),
+        InsightKind::DeepWorkBlocks => "Long sessions".to_string(),
+        InsightKind::AppSwitchRate => "App changes".to_string(),
+        InsightKind::FragmentedApp => "Most interrupted app".to_string(),
+        InsightKind::FocusDensity => "Focus share".to_string(),
+        InsightKind::AppFocusDensity if insight.title.to_lowercase().contains("lowest") => {
+            "Lowest focus share app".to_string()
+        }
+        InsightKind::AppFocusDensity => "Highest focus share app".to_string(),
+        InsightKind::EffectiveApps => "Focus spread".to_string(),
+        InsightKind::StrongestWorkspace => "Top workspace".to_string(),
+        InsightKind::WorkspaceAppAffinity => "Workspace pairing".to_string(),
+        InsightKind::IdleExcluded => "Away time".to_string(),
+        InsightKind::LockedExcluded => "Locked time".to_string(),
+        InsightKind::SleepExcluded => "Sleep time".to_string(),
+        InsightKind::UnobservedExcluded => "Tracker off time".to_string(),
+        InsightKind::ExcludedImpact => "Not counted time".to_string(),
+        InsightKind::FocusAnomaly => "Unusual focus time".to_string(),
+        InsightKind::AppAnomaly => "Unusual app time".to_string(),
+        InsightKind::HourAnomaly => "Unusual hour".to_string(),
+        InsightKind::UnobservedAnomaly => "Tracker off gap".to_string(),
+    }
+}
+
+fn insight_display_explanation(insight: &Insight) -> String {
+    match insight.kind {
+        InsightKind::TopApp => {
+            "The app with the largest share of focused time in this period.".to_string()
+        }
+        InsightKind::DayComparison => {
+            "Compares today's focus time with yesterday.".to_string()
+        }
+        InsightKind::PeriodComparison => {
+            "Compares this period with the previous matching period.".to_string()
+        }
+        InsightKind::WorstActiveDay => {
+            "Shows the active day with the least focused time in this period.".to_string()
+        }
+        InsightKind::DeepWorkBlocks => {
+            "Counts long focus sessions at or above your long session threshold.".to_string()
+        }
+        InsightKind::AppSwitchRate => {
+            "Counts how often focus moved from one app to another.".to_string()
+        }
+        InsightKind::FragmentedApp => {
+            "Shows the app with the shortest typical focus sessions.".to_string()
+        }
+        InsightKind::FocusDensity => {
+            "Shows how much open app time was focused.".to_string()
+        }
+        InsightKind::AppFocusDensity => {
+            "Shows which app had the strongest or weakest focus share while open.".to_string()
+        }
+        InsightKind::EffectiveApps => {
+            "Estimates how broadly your focus was spread across apps.".to_string()
+        }
+        InsightKind::IdleExcluded => "Away time was not counted as focus.".to_string(),
+        InsightKind::LockedExcluded => "Locked-screen time was not counted as focus.".to_string(),
+        InsightKind::SleepExcluded => "Sleep time was not counted as focus.".to_string(),
+        InsightKind::UnobservedExcluded => {
+            "Tracker off time was not counted as focus.".to_string()
+        }
+        InsightKind::ExcludedImpact => {
+            "Shows how much time was left out because it was away, locked, sleep, or tracker off time."
+                .to_string()
+        }
+        InsightKind::UnobservedAnomaly => {
+            "Flags a tracker off gap that is larger than usual.".to_string()
+        }
+        _ => insight.explanation.clone(),
     }
 }
 
@@ -2321,7 +2644,7 @@ fn insight_support_lines(
     }
     if let Some(effective_app_count) = support.effective_app_count {
         lines.push(widgets::metric_line(
-            "Effective",
+            "Focus spread",
             &format!("{effective_app_count:.1} apps"),
             width,
             theme.primary,
@@ -2330,7 +2653,7 @@ fn insight_support_lines(
     }
     if let Some(block_count) = support.block_count {
         lines.push(widgets::metric_line(
-            "Blocks",
+            "Sessions",
             &block_count.to_string(),
             width,
             theme.success,
@@ -2339,7 +2662,7 @@ fn insight_support_lines(
     }
     if let Some(switch_count) = support.switch_count {
         lines.push(widgets::metric_line(
-            "Switches",
+            "App changes",
             &switch_count.to_string(),
             width,
             theme.warn,
@@ -2383,7 +2706,7 @@ fn insight_support_lines(
     );
     push_duration_metric(
         &mut lines,
-        "Median",
+        "Typical",
         support.median_seconds,
         width,
         theme.success,
@@ -2415,7 +2738,7 @@ fn insight_support_lines(
     );
     push_duration_metric(
         &mut lines,
-        "Excluded",
+        "Not counted",
         support.excluded_seconds,
         width,
         theme.warn,
@@ -2423,7 +2746,7 @@ fn insight_support_lines(
     );
     push_duration_metric(
         &mut lines,
-        "Idle",
+        "Away",
         support.idle_seconds,
         width,
         theme.tertiary,
@@ -2447,7 +2770,7 @@ fn insight_support_lines(
     );
     push_duration_metric(
         &mut lines,
-        "Unobserved",
+        "Tracker off",
         support.unobserved_seconds,
         width,
         theme.warn,
@@ -2625,7 +2948,7 @@ fn app_detail_facts(app: &App, row: &AppTotals) -> AppDetailFacts {
         0.0
     };
     let fragmentation_label = if block_count > 0 {
-        format!("{block_count} blocks ({blocks_per_hour:.1}/h)")
+        format!("{block_count} sessions ({blocks_per_hour:.1}/h)")
     } else {
         "none".to_string()
     };

@@ -30,6 +30,21 @@ function fmtDelta(seconds) {
   return (seconds < 0 ? "-" : "+") + fmt(Math.abs(seconds))
 }
 
+function optionalNumber(object, key) {
+  if (!object || object[key] === undefined || object[key] === null) return null
+  var value = Number(object[key])
+  if (isNaN(value)) return null
+  return Math.max(0, Math.floor(value))
+}
+
+function firstNumber(object, keys, fallback) {
+  for (var i = 0; i < keys.length; i++) {
+    var value = optionalNumber(object, keys[i])
+    if (value !== null) return value
+  }
+  return Math.max(0, Math.floor(Number(fallback) || 0))
+}
+
 function appLabel(app) {
   var value = String(app || "App").replace(/^com\./, "").replace(/^org\./, "")
   var parts = value.split(".")
@@ -93,9 +108,31 @@ function pad2(n) {
 
 function totalForDay(daily, key) {
   for (var i = 0; i < (daily || []).length; i++) {
-    if (String(daily[i].date || "") === key) return Number(daily[i].focused_seconds || 0)
+    if (String(daily[i].date || "") === key) return dayFocusedSeconds(daily[i])
   }
   return 0
+}
+
+function dayFocusedSeconds(day) {
+  return firstNumber(day, ["focused_seconds", "focus_seconds", "seconds", "total_focused_seconds"], 0)
+}
+
+function dayOpenSeconds(day) {
+  return firstNumber(day, ["open_seconds", "total_open_seconds"], 0)
+}
+
+function dayExcludedSeconds(day) {
+  var explicit = optionalNumber(day, "excluded_seconds")
+  if (explicit !== null) return explicit
+  return firstNumber(day, ["idle_seconds"], 0)
+    + firstNumber(day, ["locked_seconds"], 0)
+    + firstNumber(day, ["sleep_seconds"], 0)
+    + firstNumber(day, ["unobserved_seconds"], 0)
+}
+
+function dayDensity(day) {
+  var open = dayOpenSeconds(day)
+  return open > 0 ? dayFocusedSeconds(day) / open : 0
 }
 
 function relativeDayLabel(day, todayKey) {
@@ -109,14 +146,47 @@ function weekTrend(daily, todayKey) {
   var out = []
   var list = daily || []
   for (var i = 0; i < list.length; i++) {
+    var focused = dayFocusedSeconds(list[i])
+    var open = dayOpenSeconds(list[i])
+    var excluded = dayExcludedSeconds(list[i])
     out.push({
       key: String(list[i].date || ""),
-      seconds: Number(list[i].focused_seconds || 0),
+      seconds: focused,
+      focused_seconds: focused,
+      open_seconds: open,
+      excluded_seconds: excluded,
+      density: open > 0 ? focused / open : 0,
+      valueText: fmt(focused),
+      openText: open > 0 ? fmt(open) : "--",
+      excludedText: excluded > 0 ? fmt(excluded) : "0s",
+      densityText: open > 0 ? percent(focused / open) : "--",
+      focusShareText: open > 0 ? "Focus " + percent(focused / open) : "Focus --",
       label: String(list[i].label || ""),
       isToday: String(list[i].date || "") === todayKey
     })
   }
   return out
+}
+
+function weekTrendSummary(daily, todayKey) {
+  var list = weekTrend(daily, todayKey)
+  if (list.length === 0) return ""
+  var total = 0
+  var active = 0
+  var best = null
+  var today = null
+  for (var i = 0; i < list.length; i++) {
+    total += list[i].seconds
+    if (list[i].seconds > 0) active += 1
+    if (!best || list[i].seconds > best.seconds) best = list[i]
+    if (list[i].isToday) today = list[i]
+  }
+  var parts = []
+  if (today) parts.push("Today " + fmt(today.seconds))
+  if (best && best.seconds > 0) parts.push("Best " + String(best.label || best.key) + " " + fmt(best.seconds))
+  parts.push("Average " + fmt(Math.round(total / list.length)))
+  if (active !== list.length) parts.push(active + "/" + list.length + " days with focus")
+  return parts.join("  ")
 }
 
 function insights(rows, daily, todayKey, totalSeconds) {
@@ -134,18 +204,18 @@ function insights(rows, daily, todayKey, totalSeconds) {
 
   var yesterday = totalForDay(daily, previousDateKey(todayKey))
   if (yesterday > 0) {
-    out.push({ label: "vs yesterday", value: fmtDelta(total - yesterday) })
+    out.push({ label: "Compared with yesterday", value: fmtDelta(total - yesterday) })
   }
 
   var best = null
   for (var i = 0; i < (daily || []).length; i++) {
-    if (!best || Number(daily[i].focused_seconds || 0) > Number(best.focused_seconds || 0))
+    if (!best || dayFocusedSeconds(daily[i]) > dayFocusedSeconds(best))
       best = daily[i]
   }
-  if (best && Number(best.focused_seconds || 0) > 0) {
+  if (best && dayFocusedSeconds(best) > 0) {
     out.push({
-      label: "Busiest day (7d)",
-      value: relativeDayLabel(best, todayKey) + " - " + fmt(Number(best.focused_seconds || 0))
+      label: "Best day (7d)",
+      value: relativeDayLabel(best, todayKey) + " - " + fmt(dayFocusedSeconds(best))
     })
   }
 

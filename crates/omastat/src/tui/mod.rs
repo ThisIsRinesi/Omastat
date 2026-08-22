@@ -182,16 +182,54 @@ mod tests {
             "Apps",
             "Timeline",
             "System",
-            "Focus Flow",
-            "Focus Composition",
-            "Focus Heat",
+            "Daily Pattern",
+            "focus",
+            "App Mix",
+            "When Focus Happens",
+            "lighter",
+            "darkest =",
             "Workspace Focus",
-            "Peak Hours",
-            "Focus Stats",
+            "Top Hours",
+            "Focus Sessions",
             "Week of Jan 12",
         ] {
             assert!(rendered.contains(label), "missing {label}");
         }
+        for old_label in [
+            "Focus Flow",
+            "Focus Composition",
+            "Focus Heat",
+            "focus area",
+            "cell max",
+        ] {
+            assert!(
+                !rendered.contains(old_label),
+                "old label still rendered: {old_label}"
+            );
+        }
+    }
+
+    #[test]
+    fn overview_selection_inspects_daily_pattern() {
+        let backend = TestBackend::new(128, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = sample_app(View::Overview);
+
+        assert_eq!(
+            app.selected_day().map(|day| day.label.as_str()),
+            Some("D13")
+        );
+        app.move_selection(-2);
+        assert_eq!(
+            app.selected_day().map(|day| day.label.as_str()),
+            Some("D11")
+        );
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("D11:"), "selected day detail missing");
+        assert!(rendered.contains("focused while open"));
     }
 
     #[test]
@@ -207,10 +245,10 @@ mod tests {
             "Insights",
             "Insight Details",
             "Patterns",
-            "Focus Quality",
+            "Focus",
             "Apps",
-            "System Signals",
-            "Top app share",
+            "System",
+            "Top app",
             "Ghostty",
             "Observed",
         ] {
@@ -275,8 +313,8 @@ mod tests {
         let rendered = rendered_text(&terminal);
         for label in [
             "Typical hour",
-            "Longest block",
-            "Fragment",
+            "Best session",
+            "Interruptions",
             "Workspace",
             "code",
         ] {
@@ -294,11 +332,11 @@ mod tests {
 
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("Activity Canvas"));
-        assert!(rendered.contains("Excluded Gaps"));
+        assert!(rendered.contains("Not Counted"));
         assert!(rendered.contains("Intervals"));
         assert!(rendered.contains("Ghostty"));
         assert!(rendered.contains("System sleep"));
-        assert!(rendered.contains("Offline gap"));
+        assert!(rendered.contains("Tracker off gap"));
     }
 
     #[test]
@@ -324,8 +362,8 @@ mod tests {
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
 
         let rendered = rendered_text(&terminal);
-        assert!(rendered.contains("Focus Spark"));
-        assert!(rendered.contains("Focus Stats"));
+        assert!(rendered.contains("Daily Pattern"));
+        assert!(rendered.contains("Focus Sessions"));
         assert!(!rendered.contains("Need more space"));
     }
 

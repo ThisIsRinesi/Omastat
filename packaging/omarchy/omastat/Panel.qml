@@ -37,6 +37,7 @@ Panel {
   readonly property var sliceColors: Model.sliceColors(apps.length, Color.accent)
   readonly property var insightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
   readonly property var weekTrend: Model.weekTrend(daily, todayKey)
+  readonly property string trendSummaryText: Model.weekTrendSummary(daily, todayKey)
   readonly property bool hasTrendDetails: weekTrend.length > 0 || insightRows.length > 0
   readonly property string densityText: totalOpen > 0 ? Model.percent(totalFocused / totalOpen) : "--"
   readonly property real weekMax: {
@@ -67,6 +68,14 @@ Panel {
     var b = parseInt(hex.substr(4, 2), 16) / 255
     if (isNaN(r) || isNaN(g) || isNaN(b)) return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, alpha)
     return Qt.rgba(r, g, b, alpha)
+  }
+
+  function insightToneColor(tone) {
+    var value = String(tone || "")
+    if (value === "positive") return root.sliceColor(1, 1.0)
+    if (value === "negative" || value === "caution") return Color.urgent
+    if (value === "info") return root.sliceColor(2, 1.0)
+    return root.sliceColor(0, 1.0)
   }
 
   function scrollBy(dy) {
@@ -151,7 +160,7 @@ Panel {
           spacing: Style.space(3)
 
           Text {
-            text: "TRENDS"
+            text: "PATTERNS"
             color: patternsMouse.containsMouse ? root.foreground : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -200,13 +209,13 @@ Panel {
 
             StatBlock {
               Layout.fillWidth: true
-              label: "Open"
+              label: "Open time"
               value: root.formatDuration(root.totalOpen)
             }
 
             StatBlock {
               Layout.fillWidth: true
-              label: "Density"
+              label: "Focus share"
               value: root.densityText
             }
 
@@ -372,46 +381,98 @@ Panel {
                 foreground: root.foreground
               }
 
-              Row {
+              Text {
+                visible: root.trendSummaryText !== ""
                 width: parent.width
-                spacing: Style.space(6)
+                text: root.trendSummaryText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
 
-                Repeater {
-                  model: root.weekTrend
+              Item {
+                width: parent.width
+                visible: root.weekTrend.length > 0
+                implicitHeight: visible ? Style.space(82) : 0
 
-                  Column {
-                    required property var modelData
+                Row {
+                  anchors.fill: parent
+                  spacing: Style.space(6)
 
-                    width: (parent.width - parent.spacing * 6) / 7
-                    spacing: Style.space(3)
+                  Repeater {
+                    model: root.weekTrend
 
                     Item {
-                      id: trendSlot
-                      width: parent.width
-                      height: Style.space(42)
+                      required property var modelData
 
-                      Rectangle {
-                        width: parent.width * 0.42
-                        radius: Style.space(2)
-                        color: modelData.isToday ? root.sliceColor(0, 1.0) : root.sliceColor(0, 0.28)
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottom: parent.bottom
-                        height: {
-                          if (modelData.seconds <= 0 || root.weekMax <= 0) return 3
-                          return Math.max(3, trendSlot.height * Number(modelData.seconds) / root.weekMax)
+                      width: root.weekTrend.length > 0 ? (parent.width - parent.spacing * (root.weekTrend.length - 1)) / root.weekTrend.length : 0
+                      height: parent.height
+
+                      Column {
+                        anchors.fill: parent
+                        spacing: Style.space(2)
+
+                        Text {
+                          width: parent.width
+                          text: String(modelData.valueText || "")
+                          color: modelData.isToday ? root.foreground : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          font.bold: modelData.isToday
+                          horizontalAlignment: Text.AlignHCenter
+                          elide: Text.ElideRight
+                        }
+
+                        Item {
+                          id: trendSlot
+                          width: parent.width
+                          height: Style.space(42)
+
+                          Rectangle {
+                            width: Math.max(Style.space(6), parent.width * 0.46)
+                            height: parent.height
+                            radius: Style.space(2)
+                            color: root.track
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.bottom: parent.bottom
+                          }
+
+                          Rectangle {
+                            visible: Number(modelData.seconds || 0) > 0 && root.weekMax > 0
+                            width: Math.max(Style.space(6), parent.width * 0.46)
+                            radius: Style.space(2)
+                            color: modelData.isToday ? root.sliceColor(0, 1.0) : root.sliceColor(0, 0.38)
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.bottom: parent.bottom
+                            height: {
+                              if (modelData.seconds <= 0 || root.weekMax <= 0) return 0
+                              return Math.max(3, trendSlot.height * Number(modelData.seconds) / root.weekMax)
+                            }
+                          }
+                        }
+
+                        Text {
+                          width: parent.width
+                          text: String(modelData.label || "")
+                          color: root.foreground
+                          opacity: modelData.isToday ? 1.0 : 0.55
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          horizontalAlignment: Text.AlignHCenter
+                          elide: Text.ElideRight
+                        }
+
+                        Text {
+                          width: parent.width
+                          text: String(modelData.focusShareText || modelData.densityText || "--")
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          horizontalAlignment: Text.AlignHCenter
+                          elide: Text.ElideRight
                         }
                       }
-                    }
-
-                    Text {
-                      width: parent.width
-                      text: String(modelData.label || "")
-                      color: root.foreground
-                      opacity: modelData.isToday ? 1.0 : 0.5
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      horizontalAlignment: Text.AlignHCenter
-                      elide: Text.ElideRight
                     }
                   }
                 }
@@ -429,31 +490,67 @@ Panel {
                   required property var modelData
 
                   width: parent.width
-                  implicitHeight: Math.max(labelText.implicitHeight, valueText.implicitHeight)
+                  implicitHeight: insightColumn.implicitHeight
 
-                  Text {
-                    id: labelText
-                    text: String(modelData.label || "")
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
+                  Rectangle {
+                    width: Style.space(3)
+                    height: parent.height
+                    radius: width / 2
+                    color: root.insightToneColor(modelData.tone)
+                    opacity: 0.75
                     anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                    elide: Text.ElideRight
-                    width: parent.width * 0.4
+                    anchors.top: parent.top
                   }
 
-                  Text {
-                    id: valueText
-                    text: String(modelData.value || "")
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
+                  Column {
+                    id: insightColumn
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(9)
                     anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    horizontalAlignment: Text.AlignRight
-                    elide: Text.ElideRight
-                    width: parent.width * 0.58
+                    spacing: Style.space(2)
+
+                    Item {
+                      width: parent.width
+                      implicitHeight: Math.max(labelText.implicitHeight, valueText.implicitHeight)
+
+                      Text {
+                        id: labelText
+                        text: String(modelData.label || "")
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideRight
+                        width: parent.width * 0.42
+                      }
+
+                      Text {
+                        id: valueText
+                        text: String(modelData.value || "")
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        horizontalAlignment: Text.AlignRight
+                        elide: Text.ElideRight
+                        width: parent.width * 0.56
+                      }
+                    }
+
+                    Text {
+                      visible: String(modelData.detail || "").length > 0
+                      width: parent.width
+                      text: String(modelData.detail || "")
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WordWrap
+                      maximumLineCount: 2
+                      elide: Text.ElideRight
+                    }
                   }
                 }
               }

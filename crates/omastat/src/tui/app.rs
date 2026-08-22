@@ -7,7 +7,7 @@ use crate::{
     insights::Insight,
     report::{Lens, UsageReport},
     steam::SteamResolver,
-    storage::{AppTotals, Storage},
+    storage::{AppTotals, DayTotals, Storage},
 };
 use anyhow::Result;
 use chrono::{DateTime, Local};
@@ -76,6 +76,7 @@ pub(super) struct App {
     period_offset: i32,
     pub(super) selected: usize,
     insight_selected: usize,
+    overview_selected_day: usize,
     show_trends: bool,
     help_open: bool,
     last_refresh: Instant,
@@ -95,12 +96,14 @@ impl App {
         let lens = Lens::Day;
         let data = data::load_dashboard_data(storage, &mut steam, &config, lens, 0)?;
         let health = HealthSnapshot::load(storage);
+        let overview_selected_day = data.report.daily.len().saturating_sub(1);
         let mut app = Self {
             view: View::Overview,
             lens,
             period_offset: 0,
             selected: 0,
             insight_selected: 0,
+            overview_selected_day,
             show_trends: true,
             help_open: false,
             last_refresh: Instant::now(),
@@ -162,10 +165,20 @@ impl App {
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
-        if self.view == View::Insights {
-            self.move_insight_selection(delta);
+        match self.view {
+            View::Overview => self.move_overview_day(delta),
+            View::Insights => self.move_insight_selection(delta),
+            View::Apps | View::Timeline | View::System => self.move_app_selection(delta),
+        }
+    }
+
+    fn move_overview_day(&mut self, delta: isize) {
+        let len = self.report().daily.len();
+        if len == 0 {
+            self.overview_selected_day = 0;
         } else {
-            self.move_app_selection(delta);
+            self.overview_selected_day =
+                (self.overview_selected_day as isize + delta).clamp(0, len as isize - 1) as usize;
         }
     }
 
@@ -191,22 +204,32 @@ impl App {
     }
 
     pub(super) fn select_first(&mut self) {
-        if self.view == View::Insights {
-            self.insight_selected = 0;
-            self.sync_insight_state();
-        } else {
-            self.selected = 0;
-            self.sync_table_state();
+        match self.view {
+            View::Overview => self.overview_selected_day = 0,
+            View::Insights => {
+                self.insight_selected = 0;
+                self.sync_insight_state();
+            }
+            View::Apps | View::Timeline | View::System => {
+                self.selected = 0;
+                self.sync_table_state();
+            }
         }
     }
 
     pub(super) fn select_last(&mut self) {
-        if self.view == View::Insights {
-            self.insight_selected = self.insights().len().saturating_sub(1);
-            self.sync_insight_state();
-        } else {
-            self.selected = self.rows().len().saturating_sub(1);
-            self.sync_table_state();
+        match self.view {
+            View::Overview => {
+                self.overview_selected_day = self.report().daily.len().saturating_sub(1);
+            }
+            View::Insights => {
+                self.insight_selected = self.insights().len().saturating_sub(1);
+                self.sync_insight_state();
+            }
+            View::Apps | View::Timeline | View::System => {
+                self.selected = self.rows().len().saturating_sub(1);
+                self.sync_table_state();
+            }
         }
     }
 
@@ -240,6 +263,14 @@ impl App {
 
     pub(super) fn selected_insight_index(&self) -> usize {
         self.insight_selected
+    }
+
+    pub(super) fn selected_day(&self) -> Option<&DayTotals> {
+        self.report().daily.get(self.overview_selected_day)
+    }
+
+    pub(super) fn selected_day_index(&self) -> usize {
+        self.overview_selected_day
     }
 
     pub(super) fn table_state(&mut self) -> &mut TableState {
@@ -330,6 +361,9 @@ impl App {
         self.insight_selected = self
             .insight_selected
             .min(self.insights().len().saturating_sub(1));
+        self.overview_selected_day = self
+            .overview_selected_day
+            .min(self.report().daily.len().saturating_sub(1));
         self.sync_selection_state();
     }
 
@@ -357,12 +391,14 @@ impl App {
             .cloned()
             .collect::<Vec<_>>();
         let stats = DashboardStats::from_data(&parts.report, &parts.heatmap, &focus_intervals);
+        let overview_selected_day = parts.report.daily.len().saturating_sub(1);
         let mut app = Self {
             view: parts.view,
             lens: parts.report.lens,
             period_offset: parts.report.period.offset,
             selected: 0,
             insight_selected: 0,
+            overview_selected_day,
             show_trends: true,
             help_open: false,
             last_refresh: Instant::now(),

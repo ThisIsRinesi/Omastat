@@ -103,13 +103,13 @@ BarWidget {
   IpcHandler {
     target: "local.omastat"
 
-    function refresh(): void { root.refresh() }
-    function open(): void { root.open() }
-    function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.togglePanel() }
-    function status(): void {
+    function refresh() { root.refresh() }
+    function open() { root.open() }
+    function close() { root.close() }
+    function show() { root.open() }
+    function hide() { root.close() }
+    function toggle() { root.togglePanel() }
+    function status() {
       console.log("local.omastat status: opened=" + root.opened
         + " total=" + root.formatDuration(root.totalFocused)
         + " apps=" + root.rows.length
@@ -180,8 +180,8 @@ BarWidget {
       rows = Array.isArray(parsed.rows) ? parsed.rows : []
       reportApps = Array.isArray(parsed.apps) ? normalizeApps(parsed.apps) : []
       reportInsights = Array.isArray(parsed.insights) ? normalizeInsights(parsed.insights) : []
-      widgetInsight = parsed.widget_insight && typeof parsed.widget_insight === "object" ? parsed.widget_insight : null
-      daily = Array.isArray(parsed.daily) ? parsed.daily : []
+      widgetInsight = parsed.widget_insight && typeof parsed.widget_insight === "object" ? normalizeWidgetInsight(parsed.widget_insight) : null
+      daily = Array.isArray(parsed.daily) ? normalizeDaily(parsed.daily) : []
       todayKey = String(parsed.today_key || "")
       periodLabel = parsed.period && typeof parsed.period === "object" ? String(parsed.period.label || "Today") : "Today"
       totalFocused = numericField(parsed, "total_focused_seconds", sumSeconds(rows, "focused_seconds"))
@@ -217,7 +217,7 @@ BarWidget {
       tooltip += "\nInsight: " + String(widgetInsight.text)
     statusText = widgetInsight && widgetInsight.text
       ? String(widgetInsight.text)
-      : Math.max(rows.length, reportApps.length) + " apps tracked"
+      : Math.max(rows.length, reportApps.length) + " apps with focus"
     errorText = ""
   }
 
@@ -313,6 +313,39 @@ BarWidget {
     return output
   }
 
+  function normalizeDaily(list) {
+    var output = []
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i] || {}
+      var focused = numericField(
+        item,
+        "focused_seconds",
+        numericField(
+          item,
+          "focus_seconds",
+          numericField(item, "seconds", numericField(item, "total_focused_seconds", 0))
+        )
+      )
+      var open = numericField(item, "open_seconds", numericField(item, "total_open_seconds", 0))
+      var idle = numericField(item, "idle_seconds", 0)
+      var locked = numericField(item, "locked_seconds", 0)
+      var sleep = numericField(item, "sleep_seconds", 0)
+      var unobserved = numericField(item, "unobserved_seconds", 0)
+      output.push({
+        date: String(item.date || item.key || ""),
+        label: String(item.label || item.day || item.date || ""),
+        focused_seconds: focused,
+        open_seconds: open,
+        idle_seconds: idle,
+        locked_seconds: locked,
+        sleep_seconds: sleep,
+        unobserved_seconds: unobserved,
+        excluded_seconds: numericField(item, "excluded_seconds", idle + locked + sleep + unobserved)
+      })
+    }
+    return output
+  }
+
   function normalizeInsights(list) {
     var output = []
     for (var i = 0; i < list.length; i++) {
@@ -320,9 +353,93 @@ BarWidget {
       var label = String(item.title || item.label || item.kind || "")
       var value = String(item.value || "")
       if (label.length === 0 && value.length === 0) continue
-      output.push({ label: label, value: value })
+      output.push({
+        label: friendlyInsightLabel(item, label),
+        value: value,
+        detail: friendlyInsightDetail(item),
+        category: String(item.category || ""),
+        confidence: String(item.confidence || ""),
+        tone: String(item.tone || "")
+      })
     }
     return output
+  }
+
+  function normalizeWidgetInsight(item) {
+    var label = friendlyInsightLabel(item, String(item.title || item.label || "Insight"))
+    var value = String(item.value || "")
+    var text = value.length > 0 ? label + ": " + value : label
+    return {
+      title: label,
+      value: value,
+      tone: String(item.tone || ""),
+      text: text
+    }
+  }
+
+  function friendlyInsightLabel(item, fallback) {
+    var kind = String(item && item.kind || "")
+    switch (kind) {
+      case "top-app": return "Top app"
+      case "day-comparison": return "Compared with yesterday"
+      case "period-comparison": return "Compared with last period"
+      case "best-day": return "Best day"
+      case "worst-active-day": return "Lightest day"
+      case "current-streak": return "Current streak"
+      case "longest-streak": return "Best streak"
+      case "peak-focus-hour": return "Top hour"
+      case "peak-focus-weekday": return "Top weekday"
+      case "deep-work-blocks": return "Long sessions"
+      case "app-switch-rate": return "App changes"
+      case "fragmented-app": return "Most interrupted app"
+      case "focus-density": return "Focus share"
+      case "effective-apps": return "Focus spread"
+      case "strongest-workspace": return "Top workspace"
+      case "workspace-app-affinity": return "Workspace pairing"
+      case "idle-excluded": return "Away time"
+      case "locked-excluded": return "Locked time"
+      case "sleep-excluded": return "Sleep time"
+      case "unobserved-excluded": return "Tracker off time"
+      case "excluded-impact": return "Not counted time"
+      case "focus-anomaly": return "Unusual focus time"
+      case "app-anomaly": return "Unusual app time"
+      case "hour-anomaly": return "Unusual hour"
+      case "unobserved-anomaly": return "Tracker off gap"
+    }
+    var label = String(fallback || "")
+    if (label === "Top app share") return "Top app"
+    if (label === "Deep work blocks") return "Long sessions"
+    if (label === "Focus density") return "Focus share"
+    if (label === "Effective app count") return "Focus spread"
+    if (label === "Unobserved time excluded") return "Tracker off time"
+    if (label === "Excluded time impact") return "Not counted time"
+    if (label === "vs yesterday") return "Compared with yesterday"
+    if (label.indexOf("Densest app") >= 0) return "Highest focus share app"
+    if (label.indexOf("Lowest-density app") >= 0) return "Lowest focus share app"
+    return label
+  }
+
+  function friendlyInsightDetail(item) {
+    var kind = String(item && item.kind || "")
+    switch (kind) {
+      case "deep-work-blocks":
+        return "Counts long focus sessions at or above your long session threshold."
+      case "app-switch-rate":
+        return "Counts how often focus moved from one app to another."
+      case "focus-density":
+        return "Shows how much open app time was focused."
+      case "unobserved-excluded":
+        return "Tracker off time was not counted as focus."
+      case "excluded-impact":
+        return "Shows how much time was left out because it was away, locked, sleep, or tracker off time."
+    }
+    var detail = String(item && (item.explanation || item.detail) || "")
+    return detail
+      .replace(/focus density/gi, "focus share")
+      .replace(/density/gi, "focus share")
+      .replace(/unobserved/gi, "tracker off")
+      .replace(/excluded/gi, "not counted")
+      .replace(/deep-work/gi, "long session")
   }
 
   function topAppLabel(app) {
