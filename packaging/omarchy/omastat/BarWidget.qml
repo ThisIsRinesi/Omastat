@@ -264,8 +264,22 @@ BarWidget {
 
   function openOverviewReport() {
     if (!root.bar) return
+    root.bar.run(root.overviewCommand())
+  }
+
+  function overviewCommand() {
     var command = String(root.setting("overviewCommand", root.defaultOverviewCommand)).trim()
-    root.bar.run(command.length > 0 ? command : root.defaultOverviewCommand)
+    return command.length > 0 && !root.isStaleTerminalOverviewCommand(command)
+      ? command
+      : root.defaultOverviewCommand
+  }
+
+  function isStaleTerminalOverviewCommand(command) {
+    var normalized = String(command).toLowerCase()
+      .split("\"").join("")
+      .split("'").join("")
+      .replace(/\s+/g, " ")
+    return normalized.indexOf("omastat tui") !== -1
   }
 
   function openTerminalReport() {
