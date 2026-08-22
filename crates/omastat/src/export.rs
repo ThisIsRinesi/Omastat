@@ -4,8 +4,9 @@ use crate::{
     report::{self, Lens, UsageReport},
     steam::SteamResolver,
     storage::{
-        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, RawExportRows, Storage,
-        TimelineInterval, TitleTotals, WorkspaceTotals,
+        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, RawExportRows, Storage,
+        StorageStatus, SystemIntervalKind, SystemTimelineInterval, TimelineInterval, TitleTotals,
+        WorkspaceTotals,
     },
 };
 use anyhow::Result;
@@ -71,50 +72,53 @@ pub fn render_html(
     config: &Config,
     options: ExportOptions,
 ) -> Result<String> {
-    let report = if options.lens == Lens::Day && options.offset == 0 {
-        report::usage_report(
-            storage,
-            steam,
-            config,
-            options.lens,
-            options.lens.history_days(),
-        )?
+    let requested_lens = options.lens;
+    let requested_offset = if requested_lens == Lens::Life {
+        0
     } else {
-        report::usage_report_for_period(storage, steam, config, options.lens, options.offset)?
+        options.offset.min(0)
     };
-    let (start_ts, end_ts) = (report.query_start_ts, report.query_end_ts);
-    let mut rollups = storage.focused_rollups_between(start_ts, end_ts, 8, 64)?;
-    for row in &mut rollups.daily_apps {
-        row.app_class = steam.resolve_class(&row.app_class);
+    let initial_key = period_key(requested_lens, requested_offset);
+    let storage_status = storage.usage_status().unwrap_or_default();
+    let mut periods = Vec::new();
+    for lens in Lens::ALL {
+        let seed_offset = if lens == requested_lens {
+            requested_offset
+        } else {
+            0
+        };
+        for offset in offset_window(lens, seed_offset) {
+            periods.push(build_dashboard_period(
+                storage,
+                steam,
+                config,
+                &storage_status,
+                lens,
+                offset,
+            )?);
+        }
     }
-    for interval in &mut rollups.focus_intervals {
-        interval.app_class = steam.resolve_class(&interval.app_class);
-    }
-    let stats = ExportStats::from_data(&report, &rollups.heatmap, &rollups.focus_intervals);
-    let titles = storage
-        .focused_title_totals_between(start_ts, end_ts, 12)?
-        .into_iter()
-        .map(|mut row| {
-            row.app_class = steam.resolve_class(&row.app_class);
-            row
+    let initial = periods
+        .iter()
+        .find(|period| period.key == initial_key)
+        .or_else(|| {
+            periods
+                .iter()
+                .find(|period| period.key == period_key(requested_lens, 0))
         })
-        .collect::<Vec<_>>();
-    let lens_cards = lens_cards(storage, steam, config)?;
+        .or_else(|| periods.first())
+        .expect("dashboard should include at least one period");
+    let initial_period_label = initial.period_label.clone();
+    let initial_key = initial.key.clone();
     let page_title = options
         .title
-        .unwrap_or_else(|| format!("Omastat Overview - {}", report.period.label));
+        .unwrap_or_else(|| format!("Omastat Overview - {}", initial_period_label));
+    let dashboard = DashboardPayload {
+        initial_key,
+        periods,
+    };
 
-    Ok(document(
-        &page_title,
-        &report,
-        &rollups.daily_apps,
-        &rollups.heatmap,
-        &titles,
-        &lens_cards,
-        &rollups.workspaces,
-        &rollups.focus_intervals,
-        &stats,
-    ))
+    Ok(document(&page_title, &dashboard))
 }
 
 pub fn build_data_export(
@@ -186,17 +190,6 @@ pub fn write_data_export_csv(export: &DataExport, output_dir: &Path) -> Result<(
     }
 
     Ok(())
-}
-
-fn lens_cards(
-    storage: &Storage,
-    steam: &mut SteamResolver,
-    config: &Config,
-) -> Result<Vec<UsageReport>> {
-    Lens::ALL
-        .into_iter()
-        .map(|lens| report::usage_report_for_period(storage, steam, config, lens, 0))
-        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -372,18 +365,81 @@ impl ExportStats {
     }
 }
 
-fn document(
-    page_title: &str,
-    report: &UsageReport,
-    daily_apps: &[AppDayTotals],
-    heatmap: &[FocusHeatCell],
-    titles: &[TitleTotals],
-    lens_cards: &[UsageReport],
-    workspaces: &[WorkspaceTotals],
-    focus_intervals: &[TimelineInterval],
-    stats: &ExportStats,
-) -> String {
-    let generated = format_timestamp(report.generated_at);
+#[derive(Debug, Clone, Serialize)]
+struct DashboardPayload {
+    initial_key: String,
+    periods: Vec<DashboardPeriodPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DashboardPeriodPayload {
+    key: String,
+    lens_key: String,
+    lens_label: String,
+    lens_title: String,
+    offset: i32,
+    offset_label: String,
+    period_label: String,
+    range_label: String,
+    generated: String,
+    focused: String,
+    density: String,
+    top_app: String,
+    number_cards: String,
+    daily_pattern: String,
+    app_mix_panel: String,
+    top_hours: String,
+    workspace_focus: String,
+    session_histogram: String,
+    activity_timeline: String,
+    timeline: String,
+    interval_table: String,
+    gap_summary: String,
+    system_health: String,
+    app_table: String,
+    stacked_days: String,
+    heatmap_chart: String,
+    time_breakdown: String,
+    insights: String,
+    title_rows: String,
+}
+
+fn build_dashboard_period(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    storage_status: &StorageStatus,
+    lens: Lens,
+    offset: i32,
+) -> Result<DashboardPeriodPayload> {
+    let report = if lens == Lens::Day && offset == 0 {
+        report::usage_report(storage, steam, config, lens, lens.history_days())?
+    } else {
+        report::usage_report_for_period(storage, steam, config, lens, offset)?
+    };
+    let (start_ts, end_ts) = (report.query_start_ts, report.query_end_ts);
+    let mut rollups = storage.focused_rollups_between(start_ts, end_ts, 8, 64)?;
+    for row in &mut rollups.daily_apps {
+        row.app_class = steam.resolve_class(&row.app_class);
+    }
+    for interval in &mut rollups.focus_intervals {
+        interval.app_class = steam.resolve_class(&interval.app_class);
+    }
+    let mut timeline_intervals = storage.timeline_between(start_ts, end_ts)?;
+    for interval in &mut timeline_intervals {
+        interval.app_class = steam.resolve_class(&interval.app_class);
+    }
+    let system_intervals = storage.system_timeline_between(start_ts, end_ts)?;
+    let stats = ExportStats::from_data(&report, &rollups.heatmap, &rollups.focus_intervals);
+    let titles = storage
+        .focused_title_totals_between(start_ts, end_ts, 12)?
+        .into_iter()
+        .map(|mut row| {
+            row.app_class = steam.resolve_class(&row.app_class);
+            row
+        })
+        .collect::<Vec<_>>();
+
     let focused = report::format_duration(report.total_focused_seconds);
     let open = report::format_duration(report.total_open_seconds);
     let density = report::percent(ratio(
@@ -429,18 +485,81 @@ fn document(
         })
         .unwrap_or_else(|| "none".to_string());
     let focus_note = format!("{density} focused while open");
-    let insights_html = insight_rows(&report.insights);
-    let number_card_rows = vec![
-        NumberCard::new("Focused", &focused, &focus_note),
-        NumberCard::new("Daily avg", &daily_avg, &daily_note),
-        NumberCard::new("Longest session", &longest_session, &session_note),
-        NumberCard::new("App mix", &app_mix, &app_note),
-        NumberCard::new("Streak", &streak_label, &streak_note),
-        NumberCard::new("Peak hour", &peak_hour, "recurring focus window"),
-        NumberCard::new("Peak day", &peak_day_label, &peak_day_duration),
-        NumberCard::new("Open time", &open, "tracked beside focus"),
-    ];
-    let number_cards_html = number_cards(&number_card_rows);
+    let top_app = report
+        .rows
+        .iter()
+        .find(|row| row.focused_seconds > 0)
+        .map(|row| report::app_label(&row.app_class))
+        .unwrap_or_else(|| "No focus yet".to_string());
+    let number_cards_html = {
+        let number_card_rows = vec![
+            NumberCard::new("Focused", &focused, &focus_note),
+            NumberCard::new("Daily avg", &daily_avg, &daily_note),
+            NumberCard::new("Longest session", &longest_session, &session_note),
+            NumberCard::new("App mix", &app_mix, &app_note),
+            NumberCard::new("Streak", &streak_label, &streak_note),
+            NumberCard::new("Peak hour", &peak_hour, "recurring focus window"),
+            NumberCard::new("Peak day", &peak_day_label, &peak_day_duration),
+            NumberCard::new("Open time", &open, "tracked beside focus"),
+        ];
+        number_cards(&number_card_rows)
+    };
+
+    Ok(DashboardPeriodPayload {
+        key: period_key(lens, report.period.offset),
+        lens_key: lens_key(lens).to_string(),
+        lens_label: lens.label().to_string(),
+        lens_title: lens.title().to_string(),
+        offset: report.period.offset,
+        offset_label: offset_label(lens, report.period.offset).to_string(),
+        period_label: report.period.label.clone(),
+        range_label: period_range_label(&report),
+        generated: format_timestamp(report.generated_at),
+        focused,
+        density,
+        top_app,
+        number_cards: number_cards_html,
+        daily_pattern: daily_pattern_chart(&report.daily),
+        app_mix_panel: app_mix_panel(&report.rows, report.total_focused_seconds),
+        top_hours: top_hours_chart(&rollups.heatmap),
+        workspace_focus: workspace_focus_chart(&rollups.workspaces, report.total_focused_seconds),
+        session_histogram: session_histogram(&rollups.focus_intervals, &stats),
+        activity_timeline: activity_timeline_chart(
+            &timeline_intervals,
+            &system_intervals,
+            &report.rows,
+            start_ts,
+            end_ts,
+        ),
+        timeline: timeline_chart(&rollups.focus_intervals, &report.rows, start_ts, end_ts),
+        interval_table: interval_table(
+            &timeline_intervals,
+            &system_intervals,
+            &report.rows,
+            start_ts,
+            end_ts,
+        ),
+        gap_summary: gap_summary(&system_intervals, &report),
+        system_health: system_health_panel(storage_status, &report),
+        app_table: app_table(&report.rows, report.total_focused_seconds),
+        stacked_days: stacked_day_chart(&report.daily, &rollups.daily_apps, &report.rows),
+        heatmap_chart: heatmap_chart(&rollups.heatmap),
+        time_breakdown: time_breakdown(&report, &stats),
+        insights: insight_rows(&report.insights),
+        title_rows: title_rows(&titles),
+    })
+}
+
+fn document(page_title: &str, dashboard: &DashboardPayload) -> String {
+    let initial = dashboard
+        .periods
+        .iter()
+        .find(|period| period.key == dashboard.initial_key)
+        .or_else(|| dashboard.periods.first())
+        .expect("dashboard should include at least one period");
+    let dashboard_json = dashboard_json(dashboard);
+    let lens_controls = lens_controls(&dashboard.periods, &initial.key);
+    let lens_cards = lens_cards_html_from_periods(&dashboard.periods);
 
     format!(
         r#"<!doctype html>
@@ -458,21 +577,69 @@ fn document(
   <header class="dashboard-header">
     <div>
       <p class="eyebrow">Omastat overview</p>
-      <h1>{title}</h1>
-      <p class="subhead">{period} · {range} · generated {generated}</p>
+      <h1 data-bind="lens_title">{lens_title}</h1>
+      <p class="subhead"><span data-bind="period">{period}</span> · <span data-bind="range">{range}</span> · generated <span data-bind="generated">{generated}</span></p>
     </div>
     <div class="focus-total">
       <small>Focused time</small>
-      <strong>{focused}</strong>
-      <span>{density} focus density</span>
+      <strong data-bind="focused">{focused}</strong>
+      <span><span data-bind="density">{density}</span> focus density</span>
     </div>
   </header>
 
-  <section class="metric-grid" aria-label="Overview metrics">
-    {number_cards}
+  <section class="control-bar" aria-label="Dashboard controls">
+    <div>
+      <span class="kicker">Lens</span>
+      <div class="segmented" id="lensControls">{lens_controls}</div>
+    </div>
+    <div>
+      <span class="kicker">Period</span>
+      <div class="period-nav">
+        <button type="button" id="previousPeriod" aria-label="Previous period">&larr;</button>
+        <button type="button" id="currentPeriod">Current</button>
+        <button type="button" id="nextPeriod" aria-label="Next period">&rarr;</button>
+      </div>
+      <div class="period-rail" id="periodRail"></div>
+    </div>
+    <div>
+      <span class="kicker">View</span>
+      <div class="segmented" id="viewControls">
+        <button type="button" class="active" data-view-button="overview">Overview</button>
+        <button type="button" data-view-button="apps">Apps</button>
+        <button type="button" data-view-button="insights">Insights</button>
+        <button type="button" data-view-button="timeline">Timeline</button>
+        <button type="button" data-view-button="system">System</button>
+      </div>
+    </div>
   </section>
 
-  <section class="grid grid-main">
+  <section class="metric-grid view-block" data-views="overview system" aria-label="Overview metrics">
+    <div data-slot="number_cards">{number_cards}</div>
+  </section>
+
+  <section class="grid grid-secondary view-block" data-views="system">
+    <article class="panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="kicker">Status</span>
+          <h2>System health</h2>
+        </div>
+      </div>
+      <div data-slot="system_health">{system_health}</div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="kicker">System signals</span>
+          <h2>Counted vs excluded</h2>
+        </div>
+      </div>
+      <div data-slot="time_breakdown">{time_breakdown}</div>
+    </article>
+  </section>
+
+  <section class="grid grid-main view-block" data-views="overview">
     <article class="panel panel-wide">
       <div class="panel-heading">
         <div>
@@ -481,7 +648,7 @@ fn document(
         </div>
         <p>Bars show focused time; the line shows focus density while apps were open.</p>
       </div>
-      {daily_pattern}
+      <div data-slot="daily_pattern">{daily_pattern}</div>
     </article>
 
     <article class="panel">
@@ -491,11 +658,34 @@ fn document(
           <h2>App mix</h2>
         </div>
       </div>
-      {app_mix_panel}
+      <div data-slot="app_mix_panel">{app_mix_panel}</div>
     </article>
   </section>
 
-  <section class="grid grid-secondary">
+  <section class="grid grid-main view-block" data-views="apps">
+    <article class="panel panel-wide">
+      <div class="panel-heading">
+        <div>
+          <span class="kicker">Applications</span>
+          <h2>App table</h2>
+        </div>
+        <p>Ranked applications include focused time, share, density, and open time.</p>
+      </div>
+      <div data-slot="app_table">{app_table}</div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="kicker">Composition</span>
+          <h2>App mix</h2>
+        </div>
+      </div>
+      <div data-slot="app_mix_panel">{app_mix_panel}</div>
+    </article>
+  </section>
+
+  <section class="grid grid-secondary view-block" data-views="overview">
     <article class="panel">
       <div class="panel-heading">
         <div>
@@ -504,7 +694,7 @@ fn document(
         </div>
         <p>Sequential color exposes recurring focus windows.</p>
       </div>
-      {heatmap_chart}
+      <div data-slot="heatmap_chart">{heatmap_chart}</div>
     </article>
 
     <article class="panel">
@@ -515,11 +705,11 @@ fn document(
         </div>
         <p>Ranked hours make peaks easy to compare.</p>
       </div>
-      {top_hours}
+      <div data-slot="top_hours">{top_hours}</div>
     </article>
   </section>
 
-  <section class="grid grid-secondary">
+  <section class="grid grid-secondary view-block" data-views="overview system">
     <article class="panel">
       <div class="panel-heading">
         <div>
@@ -528,7 +718,7 @@ fn document(
         </div>
         <p>Ranked workspaces show where focused time landed.</p>
       </div>
-      {workspace_focus}
+      <div data-slot="workspace_focus">{workspace_focus}</div>
     </article>
 
     <article class="panel">
@@ -539,11 +729,57 @@ fn document(
         </div>
         <p>Histogram bins reveal whether focus came in fragments or blocks.</p>
       </div>
-      {session_histogram}
+      <div data-slot="session_histogram">{session_histogram}</div>
     </article>
   </section>
 
-  <section class="grid grid-main">
+  <section class="grid grid-main view-block" data-views="timeline">
+    <article class="panel panel-wide">
+      <div class="panel-heading">
+        <div>
+          <span class="kicker">Timeline</span>
+          <h2>Activity timeline</h2>
+        </div>
+        <p>Focused, open, sleep, and tracker-off intervals share one time axis.</p>
+      </div>
+      <div data-slot="activity_timeline">{activity_timeline}</div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="kicker">Not counted</span>
+          <h2>Gap summary</h2>
+        </div>
+      </div>
+      <div data-slot="gap_summary">{gap_summary}</div>
+    </article>
+  </section>
+
+  <section class="grid grid-main view-block" data-views="timeline">
+    <article class="panel panel-wide">
+      <div class="panel-heading">
+        <div>
+          <span class="kicker">Timeline</span>
+          <h2>Focus intervals</h2>
+        </div>
+        <p>Horizontal lanes isolate focused blocks by application.</p>
+      </div>
+      <div data-slot="timeline">{timeline}</div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="kicker">Intervals</span>
+          <h2>Recent rows</h2>
+        </div>
+      </div>
+      <div data-slot="interval_table">{interval_table}</div>
+    </article>
+  </section>
+
+  <section class="grid grid-main view-block" data-views="overview apps system">
     <article class="panel panel-wide">
       <div class="panel-heading">
         <div>
@@ -552,7 +788,7 @@ fn document(
         </div>
         <p>Stacked bars show which apps made up each day's focus.</p>
       </div>
-      {stacked_days}
+      <div data-slot="stacked_days">{stacked_days}</div>
     </article>
 
     <article class="panel">
@@ -562,11 +798,11 @@ fn document(
           <h2>Counted vs excluded</h2>
         </div>
       </div>
-      {time_breakdown}
+      <div data-slot="time_breakdown">{time_breakdown}</div>
     </article>
   </section>
 
-  <section class="grid grid-tertiary">
+  <section class="grid grid-tertiary view-block" data-views="insights apps system">
     <article class="panel">
       <div class="panel-heading compact">
         <div>
@@ -574,7 +810,7 @@ fn document(
           <h2>Period insights</h2>
         </div>
       </div>
-      {insights}
+      <div data-slot="insights">{insights}</div>
     </article>
 
     <article class="panel">
@@ -584,7 +820,7 @@ fn document(
           <h2>Captured moments</h2>
         </div>
       </div>
-      {title_rows}
+      <div data-slot="title_rows">{title_rows}</div>
     </article>
 
     <article class="panel">
@@ -594,7 +830,7 @@ fn document(
           <h2>Period lenses</h2>
         </div>
       </div>
-      {lens_cards}
+      <div id="lensCards">{lens_cards}</div>
     </article>
   </section>
 
@@ -603,29 +839,367 @@ fn document(
     <span>Self-contained HTML/SVG overview</span>
   </footer>
 </main>
+<script type="application/json" id="omastat-data">{dashboard_json}</script>
+<script>
+{script}
+</script>
 </body>
 </html>
 "#,
         title = escape_html(page_title),
         css = stylesheet(),
-        period = escape_html(&report.period.label),
-        range = escape_html(&period_range_label(report)),
-        generated = escape_html(&generated),
-        focused = escape_html(&focused),
-        density = escape_html(&density),
-        number_cards = number_cards_html,
-        daily_pattern = daily_pattern_chart(&report.daily),
-        app_mix_panel = app_mix_panel(&report.rows, report.total_focused_seconds),
-        top_hours = top_hours_chart(heatmap),
-        workspace_focus = workspace_focus_chart(workspaces, report.total_focused_seconds),
-        session_histogram = session_histogram(focus_intervals, stats),
-        stacked_days = stacked_day_chart(&report.daily, daily_apps, &report.rows),
-        heatmap_chart = heatmap_chart(heatmap),
-        time_breakdown = time_breakdown(report, stats),
-        insights = insights_html,
-        title_rows = title_rows(titles),
-        lens_cards = lens_cards_html(lens_cards),
+        lens_title = escape_html(&initial.lens_title),
+        period = escape_html(&initial.period_label),
+        range = escape_html(&initial.range_label),
+        generated = escape_html(&initial.generated),
+        focused = escape_html(&initial.focused),
+        density = escape_html(&initial.density),
+        lens_controls = lens_controls,
+        number_cards = initial.number_cards,
+        daily_pattern = initial.daily_pattern,
+        app_mix_panel = initial.app_mix_panel,
+        top_hours = initial.top_hours,
+        workspace_focus = initial.workspace_focus,
+        session_histogram = initial.session_histogram,
+        activity_timeline = initial.activity_timeline,
+        timeline = initial.timeline,
+        interval_table = initial.interval_table,
+        gap_summary = initial.gap_summary,
+        system_health = initial.system_health,
+        app_table = initial.app_table,
+        stacked_days = initial.stacked_days,
+        heatmap_chart = initial.heatmap_chart,
+        time_breakdown = initial.time_breakdown,
+        insights = initial.insights,
+        title_rows = initial.title_rows,
+        lens_cards = lens_cards,
+        dashboard_json = dashboard_json,
+        script = dashboard_script(),
     )
+}
+
+fn lens_key(lens: Lens) -> &'static str {
+    match lens {
+        Lens::Day => "day",
+        Lens::Week => "week",
+        Lens::Month => "month",
+        Lens::Year => "year",
+        Lens::Life => "life",
+    }
+}
+
+fn period_key(lens: Lens, offset: i32) -> String {
+    format!("{}:{offset}", lens_key(lens))
+}
+
+fn offset_window(lens: Lens, requested_offset: i32) -> Vec<i32> {
+    if lens == Lens::Life {
+        return vec![0];
+    }
+    let requested_offset = requested_offset.min(0);
+    let (default_previous, max_periods) = match lens {
+        Lens::Day => (7, 9),
+        Lens::Week => (5, 7),
+        Lens::Month => (5, 7),
+        Lens::Year => (4, 6),
+        Lens::Life => unreachable!(),
+    };
+    let oldest = requested_offset.min(-default_previous);
+    let total = oldest.abs() + 1;
+    if total <= max_periods {
+        return (oldest..=0).collect();
+    }
+    if requested_offset < -(max_periods - 1) {
+        let newest = (requested_offset + max_periods - 2).min(-1);
+        let mut offsets = (requested_offset..=newest).collect::<Vec<_>>();
+        offsets.push(0);
+        offsets
+    } else {
+        (-(max_periods - 1)..=0).collect()
+    }
+}
+
+fn offset_label(lens: Lens, offset: i32) -> &'static str {
+    match (lens, offset) {
+        (Lens::Life, _) => "All time",
+        (_, 0) => "Current",
+        (Lens::Day, -1) => "Yesterday",
+        (Lens::Day, _) => "Previous day",
+        (Lens::Week, -1) => "Previous week",
+        (Lens::Week, _) => "Past week",
+        (Lens::Month, -1) => "Previous month",
+        (Lens::Month, _) => "Past month",
+        (Lens::Year, -1) => "Previous year",
+        (Lens::Year, _) => "Past year",
+    }
+}
+
+fn dashboard_json(dashboard: &DashboardPayload) -> String {
+    serde_json::to_string(dashboard)
+        .unwrap_or_else(|_| "{\"initial_key\":\"day:0\",\"periods\":[]}".to_string())
+        .replace("</", "<\\/")
+}
+
+fn lens_controls(periods: &[DashboardPeriodPayload], active_key: &str) -> String {
+    let active_lens_key = periods
+        .iter()
+        .find(|period| period.key == active_key)
+        .map(|period| period.lens_key.as_str())
+        .unwrap_or("day");
+    Lens::ALL
+        .into_iter()
+        .filter_map(|lens| {
+            let key = lens_key(lens);
+            periods
+                .iter()
+                .find(|period| period.lens_key == key && period.offset == 0)
+                .or_else(|| periods.iter().find(|period| period.lens_key == key))
+        })
+        .map(|period| {
+            format!(
+                r#"<button type="button" class="{class}" data-lens-button="{key}"><span>{label}</span><small>{focused}</small></button>"#,
+                class = if period.lens_key == active_lens_key { "active" } else { "" },
+                key = escape_html(&period.lens_key),
+                label = escape_html(&period.lens_label),
+                focused = escape_html(&period.focused),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn lens_cards_html_from_periods(periods: &[DashboardPeriodPayload]) -> String {
+    let rows = Lens::ALL
+        .into_iter()
+        .filter_map(|lens| {
+            let key = lens_key(lens);
+            periods
+                .iter()
+                .find(|period| period.lens_key == key && period.offset == 0)
+                .or_else(|| periods.iter().find(|period| period.lens_key == key))
+        })
+        .map(|period| {
+            format!(
+                r#"<article class="lens-card">
+  <div class="lens-label">{}</div>
+  <div>
+    <div class="lens-total">{}</div>
+    <div class="lens-meta">{}</div>
+  </div>
+</article>"#,
+                escape_html(&period.lens_label),
+                escape_html(&period.focused),
+                escape_html(&period.top_app),
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(r#"<div class="lens-list">{}</div>"#, rows.join("\n"))
+}
+
+fn dashboard_script() -> &'static str {
+    r##"
+(() => {
+  const root = document.querySelector(".dashboard");
+  const payloadNode = document.getElementById("omastat-data");
+  if (!root || !payloadNode) return;
+  const payload = JSON.parse(payloadNode.textContent || "{}");
+  const periodList = payload.periods || [];
+  const periods = new Map(periodList.map((period) => [period.key, period]));
+  const periodsByLens = new Map();
+  const lensOrder = [];
+  for (const period of periodList) {
+    if (!periodsByLens.has(period.lens_key)) {
+      periodsByLens.set(period.lens_key, []);
+      lensOrder.push(period.lens_key);
+    }
+    periodsByLens.get(period.lens_key).push(period);
+  }
+  for (const periodGroup of periodsByLens.values()) {
+    periodGroup.sort((left, right) => left.offset - right.offset);
+  }
+  let activeKey = payload.initial_key || (payload.periods && payload.periods[0] && payload.periods[0].key);
+  let activeView = "overview";
+
+  function setText(selector, value) {
+    const node = document.querySelector(selector);
+    if (node) node.textContent = value || "";
+  }
+
+  function setSlot(name, value) {
+    document.querySelectorAll(`[data-slot="${name}"]`).forEach((node) => {
+      node.innerHTML = value || "";
+    });
+  }
+
+  function activePeriod() {
+    return periods.get(activeKey);
+  }
+
+  function periodForLens(lensKey) {
+    const periodGroup = periodsByLens.get(lensKey) || [];
+    return periodGroup.find((period) => period.offset === 0) || periodGroup[periodGroup.length - 1];
+  }
+
+  function neighborPeriod(delta) {
+    const period = activePeriod();
+    if (!period) return null;
+    const periodGroup = periodsByLens.get(period.lens_key) || [];
+    const index = periodGroup.findIndex((candidate) => candidate.key === period.key);
+    return periodGroup[index + delta] || null;
+  }
+
+  function renderPeriodRail(period) {
+    const rail = document.getElementById("periodRail");
+    if (!rail) return;
+    const periodGroup = periodsByLens.get(period.lens_key) || [];
+    const fragment = document.createDocumentFragment();
+    for (const candidate of periodGroup) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.periodKey = candidate.key;
+      button.className = candidate.key === period.key ? "active" : "";
+      const label = document.createElement("span");
+      label.textContent = candidate.period_label;
+      const meta = document.createElement("small");
+      meta.textContent = candidate.offset_label;
+      button.append(label, meta);
+      fragment.append(button);
+    }
+    rail.replaceChildren(fragment);
+  }
+
+  function setPeriodNavButton(id, period) {
+    const button = document.getElementById(id);
+    if (!button) return;
+    button.disabled = !period;
+    button.dataset.periodKey = period ? period.key : "";
+  }
+
+  function renderPeriodNavigation(period) {
+    setPeriodNavButton("previousPeriod", neighborPeriod(-1));
+    setPeriodNavButton("nextPeriod", neighborPeriod(1));
+    const current = periodForLens(period.lens_key);
+    const currentButton = document.getElementById("currentPeriod");
+    if (currentButton) {
+      currentButton.textContent = period.offset === 0 ? period.period_label : "Current";
+      currentButton.disabled = !current || current.key === period.key;
+      currentButton.dataset.periodKey = current ? current.key : "";
+    }
+    renderPeriodRail(period);
+  }
+
+  function renderPeriod(key) {
+    const period = periods.get(key);
+    if (!period) return;
+    activeKey = key;
+    root.classList.add("is-swapping");
+    window.setTimeout(() => {
+      setText('[data-bind="lens_title"]', period.lens_title);
+      setText('[data-bind="period"]', period.period_label);
+      setText('[data-bind="range"]', period.range_label);
+      setText('[data-bind="generated"]', period.generated);
+      setText('[data-bind="focused"]', period.focused);
+      setText('[data-bind="density"]', period.density);
+      for (const name of [
+        "number_cards",
+        "daily_pattern",
+        "app_mix_panel",
+        "top_hours",
+        "workspace_focus",
+        "session_histogram",
+        "activity_timeline",
+        "timeline",
+        "interval_table",
+        "gap_summary",
+        "system_health",
+        "app_table",
+        "stacked_days",
+        "heatmap_chart",
+        "time_breakdown",
+        "insights",
+        "title_rows",
+      ]) {
+        setSlot(name, period[name]);
+      }
+      document.querySelectorAll("[data-lens-button]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.lensButton === period.lens_key);
+      });
+      renderPeriodNavigation(period);
+      root.classList.remove("is-swapping");
+      root.classList.add("just-swapped");
+      window.setTimeout(() => root.classList.remove("just-swapped"), 420);
+    }, 130);
+  }
+
+  function renderView(view) {
+    activeView = view;
+    document.querySelectorAll("[data-view-button]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.viewButton === view);
+    });
+    document.querySelectorAll(".view-block").forEach((block) => {
+      const views = String(block.dataset.views || "").split(/\s+/);
+      block.classList.toggle("view-hidden", !views.includes(view));
+    });
+  }
+
+  document.querySelectorAll("[data-lens-button]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const period = periodForLens(button.dataset.lensButton);
+      if (period) renderPeriod(period.key);
+    });
+  });
+  document.querySelectorAll("[data-view-button]").forEach((button) => {
+    button.addEventListener("click", () => renderView(button.dataset.viewButton));
+  });
+  document.querySelectorAll("#previousPeriod, #currentPeriod, #nextPeriod").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.periodKey) renderPeriod(button.dataset.periodKey);
+    });
+  });
+  const periodRail = document.getElementById("periodRail");
+  if (periodRail) {
+    periodRail.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-period-key]");
+      if (button) renderPeriod(button.dataset.periodKey);
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.target && /input|textarea|select/i.test(event.target.tagName)) return;
+    const period = activePeriod();
+    const lensIndex = period ? lensOrder.indexOf(period.lens_key) : -1;
+    if ((event.key === "ArrowLeft" || event.key.toLowerCase() === "h") && lensIndex >= 0) {
+      const nextLens = lensOrder[(lensIndex + lensOrder.length - 1) % lensOrder.length];
+      const nextPeriod = periodForLens(nextLens);
+      if (nextPeriod) renderPeriod(nextPeriod.key);
+    }
+    if ((event.key === "ArrowRight" || event.key.toLowerCase() === "l") && lensIndex >= 0) {
+      const nextLens = lensOrder[(lensIndex + 1) % lensOrder.length];
+      const nextPeriod = periodForLens(nextLens);
+      if (nextPeriod) renderPeriod(nextPeriod.key);
+    }
+    if (event.key === "[") {
+      const previous = neighborPeriod(-1);
+      if (previous) renderPeriod(previous.key);
+    }
+    if (event.key === "]") {
+      const next = neighborPeriod(1);
+      if (next) renderPeriod(next.key);
+    }
+    if (event.key.toLowerCase() === "r") window.location.reload();
+    if (event.key >= "1" && event.key <= "5") {
+      const lensKey = lensOrder[Number(event.key) - 1];
+      const nextPeriod = periodForLens(lensKey);
+      if (nextPeriod) renderPeriod(nextPeriod.key);
+    }
+    const viewByKey = { o: "overview", a: "apps", i: "insights", t: "timeline", s: "system" };
+    const view = viewByKey[event.key.toLowerCase()];
+    if (view) renderView(view);
+  });
+  renderView(activeView);
+  const initial = activePeriod();
+  if (initial) renderPeriodNavigation(initial);
+})();
+"##
 }
 
 fn stylesheet() -> &'static str {
@@ -684,11 +1258,136 @@ body::before {
   align-items: end;
   margin-bottom: 16px;
 }
+.control-bar {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.95fr) minmax(280px, 0.8fr) minmax(320px, 0.95fr);
+  gap: 16px;
+  align-items: end;
+  margin-bottom: 16px;
+}
+.control-bar > div {
+  min-width: 0;
+}
+.segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+.segmented button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.055);
+  color: var(--soft);
+  cursor: pointer;
+  min-height: 38px;
+  padding: 8px 13px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+.segmented button span,
+.segmented button small {
+  display: block;
+  line-height: 1.05;
+}
+.segmented button small {
+  color: var(--muted);
+  font-size: 0.68rem;
+  margin-top: 3px;
+}
+.segmented button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(67,217,232,0.45);
+}
+.segmented button.active {
+  color: #071014;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--cyan), var(--green));
+  box-shadow: 0 0 24px rgba(67,217,232,0.22);
+}
+.segmented button.active small {
+  color: rgba(7,16,20,0.72);
+}
+.period-nav {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+.period-nav button,
+.period-rail button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.055);
+  color: var(--soft);
+  cursor: pointer;
+  min-height: 38px;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease, opacity 160ms ease;
+}
+.period-nav button:hover:not(:disabled),
+.period-rail button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(246,196,90,0.5);
+}
+.period-nav button:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+#currentPeriod:disabled {
+  opacity: 0.78;
+}
+.period-rail {
+  display: flex;
+  gap: 7px;
+  margin-top: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  max-width: 100%;
+  min-width: 0;
+  scrollbar-width: thin;
+}
+.period-rail button {
+  flex: 0 0 auto;
+  min-width: 104px;
+  text-align: left;
+}
+.period-rail button span,
+.period-rail button small {
+  display: block;
+  line-height: 1.05;
+}
+.period-rail button small {
+  color: var(--muted);
+  font-size: 0.67rem;
+  margin-top: 3px;
+}
+.period-rail button.active {
+  color: #071014;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--yellow), var(--pink));
+  box-shadow: 0 0 24px rgba(246,196,90,0.18);
+}
+.period-rail button.active small {
+  color: rgba(7,16,20,0.68);
+}
 .panel, .number-card, .focus-total {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: linear-gradient(145deg, rgba(29, 32, 40, 0.96), rgba(18, 20, 25, 0.96));
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,0.06);
+  animation: reveal-up 300ms cubic-bezier(.2,.8,.2,1) both;
 }
 .eyebrow, .kicker, .number-card small, .focus-total small, footer, .mini-label {
   color: var(--muted);
@@ -741,6 +1440,9 @@ h2 {
   gap: 12px;
   margin-bottom: 16px;
 }
+.metric-grid > [data-slot] {
+  display: contents;
+}
 .number-card {
   min-height: 112px;
   padding: 16px;
@@ -763,10 +1465,39 @@ h2 {
   display: grid;
   gap: 16px;
   margin-bottom: 16px;
+  transition: opacity 180ms ease, transform 180ms ease;
 }
 .grid-main { grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.75fr); }
 .grid-secondary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .grid-tertiary { grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); }
+.view-hidden {
+  display: none;
+}
+.is-swapping .view-block {
+  opacity: 0.35;
+  transform: translateY(5px);
+}
+.just-swapped .panel,
+.just-swapped .number-card,
+.just-swapped .focus-total {
+  animation: panel-rise 380ms ease both;
+}
+@keyframes panel-rise {
+  from { opacity: 0.72; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes reveal-up {
+  from { opacity: 0.78; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fill-in {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes chart-pop {
+  from { opacity: 0.5; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .panel {
   min-width: 0;
   padding: 18px;
@@ -794,6 +1525,15 @@ h2 {
   padding: 12px;
 }
 .chart-frame svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart-frame rect {
+  transition: opacity 180ms ease, filter 180ms ease;
+}
+.chart-frame rect:hover {
+  filter: brightness(1.18);
+}
+.just-swapped .chart-frame rect {
+  animation: chart-pop 360ms ease both;
+}
 .legend-strip {
   display: flex;
   flex-wrap: wrap;
@@ -864,6 +1604,68 @@ h2 {
 .rank-fill {
   height: 100%;
   box-shadow: 0 0 18px currentColor;
+  transform-origin: left center;
+  animation: fill-in 620ms cubic-bezier(.2,.8,.2,1) both;
+}
+.data-table, .interval-list {
+  display: grid;
+  gap: 8px;
+}
+.table-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1.4fr) 92px 72px 78px 92px;
+  gap: 10px;
+  align-items: center;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.035);
+}
+.table-head {
+  min-height: 30px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 950;
+  text-transform: uppercase;
+  background: rgba(255,255,255,0.065);
+}
+.table-rank {
+  color: var(--cyan);
+  font-weight: 950;
+}
+.table-name, .interval-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 900;
+}
+.table-row span:not(.table-name):not(.table-rank) {
+  color: var(--soft);
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+.interval-row {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) 118px 72px;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.interval-row:last-child {
+  border-bottom: 0;
+}
+.interval-kind {
+  font-weight: 950;
+}
+.interval-time, .interval-duration {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 .mix-strip, .breakdown-strip {
   display: flex;
@@ -878,6 +1680,8 @@ h2 {
 .mix-segment, .breakdown-segment {
   min-width: 2px;
   height: 100%;
+  transform-origin: left center;
+  animation: fill-in 620ms cubic-bezier(.2,.8,.2,1) both;
 }
 .histogram {
   display: grid;
@@ -904,6 +1708,12 @@ h2 {
   bottom: 0;
   background: linear-gradient(180deg, var(--cyan), var(--purple));
   box-shadow: 0 0 20px rgba(67,217,232,0.28);
+  transform-origin: center bottom;
+  animation: reveal-bar 650ms cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes reveal-bar {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
 }
 .hist-value {
   font-weight: 950;
@@ -918,6 +1728,34 @@ h2 {
 .breakdown-list {
   display: grid;
   gap: 10px;
+}
+.metric-list {
+  display: grid;
+  gap: 10px;
+}
+.metric-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: 12px;
+  align-items: baseline;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.metric-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.metric-row span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+.metric-row strong {
+  min-width: 0;
+  color: var(--soft);
+  font-weight: 950;
+  overflow-wrap: anywhere;
 }
 .breakdown-row {
   display: grid;
@@ -1006,7 +1844,7 @@ text {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 @media (max-width: 1060px) {
-  .dashboard-header, .grid-main, .grid-secondary, .grid-tertiary, .metric-grid {
+  .dashboard-header, .control-bar, .grid-main, .grid-secondary, .grid-tertiary, .metric-grid {
     grid-template-columns: 1fr;
   }
   .panel-heading {
@@ -1018,6 +1856,20 @@ text {
   }
   .histogram {
     min-height: 190px;
+  }
+}
+@media (max-width: 720px) {
+  .table-row {
+    grid-template-columns: 34px minmax(0, 1fr) 72px 76px;
+  }
+  .hide-narrow {
+    display: none;
+  }
+  .interval-row {
+    grid-template-columns: 58px minmax(0, 1fr) 64px;
+  }
+  .interval-time {
+    display: none;
   }
 }
 @media print {
@@ -1328,6 +2180,422 @@ fn session_histogram(focus_intervals: &[TimelineInterval], stats: &ExportStats) 
         r#"<div class="histogram">{}</div><p class="summary-note">{}</p>"#,
         bars.join("\n"),
         escape_html(&note),
+    )
+}
+
+fn app_table(rows: &[AppTotals], total: i64) -> String {
+    let rows = rows
+        .iter()
+        .filter(|row| row.focused_seconds > 0 || row.open_seconds > 0)
+        .take(18)
+        .enumerate()
+        .map(|(index, row)| {
+            let density = ratio(row.focused_seconds, row.open_seconds.max(1));
+            let share = ratio(row.focused_seconds, total.max(1));
+            format!(
+                r#"<div class="table-row">
+  <span class="table-rank">{rank}</span>
+  <span class="table-name">{name}</span>
+  <span>{focused}</span>
+  <span class="hide-narrow">{share}</span>
+  <span class="hide-narrow">{density}</span>
+  <span>{open}</span>
+</div>"#,
+                rank = index + 1,
+                name = escape_html(&report::app_label(&row.app_class)),
+                focused = escape_html(&report::format_duration(row.focused_seconds)),
+                share = escape_html(&report::percent(share)),
+                density = escape_html(&report::percent(density)),
+                open = escape_html(&report::format_duration(row.open_seconds)),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        return "No application usage in this period.".to_string();
+    }
+
+    format!(
+        r#"<div class="data-table app-data-table">
+  <div class="table-row table-head">
+    <span>#</span><span>Application</span><span>Focused</span><span class="hide-narrow">Share</span><span class="hide-narrow">Focus %</span><span>Open</span>
+  </div>
+  {}
+</div>"#,
+        rows.join("\n")
+    )
+}
+
+fn activity_timeline_chart(
+    intervals: &[TimelineInterval],
+    system_intervals: &[SystemTimelineInterval],
+    rows: &[AppTotals],
+    start_ts: i64,
+    end_ts: i64,
+) -> String {
+    if (intervals.is_empty() && system_intervals.is_empty()) || end_ts <= start_ts {
+        return r#"<div class="chart-frame">No intervals recorded for this period.</div>"#
+            .to_string();
+    }
+
+    let top_classes = rows
+        .iter()
+        .take(8)
+        .map(|row| row.app_class.clone())
+        .collect::<Vec<_>>();
+    let class_rank = top_classes
+        .iter()
+        .enumerate()
+        .map(|(index, app_class)| (app_class.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let duration = (end_ts - start_ts).max(1) as f64;
+    let left = 118.0;
+    let chart_w = 1080.0 - left - 30.0;
+    let mut blocks = String::new();
+
+    for interval in intervals.iter().take(1100) {
+        let rank = class_rank
+            .get(&interval.app_class)
+            .copied()
+            .unwrap_or(PALETTE.len() - 1);
+        let color = PALETTE[rank % PALETTE.len()];
+        let (lane_y, height, opacity, kind) = match interval.kind {
+            IntervalKind::Focused => (44.0, 15.0, 0.9, "focus"),
+            IntervalKind::Open => (79.0, 11.0, 0.38, "open"),
+        };
+        let x = left + ((interval.started_at.max(start_ts) - start_ts) as f64 / duration) * chart_w;
+        let end_x = left + ((interval.ended_at.min(end_ts) - start_ts) as f64 / duration) * chart_w;
+        let w = (end_x - x).max(1.2);
+        blocks.push_str(&format!(
+            r##"<rect x="{x:.2}" y="{lane_y:.2}" width="{w:.2}" height="{height:.2}" rx="4" fill="{color}" opacity="{opacity}">
+<title>{kind}: {app} / {duration}</title></rect>"##,
+            app = escape_html(&app_name(&interval.app_class)),
+            duration = escape_html(&report::format_duration(
+                interval.ended_at.saturating_sub(interval.started_at)
+            )),
+        ));
+    }
+
+    for interval in system_intervals.iter().take(400) {
+        let (lane_y, color, kind) = match interval.kind {
+            SystemIntervalKind::Sleep => (114.0, "#f59f53", "sleep"),
+            SystemIntervalKind::Unobserved => (139.0, "#ff6f7f", "tracker off"),
+        };
+        let x = left + ((interval.started_at.max(start_ts) - start_ts) as f64 / duration) * chart_w;
+        let end_x = left + ((interval.ended_at.min(end_ts) - start_ts) as f64 / duration) * chart_w;
+        let w = (end_x - x).max(1.2);
+        blocks.push_str(&format!(
+            r##"<rect x="{x:.2}" y="{lane_y:.2}" width="{w:.2}" height="12" rx="4" fill="{color}" opacity="0.82">
+<title>{kind}: {duration}</title></rect>"##,
+            duration = escape_html(&report::format_duration(
+                interval.ended_at.saturating_sub(interval.started_at)
+            )),
+        ));
+    }
+
+    let labels = [
+        ("Focused", 56.0),
+        ("Open", 89.0),
+        ("Sleep", 124.0),
+        ("Tracker off", 149.0),
+    ]
+    .into_iter()
+    .map(|(label, y)| {
+        format!(
+            r##"<text x="8" y="{y:.2}" font-size="12" font-weight="900" fill="#a8acb8">{}</text>"##,
+            escape_html(label)
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("");
+    let ticks = timeline_ticks(start_ts, end_ts, left, chart_w, 166.0, 188.0);
+
+    format!(
+        r##"<div class="chart-frame"><svg viewBox="0 0 1080 198" role="img" aria-label="Activity timeline">
+<rect x="118" y="28" width="{chart_w:.2}" height="134" rx="6" fill="rgba(255,255,255,0.035)" />
+{ticks}
+{labels}
+{blocks}
+</svg></div>"##
+    )
+}
+
+fn interval_table(
+    intervals: &[TimelineInterval],
+    system_intervals: &[SystemTimelineInterval],
+    rows: &[AppTotals],
+    start_ts: i64,
+    end_ts: i64,
+) -> String {
+    let class_rank = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.app_class.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let span = end_ts.saturating_sub(start_ts);
+    let mut all_rows = intervals
+        .iter()
+        .map(|interval| {
+            let rank = class_rank
+                .get(&interval.app_class)
+                .copied()
+                .unwrap_or(PALETTE.len() - 1);
+            let kind = match interval.kind {
+                IntervalKind::Focused => "Focus",
+                IntervalKind::Open => "Open",
+            };
+            (
+                interval.started_at,
+                interval.ended_at,
+                kind.to_string(),
+                app_name(&interval.app_class),
+                PALETTE[rank % PALETTE.len()],
+            )
+        })
+        .chain(system_intervals.iter().map(|interval| {
+            let (kind, label, color) = match interval.kind {
+                SystemIntervalKind::Sleep => ("Sleep", "System sleep".to_string(), "#f59f53"),
+                SystemIntervalKind::Unobserved => (
+                    "Gap",
+                    interval
+                        .source
+                        .as_deref()
+                        .filter(|source| !source.trim().is_empty())
+                        .unwrap_or("Tracker off")
+                        .to_string(),
+                    "#ff6f7f",
+                ),
+            };
+            (
+                interval.started_at,
+                interval.ended_at,
+                kind.to_string(),
+                label,
+                color,
+            )
+        }))
+        .collect::<Vec<_>>();
+    all_rows.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+
+    if all_rows.is_empty() {
+        return "No intervals recorded for this period.".to_string();
+    }
+
+    let rows = all_rows
+        .into_iter()
+        .take(14)
+        .map(|(started_at, ended_at, kind, label, color)| {
+            format!(
+                r#"<div class="interval-row">
+  <span class="interval-kind" style="color:{color}">{kind}</span>
+  <span class="interval-name">{name}</span>
+  <span class="interval-time">{time}</span>
+  <span class="interval-duration">{duration}</span>
+</div>"#,
+                name = escape_html(&label),
+                time = escape_html(&compact_time_range(started_at, ended_at, span)),
+                duration = escape_html(&report::format_duration(
+                    ended_at.saturating_sub(started_at)
+                )),
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(r#"<div class="interval-list">{}</div>"#, rows.join("\n"))
+}
+
+fn gap_summary(system_intervals: &[SystemTimelineInterval], report: &UsageReport) -> String {
+    let sleep_count = system_intervals
+        .iter()
+        .filter(|interval| interval.kind == SystemIntervalKind::Sleep)
+        .count();
+    let unobserved_count = system_intervals
+        .iter()
+        .filter(|interval| interval.kind == SystemIntervalKind::Unobserved)
+        .count();
+    let excluded = report
+        .total_sleep_seconds
+        .saturating_add(report.total_unobserved_seconds);
+    if excluded <= 0 {
+        return "No sleep or tracker-off gaps in this period.".to_string();
+    }
+    let signal_total = report
+        .total_focused_seconds
+        .saturating_add(report.total_idle_seconds)
+        .saturating_add(report.total_locked_seconds)
+        .saturating_add(excluded)
+        .max(1);
+    metric_rows(&[
+        (
+            "Sleep",
+            format!(
+                "{} in {} intervals",
+                report::format_duration(report.total_sleep_seconds),
+                sleep_count
+            ),
+        ),
+        (
+            "Tracker off",
+            format!(
+                "{} in {} intervals",
+                report::format_duration(report.total_unobserved_seconds),
+                unobserved_count
+            ),
+        ),
+        (
+            "Not counted",
+            format!(
+                "{} ({})",
+                report::format_duration(excluded),
+                report::percent(excluded as f64 / signal_total as f64)
+            ),
+        ),
+    ])
+}
+
+fn system_health_panel(status: &StorageStatus, report: &UsageReport) -> String {
+    let active_total = status
+        .focused_active
+        .saturating_add(status.open_active)
+        .saturating_add(status.idle_active)
+        .saturating_add(status.locked_active)
+        .saturating_add(status.sleep_active)
+        .saturating_add(status.daemon_active);
+    metric_rows(&[
+        ("Rows", compact_count(status.interval_count)),
+        ("Active intervals", active_total.to_string()),
+        (
+            "Live",
+            format!(
+                "{} focus / {} open / {} idle / {} locked / {} sleep / {} daemon",
+                status.focused_active,
+                status.open_active,
+                status.idle_active,
+                status.locked_active,
+                status.sleep_active,
+                status.daemon_active
+            ),
+        ),
+        ("Last event", ago_label(status.last_event_at)),
+        ("Heartbeat", ago_label(status.last_heartbeat_at)),
+        (
+            "Loaded period",
+            format!(
+                "{} focus / {} open",
+                report::format_duration(report.total_focused_seconds),
+                report::format_duration(report.total_open_seconds)
+            ),
+        ),
+    ])
+}
+
+fn metric_rows(rows: &[(&str, String)]) -> String {
+    let rows = rows
+        .iter()
+        .map(|(label, value)| {
+            format!(
+                r#"<div class="metric-row"><span>{}</span><strong>{}</strong></div>"#,
+                escape_html(label),
+                escape_html(value),
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(r#"<div class="metric-list">{}</div>"#, rows.join("\n"))
+}
+
+fn timeline_chart(
+    focus_intervals: &[TimelineInterval],
+    rows: &[AppTotals],
+    start_ts: i64,
+    end_ts: i64,
+) -> String {
+    if focus_intervals.is_empty() || end_ts <= start_ts {
+        return r#"<div class="chart-frame">No focus intervals for this period.</div>"#.to_string();
+    }
+
+    let top_classes = rows
+        .iter()
+        .filter(|row| row.focused_seconds > 0)
+        .take(8)
+        .map(|row| row.app_class.clone())
+        .collect::<Vec<_>>();
+    let class_rank = top_classes
+        .iter()
+        .enumerate()
+        .map(|(index, app_class)| (app_class.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut lanes = top_classes
+        .iter()
+        .map(|app_class| (app_class.clone(), report::app_label(app_class)))
+        .collect::<Vec<_>>();
+    if focus_intervals
+        .iter()
+        .any(|interval| !class_rank.contains_key(&interval.app_class))
+    {
+        lanes.push(("Other".to_string(), "Other".to_string()));
+    }
+    let lane_count = lanes.len().max(1);
+    let lane_h = 30.0;
+    let top = 34.0;
+    let left = 128.0;
+    let width = 1080.0;
+    let chart_w = width - left - 28.0;
+    let height = top + lane_count as f64 * lane_h + 54.0;
+    let duration = (end_ts - start_ts).max(1) as f64;
+    let mut blocks = String::new();
+
+    for interval in focus_intervals.iter().take(700) {
+        let lane_index = class_rank
+            .get(&interval.app_class)
+            .copied()
+            .unwrap_or_else(|| lane_count.saturating_sub(1));
+        let x = left + ((interval.started_at.max(start_ts) - start_ts) as f64 / duration) * chart_w;
+        let end_x = left + ((interval.ended_at.min(end_ts) - start_ts) as f64 / duration) * chart_w;
+        let w = (end_x - x).max(1.5);
+        let y = top + lane_index as f64 * lane_h + 5.0;
+        let color = PALETTE[lane_index % PALETTE.len()];
+        blocks.push_str(&format!(
+            r##"<rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="18" rx="4" fill="{color}" opacity="0.88">
+<title>{app}: {duration}</title></rect>"##,
+            app = escape_html(&app_name(&interval.app_class)),
+            duration = escape_html(&report::format_duration(
+                interval.ended_at.saturating_sub(interval.started_at)
+            )),
+        ));
+    }
+
+    let lane_labels = lanes
+        .iter()
+        .enumerate()
+        .map(|(index, (_, label))| {
+            format!(
+                r##"<text x="8" y="{:.2}" font-size="12" font-weight="900" fill="#a8acb8">{}</text>"##,
+                top + index as f64 * lane_h + 19.0,
+                escape_html(&widgets_fit(label, 16)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let mut ticks = String::new();
+    for step in 0..=4 {
+        let x = left + chart_w * step as f64 / 4.0;
+        let ts = start_ts + ((end_ts - start_ts) as f64 * step as f64 / 4.0).round() as i64;
+        ticks.push_str(&format!(
+            r##"<line x1="{x:.2}" y1="28" x2="{x:.2}" y2="{axis_y:.2}" stroke="rgba(255,255,255,0.08)" />
+<text x="{x:.2}" y="{label_y:.2}" text-anchor="middle" font-size="11" font-weight="850" fill="#a8acb8">{label}</text>"##,
+            axis_y = height - 28.0,
+            label_y = height - 8.0,
+            label = escape_html(&format_time_tick(ts)),
+        ));
+    }
+
+    format!(
+        r##"<div class="chart-frame"><svg viewBox="0 0 1080 {height:.0}" role="img" aria-label="Focused interval timeline">
+<rect x="128" y="28" width="{chart_w:.2}" height="{chart_h:.2}" rx="6" fill="rgba(255,255,255,0.035)" />
+{ticks}
+{lane_labels}
+{blocks}
+</svg></div>"##,
+        chart_h = height - 58.0,
     )
 }
 
@@ -1714,33 +2982,6 @@ fn insight_tone_label(tone: InsightTone) -> &'static str {
     }
 }
 
-fn lens_cards_html(reports: &[UsageReport]) -> String {
-    let rows = reports
-        .iter()
-        .map(|report| {
-            let top = report
-                .rows
-                .iter()
-                .find(|row| row.focused_seconds > 0)
-                .map(|row| report::app_label(&row.app_class))
-                .unwrap_or_else(|| "No focus yet".to_string());
-            format!(
-                r#"<article class="lens-card">
-  <div class="lens-label">{}</div>
-  <div>
-    <div class="lens-total">{}</div>
-    <div class="lens-meta">{}</div>
-  </div>
-</article>"#,
-                escape_html(report.lens_label),
-                escape_html(&report::format_duration(report.total_focused_seconds)),
-                escape_html(&top),
-            )
-        })
-        .collect::<Vec<_>>();
-    format!(r#"<div class="lens-list">{}</div>"#, rows.join("\n"))
-}
-
 fn longest_focus_streak(days: &[DayTotals]) -> usize {
     let mut longest = 0;
     let mut current = 0;
@@ -1837,6 +3078,86 @@ fn short_date(date: &str) -> String {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
         .map(|date| format!("{}/{}", date.month(), date.day()))
         .unwrap_or_else(|_| date.to_string())
+}
+
+fn format_time_tick(timestamp: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|time| time.format("%m/%d %H:%M").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn timeline_ticks(
+    start_ts: i64,
+    end_ts: i64,
+    left: f64,
+    chart_w: f64,
+    axis_y: f64,
+    label_y: f64,
+) -> String {
+    let mut ticks = String::new();
+    for step in 0..=4 {
+        let x = left + chart_w * step as f64 / 4.0;
+        let ts = start_ts + ((end_ts - start_ts) as f64 * step as f64 / 4.0).round() as i64;
+        ticks.push_str(&format!(
+            r##"<line x1="{x:.2}" y1="28" x2="{x:.2}" y2="{axis_y:.2}" stroke="rgba(255,255,255,0.08)" />
+<text x="{x:.2}" y="{label_y:.2}" text-anchor="middle" font-size="11" font-weight="850" fill="#a8acb8">{label}</text>"##,
+            label = escape_html(&format_time_tick(ts)),
+        ));
+    }
+    ticks
+}
+
+fn compact_time_range(started_at: i64, ended_at: i64, span_seconds: i64) -> String {
+    format!(
+        "{}-{}",
+        compact_time_endpoint(started_at, span_seconds),
+        compact_time_endpoint(ended_at, span_seconds)
+    )
+}
+
+fn compact_time_endpoint(timestamp: i64, span_seconds: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|time| {
+            if span_seconds <= 36 * 3600 {
+                time.format("%H:%M").to_string()
+            } else {
+                time.format("%m/%d %H:%M").to_string()
+            }
+        })
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn compact_count(value: i64) -> String {
+    if value.abs() >= 1_000_000 {
+        format!("{:.1}m", value as f64 / 1_000_000.0)
+    } else if value.abs() >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn ago_label(timestamp: Option<i64>) -> String {
+    let Some(timestamp) = timestamp else {
+        return "never".to_string();
+    };
+    let seconds = Local::now().timestamp().saturating_sub(timestamp).max(0);
+    format!("{} ago", report::format_duration(seconds))
+}
+
+fn widgets_fit(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    value
+        .chars()
+        .take(width.saturating_sub(3))
+        .collect::<String>()
+        + "..."
 }
 
 fn average(total: i64, count: usize) -> i64 {
@@ -1976,6 +3297,10 @@ mod tests {
         assert!(html.contains("Week x hour heatmap"));
         assert!(html.contains("Focus length distribution"));
         assert!(html.contains("Workspace focus"));
+        assert!(html.contains("App table"));
+        assert!(html.contains("Activity timeline"));
+        assert!(html.contains("System health"));
+        assert!(html.contains("omastat-data"));
         assert!(html.contains("Docs &lt;Dashboard&gt;"));
     }
 
