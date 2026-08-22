@@ -4,7 +4,8 @@ use crate::{
     report::{self, Lens, UsageReport},
     steam::SteamResolver,
     storage::{
-        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, RawExportRows, Storage, TitleTotals,
+        AppDayTotals, AppTotals, DayTotals, FocusHeatCell, RawExportRows, Storage,
+        TimelineInterval, TitleTotals, WorkspaceTotals,
     },
 };
 use anyhow::Result;
@@ -70,24 +71,49 @@ pub fn render_html(
     config: &Config,
     options: ExportOptions,
 ) -> Result<String> {
-    let report =
-        report::usage_report_for_period(storage, steam, config, options.lens, options.offset)?;
+    let report = if options.lens == Lens::Day && options.offset == 0 {
+        report::usage_report(
+            storage,
+            steam,
+            config,
+            options.lens,
+            options.lens.history_days(),
+        )?
+    } else {
+        report::usage_report_for_period(storage, steam, config, options.lens, options.offset)?
+    };
     let (start_ts, end_ts) = (report.query_start_ts, report.query_end_ts);
-    let titles = storage.focused_title_totals_between(start_ts, end_ts, 12)?;
-    let daily_apps = storage.focused_app_daily_totals_between(start_ts, end_ts)?;
-    let heatmap = storage.focus_heatmap_between(start_ts, end_ts)?;
+    let mut rollups = storage.focused_rollups_between(start_ts, end_ts, 8, 64)?;
+    for row in &mut rollups.daily_apps {
+        row.app_class = steam.resolve_class(&row.app_class);
+    }
+    for interval in &mut rollups.focus_intervals {
+        interval.app_class = steam.resolve_class(&interval.app_class);
+    }
+    let stats = ExportStats::from_data(&report, &rollups.heatmap, &rollups.focus_intervals);
+    let titles = storage
+        .focused_title_totals_between(start_ts, end_ts, 12)?
+        .into_iter()
+        .map(|mut row| {
+            row.app_class = steam.resolve_class(&row.app_class);
+            row
+        })
+        .collect::<Vec<_>>();
     let lens_cards = lens_cards(storage, steam, config)?;
     let page_title = options
         .title
-        .unwrap_or_else(|| format!("Omastat Replay - {}", report.period.label));
+        .unwrap_or_else(|| format!("Omastat Overview - {}", report.period.label));
 
     Ok(document(
         &page_title,
         &report,
-        &daily_apps,
-        &heatmap,
+        &rollups.daily_apps,
+        &rollups.heatmap,
         &titles,
         &lens_cards,
+        &rollups.workspaces,
+        &rollups.focus_intervals,
+        &stats,
     ))
 }
 
@@ -259,6 +285,93 @@ fn write_csv<T: Serialize>(path: PathBuf, rows: &[T]) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Default)]
+struct ExportStats {
+    total_days: usize,
+    active_days: usize,
+    daily_average_seconds: i64,
+    active_day_average_seconds: i64,
+    longest_streak_days: usize,
+    focus_block_count: usize,
+    app_switch_count: usize,
+    average_block_seconds: i64,
+    median_block_seconds: i64,
+    longest_block_seconds: i64,
+    deep_block_count: usize,
+    deep_block_seconds: i64,
+    peak_hour: Option<(u32, i64)>,
+    top_app_share: f64,
+    effective_apps: f64,
+}
+
+impl ExportStats {
+    fn from_data(
+        report: &UsageReport,
+        heatmap: &[FocusHeatCell],
+        focus_intervals: &[TimelineInterval],
+    ) -> Self {
+        let total_days = report.daily.len();
+        let active_days = report
+            .daily
+            .iter()
+            .filter(|day| day.focused_seconds > 0)
+            .count();
+        let daily_average_seconds = average(report.total_focused_seconds, total_days);
+        let active_day_average_seconds = average(report.total_focused_seconds, active_days);
+        let longest_streak_days = longest_focus_streak(&report.daily);
+
+        let mut durations = focus_intervals
+            .iter()
+            .map(|interval| interval.ended_at.saturating_sub(interval.started_at))
+            .filter(|seconds| *seconds > 0)
+            .collect::<Vec<_>>();
+        let focus_block_count = durations.len();
+        let total_block_seconds = durations.iter().sum::<i64>();
+        durations.sort_unstable();
+        let average_block_seconds = average(total_block_seconds, focus_block_count);
+        let median_block_seconds = median(&durations);
+        let longest_block_seconds = durations.last().copied().unwrap_or_default();
+        let deep_block_count = durations
+            .iter()
+            .filter(|seconds| **seconds >= 25 * 60)
+            .count();
+        let deep_block_seconds = durations
+            .iter()
+            .filter(|seconds| **seconds >= 25 * 60)
+            .sum::<i64>();
+        let app_switch_count = focus_intervals
+            .windows(2)
+            .filter(|pair| pair[0].app_class != pair[1].app_class)
+            .count();
+        let peak_hour = hour_totals(heatmap).into_iter().next();
+        let top_app_share = report
+            .rows
+            .iter()
+            .find(|row| row.focused_seconds > 0)
+            .map(|row| ratio(row.focused_seconds, report.total_focused_seconds.max(1)))
+            .unwrap_or_default();
+        let effective_apps = effective_app_count(&report.rows, report.total_focused_seconds);
+
+        Self {
+            total_days,
+            active_days,
+            daily_average_seconds,
+            active_day_average_seconds,
+            longest_streak_days,
+            focus_block_count,
+            app_switch_count,
+            average_block_seconds,
+            median_block_seconds,
+            longest_block_seconds,
+            deep_block_count,
+            deep_block_seconds,
+            peak_hour,
+            top_app_share,
+            effective_apps,
+        }
+    }
+}
+
 fn document(
     page_title: &str,
     report: &UsageReport,
@@ -266,68 +379,67 @@ fn document(
     heatmap: &[FocusHeatCell],
     titles: &[TitleTotals],
     lens_cards: &[UsageReport],
+    workspaces: &[WorkspaceTotals],
+    focus_intervals: &[TimelineInterval],
+    stats: &ExportStats,
 ) -> String {
     let generated = format_timestamp(report.generated_at);
     let focused = report::format_duration(report.total_focused_seconds);
     let open = report::format_duration(report.total_open_seconds);
-    let idle = report::format_duration(report.total_idle_seconds);
-    let locked = report::format_duration(report.total_locked_seconds);
-    let sleep = report::format_duration(report.total_sleep_seconds);
-    let unobserved = report::format_duration(report.total_unobserved_seconds);
     let density = report::percent(ratio(
         report.total_focused_seconds,
         report.total_open_seconds.max(1),
     ));
-    let app_count = report
-        .rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .count();
-    let longest_streak = longest_focus_streak(&report.daily);
     let peak_day = report
         .daily
         .iter()
         .max_by_key(|day| day.focused_seconds)
         .filter(|day| day.focused_seconds > 0);
-    let app_count_label = app_count.to_string();
-    let longest_streak_label = format!("{longest_streak}d");
+    let daily_avg = report::format_duration(stats.active_day_average_seconds);
+    let daily_note = format!("{} active / {} shown", stats.active_days, stats.total_days);
+    let longest_session = report::format_duration(stats.longest_block_seconds);
+    let session_note = format!(
+        "{} sessions, median {}",
+        stats.focus_block_count,
+        report::format_duration(stats.median_block_seconds)
+    );
+    let app_mix = format!("{:.1}", stats.effective_apps);
+    let app_note = format!("top app {}", report::percent(stats.top_app_share));
+    let streak_label = format!("{}d", stats.longest_streak_days);
+    let switch_rate = if report.total_focused_seconds > 0 {
+        stats.app_switch_count as f64 / (report.total_focused_seconds as f64 / 3600.0)
+    } else {
+        0.0
+    };
+    let streak_note = format!("{:.0} app changes/h", switch_rate);
     let peak_day_label = peak_day
         .map(|day| day.label.clone())
         .unwrap_or_else(|| "none".to_string());
     let peak_day_duration = peak_day
         .map(|day| report::format_duration(day.focused_seconds))
         .unwrap_or_else(|| "no focus".to_string());
+    let peak_hour = stats
+        .peak_hour
+        .map(|(hour, seconds)| {
+            format!(
+                "{} / {}",
+                hour_label(hour),
+                report::format_duration(seconds)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let focus_note = format!("{density} focused while open");
     let insights_html = insight_rows(&report.insights);
-    let mut number_card_rows = vec![
-        NumberCard::new("Open time", &open, "tracked beside focus"),
-        NumberCard::new("Apps", &app_count_label, "with focused time"),
-        NumberCard::new(
-            "Longest streak",
-            &longest_streak_label,
-            "focused days in a row",
-        ),
+    let number_card_rows = vec![
+        NumberCard::new("Focused", &focused, &focus_note),
+        NumberCard::new("Daily avg", &daily_avg, &daily_note),
+        NumberCard::new("Longest session", &longest_session, &session_note),
+        NumberCard::new("App mix", &app_mix, &app_note),
+        NumberCard::new("Streak", &streak_label, &streak_note),
+        NumberCard::new("Peak hour", &peak_hour, "recurring focus window"),
         NumberCard::new("Peak day", &peak_day_label, &peak_day_duration),
+        NumberCard::new("Open time", &open, "tracked beside focus"),
     ];
-    if report.total_idle_seconds > 0 {
-        number_card_rows.push(NumberCard::new("Idle excluded", &idle, "session idle"));
-    }
-    if report.total_locked_seconds > 0 {
-        number_card_rows.push(NumberCard::new(
-            "Locked excluded",
-            &locked,
-            "session locked",
-        ));
-    }
-    if report.total_sleep_seconds > 0 {
-        number_card_rows.push(NumberCard::new("Sleep excluded", &sleep, "system sleep"));
-    }
-    if report.total_unobserved_seconds > 0 {
-        number_card_rows.push(NumberCard::new(
-            "Unobserved excluded",
-            &unobserved,
-            "daemon offline",
-        ));
-    }
     let number_cards_html = number_cards(&number_card_rows);
 
     format!(
@@ -342,21 +454,21 @@ fn document(
 </style>
 </head>
 <body>
-<main class="replay">
-  <section class="hero">
-    <div class="hero-copy">
-      <p class="eyebrow">Omastat replay</p>
+<main class="dashboard">
+  <header class="dashboard-header">
+    <div>
+      <p class="eyebrow">Omastat overview</p>
       <h1>{title}</h1>
-      <p class="subhead">{period} - {range} - captured locally - generated {generated}</p>
+      <p class="subhead">{period} · {range} · generated {generated}</p>
     </div>
-    <div class="hero-card hero-total">
+    <div class="focus-total">
       <small>Focused time</small>
       <strong>{focused}</strong>
       <span>{density} focus density</span>
     </div>
-  </section>
+  </header>
 
-  <section class="number-grid" aria-label="By the numbers">
+  <section class="metric-grid" aria-label="Overview metrics">
     {number_cards}
   </section>
 
@@ -364,22 +476,22 @@ fn document(
     <article class="panel panel-wide">
       <div class="panel-heading">
         <div>
-          <span class="kicker">Daily replay</span>
-          <h2>Focus by day</h2>
+          <span class="kicker">Trend</span>
+          <h2>Daily pattern</h2>
         </div>
-        <p>Stacked by app for the selected period.</p>
+        <p>Bars show focused time; the line shows focus density while apps were open.</p>
       </div>
-      {stacked_days}
+      {daily_pattern}
     </article>
 
     <article class="panel">
       <div class="panel-heading compact">
         <div>
-          <span class="kicker">Attention ranking</span>
-          <h2>Top apps</h2>
+          <span class="kicker">Composition</span>
+          <h2>App mix</h2>
         </div>
       </div>
-      {ranked_apps}
+      {app_mix_panel}
     </article>
   </section>
 
@@ -387,37 +499,74 @@ fn document(
     <article class="panel">
       <div class="panel-heading">
         <div>
-          <span class="kicker">App gravity</span>
-          <h2>App constellation</h2>
+          <span class="kicker">Timing</span>
+          <h2>Week x hour heatmap</h2>
         </div>
-        <p>Scale shows focus; outline shows density.</p>
+        <p>Sequential color exposes recurring focus windows.</p>
       </div>
-      {constellation}
+      {heatmap_chart}
     </article>
 
     <article class="panel">
       <div class="panel-heading">
         <div>
-          <span class="kicker">Focus windows</span>
-          <h2>Week x hour heatmap</h2>
+          <span class="kicker">Timing</span>
+          <h2>Top hours</h2>
         </div>
-        <p>Brighter cells mark recurring focus.</p>
+        <p>Ranked hours make peaks easy to compare.</p>
       </div>
-      {heatmap_chart}
+      {top_hours}
+    </article>
+  </section>
+
+  <section class="grid grid-secondary">
+    <article class="panel">
+      <div class="panel-heading">
+        <div>
+          <span class="kicker">Place</span>
+          <h2>Workspace focus</h2>
+        </div>
+        <p>Ranked workspaces show where focused time landed.</p>
+      </div>
+      {workspace_focus}
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading">
+        <div>
+          <span class="kicker">Sessions</span>
+          <h2>Focus length distribution</h2>
+        </div>
+        <p>Histogram bins reveal whether focus came in fragments or blocks.</p>
+      </div>
+      {session_histogram}
+    </article>
+  </section>
+
+  <section class="grid grid-main">
+    <article class="panel panel-wide">
+      <div class="panel-heading">
+        <div>
+          <span class="kicker">Composition over time</span>
+          <h2>App mix by day</h2>
+        </div>
+        <p>Stacked bars show which apps made up each day's focus.</p>
+      </div>
+      {stacked_days}
+    </article>
+
+    <article class="panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="kicker">System signals</span>
+          <h2>Counted vs excluded</h2>
+        </div>
+      </div>
+      {time_breakdown}
     </article>
   </section>
 
   <section class="grid grid-tertiary">
-    <article class="panel">
-      <div class="panel-heading compact">
-        <div>
-          <span class="kicker">Behavior print</span>
-          <h2>Rhythm radar</h2>
-        </div>
-      </div>
-      {radar}
-    </article>
-
     <article class="panel">
       <div class="panel-heading compact">
         <div>
@@ -451,7 +600,7 @@ fn document(
 
   <footer>
     <span>Generated from local Omastat data</span>
-    <span>Self-contained HTML/SVG replay</span>
+    <span>Self-contained HTML/SVG overview</span>
   </footer>
 </main>
 </body>
@@ -465,11 +614,14 @@ fn document(
         focused = escape_html(&focused),
         density = escape_html(&density),
         number_cards = number_cards_html,
+        daily_pattern = daily_pattern_chart(&report.daily),
+        app_mix_panel = app_mix_panel(&report.rows, report.total_focused_seconds),
+        top_hours = top_hours_chart(heatmap),
+        workspace_focus = workspace_focus_chart(workspaces, report.total_focused_seconds),
+        session_histogram = session_histogram(focus_intervals, stats),
         stacked_days = stacked_day_chart(&report.daily, daily_apps, &report.rows),
-        ranked_apps = ranked_apps(&report.rows, report.total_focused_seconds),
-        constellation = app_constellation(&report.rows, report.total_focused_seconds),
         heatmap_chart = heatmap_chart(heatmap),
-        radar = behavior_radar(report, heatmap),
+        time_breakdown = time_breakdown(report, stats),
         insights = insights_html,
         title_rows = title_rows(titles),
         lens_cards = lens_cards_html(lens_cards),
@@ -480,26 +632,31 @@ fn stylesheet() -> &'static str {
     r#"
 :root {
   color-scheme: dark;
-  --bg: #101114;
-  --bg-2: #18141d;
-  --panel: rgba(27, 27, 31, 0.88);
-  --panel-strong: rgba(39, 35, 38, 0.94);
-  --ink: #f7f1e8;
-  --muted: #b6aa9d;
-  --line: rgba(236, 180, 94, 0.24);
-  --line-strong: rgba(244, 114, 182, 0.48);
-  --cyan: #5ad7ff;
-  --green: #46d369;
-  --yellow: #f6c453;
-  --red: #ff667d;
-  --purple: #b28cff;
-  --shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+  --bg: #0e1014;
+  --bg-grid: rgba(255,255,255,0.035);
+  --panel: #171a20;
+  --panel-2: #1d2028;
+  --ink: #f4f2ec;
+  --muted: #a8acb8;
+  --soft: #d4d7df;
+  --line: rgba(255,255,255,0.11);
+  --line-strong: rgba(255,255,255,0.2);
+  --cyan: #43d9e8;
+  --green: #59d98e;
+  --yellow: #f6c45a;
+  --pink: #f276b6;
+  --purple: #9d83f7;
+  --orange: #f59f53;
+  --red: #ff6f7f;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.26);
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   color: var(--ink);
-  background: linear-gradient(135deg, #101114 0%, #161821 48%, #24151b 100%);
+  background:
+    linear-gradient(180deg, rgba(67,217,232,0.05), transparent 28rem),
+    linear-gradient(135deg, #0e1014 0%, #121722 54%, #171219 100%);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
 }
@@ -509,38 +666,31 @@ body::before {
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
-  background-size: 36px 36px;
-  mask-image: linear-gradient(to bottom, black, transparent 82%);
+    linear-gradient(var(--bg-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: linear-gradient(to bottom, black, transparent 72%);
 }
-.replay {
+.dashboard {
   position: relative;
-  width: min(1340px, calc(100vw - 32px));
+  width: min(1420px, calc(100vw - 32px));
   margin: 0 auto;
-  padding: 34px 0 38px;
+  padding: 28px 0 38px;
 }
-.hero {
+.dashboard-header {
   display: grid;
-  grid-template-columns: 1fr minmax(280px, 420px);
-  gap: 22px;
-  min-height: 260px;
-  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  gap: 16px;
+  align-items: end;
+  margin-bottom: 16px;
 }
-.hero-copy, .hero-card, .panel, .number-card {
+.panel, .number-card, .focus-total {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: linear-gradient(145deg, rgba(39, 35, 38, 0.94), rgba(19, 20, 24, 0.92));
+  background: linear-gradient(145deg, rgba(29, 32, 40, 0.96), rgba(18, 20, 25, 0.96));
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,0.06);
 }
-.hero-copy {
-  padding: 32px;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  overflow: hidden;
-}
-.eyebrow, .kicker, .number-card small, .hero-card small, footer, .mini-label {
+.eyebrow, .kicker, .number-card small, .focus-total small, footer, .mini-label {
   color: var(--muted);
   text-transform: uppercase;
   font-size: 0.72rem;
@@ -550,9 +700,9 @@ body::before {
 h1, h2, p { margin: 0; }
 h1 {
   max-width: 900px;
-  margin-top: 12px;
-  font-size: 6.4rem;
-  line-height: 0.86;
+  margin-top: 8px;
+  font-size: clamp(2.6rem, 6vw, 5.6rem);
+  line-height: 0.92;
   letter-spacing: 0;
 }
 h2 {
@@ -561,54 +711,45 @@ h2 {
   line-height: 1;
 }
 .subhead {
-  margin-top: 18px;
-  color: #d7cabd;
-  font-size: 1.02rem;
+  margin-top: 12px;
+  color: var(--soft);
+  font-size: 0.98rem;
 }
-.hero-total {
-  position: relative;
-  min-height: 100%;
-  padding: 28px;
+.focus-total {
+  min-height: 156px;
+  padding: 22px;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
+  justify-content: center;
   background:
-    linear-gradient(145deg, rgba(246, 196, 83, 0.24), rgba(244, 114, 182, 0.14)),
-    linear-gradient(145deg, rgba(50, 42, 38, 0.96), rgba(20, 21, 29, 0.96));
+    linear-gradient(145deg, rgba(246,196,90,0.2), rgba(67,217,232,0.08)),
+    linear-gradient(145deg, rgba(32,36,45,0.98), rgba(18,20,25,0.98));
 }
-.hero-total::before {
-  content: "";
-  position: absolute;
-  inset: 18px;
-  border: 1px dashed rgba(255,255,255,0.18);
-}
-.hero-total strong {
-  position: relative;
+.focus-total strong {
   display: block;
-  margin: 16px 0 10px;
-  font-size: 5.8rem;
-  line-height: 0.82;
+  margin: 12px 0 8px;
+  font-size: clamp(3rem, 5vw, 4.9rem);
+  line-height: 0.88;
 }
-.hero-total span {
-  position: relative;
-  color: #ffe6b1;
+.focus-total span {
+  color: #ffe4a8;
   font-weight: 850;
 }
-.number-grid {
+.metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 14px;
-  margin-top: 16px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
 }
 .number-card {
-  min-height: 118px;
-  padding: 17px;
+  min-height: 112px;
+  padding: 16px;
   overflow: hidden;
 }
 .number-card strong {
   display: block;
-  margin-top: 18px;
-  font-size: 2rem;
+  margin-top: 14px;
+  font-size: 1.85rem;
   line-height: 0.95;
   overflow-wrap: anywhere;
 }
@@ -621,11 +762,11 @@ h2 {
 .grid {
   display: grid;
   gap: 16px;
-  margin-top: 16px;
+  margin-bottom: 16px;
 }
-.grid-main { grid-template-columns: minmax(0, 1.5fr) minmax(330px, 0.7fr); }
+.grid-main { grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.75fr); }
 .grid-secondary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.grid-tertiary { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.grid-tertiary { grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); }
 .panel {
   min-width: 0;
   padding: 18px;
@@ -647,9 +788,9 @@ h2 {
   line-height: 1.35;
 }
 .chart-frame {
-  border: 1px solid rgba(236, 180, 94, 0.18);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: rgba(10, 11, 14, 0.38);
+  background: rgba(6, 8, 12, 0.34);
   padding: 12px;
 }
 .chart-frame svg { width: 100%; height: auto; display: block; overflow: visible; }
@@ -659,12 +800,18 @@ h2 {
   gap: 8px 12px;
   margin-top: 12px;
 }
+.summary-note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 760;
+}
 .legend-chip {
   display: inline-grid;
   grid-template-columns: 12px auto;
   align-items: center;
   gap: 7px;
-  color: #cce8eb;
+  color: #cfe9ed;
   font-size: 0.8rem;
   font-weight: 800;
 }
@@ -674,7 +821,7 @@ h2 {
   border-radius: 6px;
   box-shadow: 0 0 16px currentColor;
 }
-.ranked-list, .title-list, .lens-list, .insight-list {
+.ranked-list, .title-list, .lens-list, .insight-list, .metric-list {
   display: grid;
   gap: 12px;
 }
@@ -711,12 +858,85 @@ h2 {
 .rank-bar {
   grid-column: 2 / -1;
   height: 10px;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--line);
   background: rgba(255,255,255,0.08);
 }
 .rank-fill {
   height: 100%;
   box-shadow: 0 0 18px currentColor;
+}
+.mix-strip, .breakdown-strip {
+  display: flex;
+  width: 100%;
+  height: 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  margin-bottom: 16px;
+}
+.mix-segment, .breakdown-segment {
+  min-width: 2px;
+  height: 100%;
+}
+.histogram {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+  min-height: 230px;
+}
+.hist-bin {
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  gap: 8px;
+  min-width: 0;
+}
+.hist-track {
+  position: relative;
+  min-height: 150px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.055);
+}
+.hist-fill {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  background: linear-gradient(180deg, var(--cyan), var(--purple));
+  box-shadow: 0 0 20px rgba(67,217,232,0.28);
+}
+.hist-value {
+  font-weight: 950;
+  text-align: center;
+}
+.hist-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 850;
+  text-align: center;
+}
+.breakdown-list {
+  display: grid;
+  gap: 10px;
+}
+.breakdown-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+.breakdown-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+}
+.breakdown-label {
+  font-weight: 850;
+}
+.breakdown-value {
+  color: var(--soft);
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
 }
 .title-row {
   display: grid;
@@ -740,7 +960,7 @@ h2 {
 }
 .insight-explanation {
   margin-top: 5px;
-  color: #dfd1c3;
+  color: var(--soft);
   font-size: 0.82rem;
   line-height: 1.3;
 }
@@ -778,20 +998,31 @@ footer {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  margin-top: 20px;
+  margin-top: 4px;
   padding: 16px 2px 0;
   border-top: 1px solid var(--line);
 }
+text {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
 @media (max-width: 1060px) {
-  .hero, .grid-main, .grid-secondary, .grid-tertiary, .number-grid {
+  .dashboard-header, .grid-main, .grid-secondary, .grid-tertiary, .metric-grid {
     grid-template-columns: 1fr;
   }
-  h1 { font-size: 3.6rem; }
-  .hero-total strong { font-size: 4rem; }
+  .panel-heading {
+    display: block;
+  }
+  .panel-heading p {
+    max-width: none;
+    margin-top: 8px;
+  }
+  .histogram {
+    min-height: 190px;
+  }
 }
 @media print {
   body { background: #101114; }
-  .replay { width: 100%; padding: 0; }
+  .dashboard { width: 100%; padding: 0; }
   body::before { display: none; }
 }
 "#
@@ -824,12 +1055,348 @@ fn number_cards(cards: &[NumberCard<'_>]) -> String {
         .join("\n")
 }
 
+fn daily_pattern_chart(days: &[DayTotals]) -> String {
+    let visible_days = visible_chart_days(days);
+    if visible_days.is_empty() {
+        return r#"<div class="chart-frame">No daily focus yet.</div>"#.to_string();
+    }
+
+    let max_focus = visible_days
+        .iter()
+        .map(|day| day.focused_seconds.max(0))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let width = 1080.0;
+    let left = 54.0;
+    let top = 30.0;
+    let chart_h = 260.0;
+    let chart_w = width - left - 30.0;
+    let gap = if visible_days.len() > 90 {
+        1.0
+    } else if visible_days.len() > 45 {
+        2.0
+    } else {
+        5.0
+    };
+    let bar_w = ((chart_w - gap * (visible_days.len().saturating_sub(1) as f64))
+        / visible_days.len() as f64)
+        .max(2.0);
+    let label_step = (visible_days.len() / 9).max(1);
+    let mut bars = String::new();
+    let mut density_points = Vec::new();
+    let mut labels = String::new();
+
+    for (index, day) in visible_days.iter().enumerate() {
+        let x = left + index as f64 * (bar_w + gap);
+        let focus_height = (day.focused_seconds.max(0) as f64 / max_focus as f64) * chart_h;
+        let y = top + chart_h - focus_height;
+        let density = ratio(day.focused_seconds, day.open_seconds.max(1));
+        let density_y = top + chart_h - density * chart_h;
+        let cx = x + bar_w / 2.0;
+        density_points.push(format!("{cx:.2},{density_y:.2}"));
+        let excluded = excluded_seconds(day);
+        let opacity = if day.focused_seconds > 0 { 0.95 } else { 0.24 };
+        bars.push_str(&format!(
+            r##"<rect x="{x:.2}" y="{y:.2}" width="{bar_w:.2}" height="{focus_height:.2}" rx="3" fill="url(#focusBar)" opacity="{opacity:.2}">
+  <title>{date}: {focus} focused, {density} focus density, {excluded} excluded</title>
+</rect>"##,
+            date = escape_html(&day.label),
+            focus = escape_html(&report::format_duration(day.focused_seconds)),
+            density = escape_html(&report::percent(density)),
+            excluded = escape_html(&report::format_duration(excluded)),
+        ));
+
+        if index % label_step == 0 || index + 1 == visible_days.len() {
+            labels.push_str(&format!(
+                r##"<text x="{:.2}" y="336" text-anchor="middle" font-size="12" font-weight="850" fill="#a8acb8">{}</text>"##,
+                cx,
+                escape_html(&short_date(&day.date)),
+            ));
+        }
+    }
+
+    let best = visible_days
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, day)| day.focused_seconds)
+        .filter(|(_, day)| day.focused_seconds > 0);
+    let annotation = best
+        .map(|(index, day)| {
+            let x = left + index as f64 * (bar_w + gap) + bar_w / 2.0;
+            let bar_h = (day.focused_seconds as f64 / max_focus as f64) * chart_h;
+            let y = top + chart_h - bar_h;
+            format!(
+                r##"<line x1="{x:.2}" y1="{y:.2}" x2="{x:.2}" y2="18" stroke="#f6c45a" stroke-width="2" />
+<rect x="{label_x:.2}" y="2" width="164" height="38" rx="4" fill="#f6c45a" />
+<text x="{text_x:.2}" y="18" font-size="11" font-weight="950" fill="#101114">Peak: {date}</text>
+<text x="{text_x:.2}" y="32" font-size="11" font-weight="850" fill="#101114">{duration}</text>"##,
+                label_x = (x + 8.0).min(width - 174.0),
+                text_x = (x + 18.0).min(width - 164.0),
+                date = escape_html(&day.label),
+                duration = escape_html(&report::format_duration(day.focused_seconds)),
+            )
+        })
+        .unwrap_or_default();
+    let density_line = density_points.join(" ");
+
+    format!(
+        r##"<div class="chart-frame"><svg viewBox="0 0 1080 365" role="img" aria-label="Daily focused time with focus density line">
+<defs>
+  <linearGradient id="focusBar" x1="0" x2="0" y1="0" y2="1">
+    <stop offset="0%" stop-color="#43d9e8" />
+    <stop offset="100%" stop-color="#59d98e" />
+  </linearGradient>
+</defs>
+<line x1="54" y1="290" x2="1050" y2="290" stroke="rgba(255,255,255,0.22)" stroke-width="1" />
+<line x1="54" y1="160" x2="1050" y2="160" stroke="rgba(255,255,255,0.10)" stroke-width="1" />
+<line x1="54" y1="30" x2="1050" y2="30" stroke="rgba(255,255,255,0.08)" stroke-width="1" />
+<text x="5" y="34" font-size="12" font-weight="900" fill="#a8acb8">{max_label}</text>
+<text x="1012" y="34" font-size="12" font-weight="900" fill="#f6c45a">100%</text>
+{bars}
+<polyline points="{density_line}" fill="none" stroke="#f6c45a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+{annotation}
+{labels}
+</svg></div>
+<div class="legend-strip">
+  <span class="legend-chip"><i class="swatch" style="color:#43d9e8;background:#43d9e8"></i>Focused time</span>
+  <span class="legend-chip"><i class="swatch" style="color:#f6c45a;background:#f6c45a"></i>Focus density</span>
+</div>"##,
+        max_label = escape_html(&report::format_duration(max_focus)),
+    )
+}
+
+fn app_mix_panel(rows: &[AppTotals], total: i64) -> String {
+    if rows.iter().all(|row| row.focused_seconds <= 0) {
+        return "No focused app time in this period.".to_string();
+    }
+    format!(
+        r#"{strip}{ranked}"#,
+        strip = composition_strip(rows, total),
+        ranked = ranked_apps(rows, total),
+    )
+}
+
+fn composition_strip(rows: &[AppTotals], total: i64) -> String {
+    let total = total.max(1);
+    let mut segments = rows
+        .iter()
+        .filter(|row| row.focused_seconds > 0)
+        .take(8)
+        .enumerate()
+        .map(|(index, row)| {
+            let share = ratio(row.focused_seconds, total);
+            let color = PALETTE[index % PALETTE.len()];
+            format!(
+                r#"<div class="mix-segment" style="width:{:.2}%;background:{color}" title="{} - {}"></div>"#,
+                share * 100.0,
+                escape_html(&report::app_label(&row.app_class)),
+                escape_html(&report::percent(share)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let shown = rows
+        .iter()
+        .filter(|row| row.focused_seconds > 0)
+        .take(8)
+        .map(|row| row.focused_seconds)
+        .sum::<i64>();
+    let other = total.saturating_sub(shown);
+    if other > 0 {
+        segments.push(format!(
+            r#"<div class="mix-segment" style="width:{:.2}%;background:#64748b" title="Other - {}"></div>"#,
+            ratio(other, total) * 100.0,
+            escape_html(&report::percent(ratio(other, total))),
+        ));
+    }
+
+    format!(r#"<div class="mix-strip">{}</div>"#, segments.join(""))
+}
+
+fn top_hours_chart(cells: &[FocusHeatCell]) -> String {
+    let hours = hour_totals(cells);
+    if hours.iter().all(|(_, seconds)| *seconds <= 0) {
+        return "No hourly focus data for this period.".to_string();
+    }
+    metric_bars(
+        hours
+            .into_iter()
+            .take(8)
+            .map(|(hour, seconds)| (hour_label(hour), seconds))
+            .collect(),
+        "of the busiest hour",
+    )
+}
+
+fn workspace_focus_chart(workspaces: &[WorkspaceTotals], total: i64) -> String {
+    if workspaces.is_empty() || workspaces.iter().all(|row| row.focused_seconds <= 0) {
+        return "No workspace focus data for this period.".to_string();
+    }
+    metric_bars(
+        workspaces
+            .iter()
+            .take(8)
+            .map(|row| (row.workspace.clone(), row.focused_seconds))
+            .collect(),
+        &format!("of {}", report::format_duration(total)),
+    )
+}
+
+fn metric_bars(rows: Vec<(String, i64)>, note: &str) -> String {
+    let max = rows
+        .iter()
+        .map(|(_, seconds)| *seconds)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let rows = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, seconds))| {
+            let width = ratio(seconds, max) * 100.0;
+            let color = PALETTE[index % PALETTE.len()];
+            format!(
+                r#"<div class="rank-row">
+  <div class="rank-index">{rank}</div>
+  <div>
+    <div class="rank-name">{label}</div>
+    <div class="rank-meta">{note}</div>
+  </div>
+  <div class="rank-time">{time}</div>
+  <div class="rank-bar"><div class="rank-fill" style="width:{width:.2}%;color:{color};background:{color}"></div></div>
+</div>"#,
+                rank = index + 1,
+                label = escape_html(&label),
+                time = escape_html(&report::format_duration(seconds)),
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(r#"<div class="ranked-list">{}</div>"#, rows.join("\n"))
+}
+
+fn session_histogram(focus_intervals: &[TimelineInterval], stats: &ExportStats) -> String {
+    let bins = [
+        ("<5m", 0, 5 * 60),
+        ("5-15m", 5 * 60, 15 * 60),
+        ("15-30m", 15 * 60, 30 * 60),
+        ("30-60m", 30 * 60, 60 * 60),
+        ("1h+", 60 * 60, i64::MAX),
+    ];
+    let mut counts = vec![0_usize; bins.len()];
+    for seconds in focus_intervals
+        .iter()
+        .map(|interval| interval.ended_at.saturating_sub(interval.started_at))
+        .filter(|seconds| *seconds > 0)
+    {
+        if let Some((index, _)) = bins
+            .iter()
+            .enumerate()
+            .find(|(_, (_, min, max))| seconds >= *min && seconds < *max)
+        {
+            counts[index] += 1;
+        }
+    }
+
+    if counts.iter().all(|count| *count == 0) {
+        return "No focus sessions for this period.".to_string();
+    }
+
+    let max = counts.iter().copied().max().unwrap_or(1).max(1);
+    let bars = bins
+        .iter()
+        .zip(counts.iter())
+        .map(|((label, _, _), count)| {
+            let height = (*count as f64 / max as f64 * 100.0).max(4.0);
+            format!(
+                r#"<div class="hist-bin">
+  <div class="hist-track"><div class="hist-fill" style="height:{height:.2}%"></div></div>
+  <div class="hist-value">{count}</div>
+  <div class="hist-label">{label}</div>
+</div>"#,
+                label = escape_html(label),
+            )
+        })
+        .collect::<Vec<_>>();
+    let note = format!(
+        "Average {} · longest {} · {} deep sessions / {}",
+        report::format_duration(stats.average_block_seconds),
+        report::format_duration(stats.longest_block_seconds),
+        stats.deep_block_count,
+        report::format_duration(stats.deep_block_seconds),
+    );
+    format!(
+        r#"<div class="histogram">{}</div><p class="summary-note">{}</p>"#,
+        bars.join("\n"),
+        escape_html(&note),
+    )
+}
+
+fn time_breakdown(report: &UsageReport, stats: &ExportStats) -> String {
+    let rows = [
+        ("Focused", report.total_focused_seconds, "#43d9e8"),
+        ("Idle", report.total_idle_seconds, "#9d83f7"),
+        ("Locked", report.total_locked_seconds, "#f276b6"),
+        ("Sleep", report.total_sleep_seconds, "#f59f53"),
+        ("Tracker off", report.total_unobserved_seconds, "#ff6f7f"),
+    ];
+    let total = rows
+        .iter()
+        .map(|(_, seconds, _)| *seconds)
+        .sum::<i64>()
+        .max(1);
+    let segments = rows
+        .iter()
+        .filter(|(_, seconds, _)| *seconds > 0)
+        .map(|(label, seconds, color)| {
+            format!(
+                r#"<div class="breakdown-segment" style="width:{:.2}%;background:{color}" title="{} - {}"></div>"#,
+                ratio(*seconds, total) * 100.0,
+                escape_html(label),
+                escape_html(&report::format_duration(*seconds)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let list = rows
+        .iter()
+        .filter(|(_, seconds, _)| *seconds > 0)
+        .map(|(label, seconds, color)| {
+            format!(
+                r#"<div class="breakdown-row">
+  <span class="breakdown-dot" style="background:{color}"></span>
+  <span class="breakdown-label">{label}</span>
+  <span class="breakdown-value">{value}</span>
+</div>"#,
+                label = escape_html(label),
+                value = escape_html(&report::format_duration(*seconds)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let note = format!(
+        "{} total days · daily average {}",
+        stats.total_days,
+        report::format_duration(stats.daily_average_seconds)
+    );
+    format!(
+        r#"<div class="breakdown-strip">{}</div><div class="breakdown-list">{}</div><p class="summary-note">{}</p>"#,
+        segments.join(""),
+        list.join("\n"),
+        escape_html(&note),
+    )
+}
+
 fn stacked_day_chart(
     days: &[DayTotals],
     daily_apps: &[AppDayTotals],
     rows: &[AppTotals],
 ) -> String {
-    let visible_days = visible_chart_days(days);
+    let mut visible_days = visible_chart_days(days);
+    let app_dates = daily_apps
+        .iter()
+        .map(|row| row.date.clone())
+        .collect::<HashSet<_>>();
+    if app_dates.len() == 1 {
+        visible_days.retain(|day| app_dates.contains(&day.date));
+    }
     if visible_days.is_empty() {
         return r#"<div class="chart-frame">No daily data for this period.</div>"#.to_string();
     }
@@ -1009,70 +1576,6 @@ fn ranked_apps(rows: &[AppTotals], total: i64) -> String {
     }
 }
 
-fn app_constellation(rows: &[AppTotals], total: i64) -> String {
-    let positions = [
-        (295.0, 170.0),
-        (170.0, 132.0),
-        (420.0, 126.0),
-        (228.0, 270.0),
-        (484.0, 238.0),
-        (102.0, 244.0),
-        (514.0, 82.0),
-        (78.0, 88.0),
-        (350.0, 292.0),
-        (575.0, 174.0),
-        (270.0, 58.0),
-        (390.0, 54.0),
-    ];
-    let mut bubbles = String::new();
-    for (index, row) in rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .take(positions.len())
-        .enumerate()
-    {
-        let (x, y) = positions[index];
-        let share = ratio(row.focused_seconds, total);
-        let density = ratio(row.focused_seconds, row.open_seconds.max(1));
-        let radius = 18.0 + share.sqrt() * 86.0;
-        let color = PALETTE[index % PALETTE.len()];
-        let label = report::app_label(&row.app_class);
-        let short = compact_label(&label, if radius > 48.0 { 18 } else { 10 });
-        bubbles.push_str(&format!(
-            r##"<g>
-<circle cx="{x:.2}" cy="{y:.2}" r="{radius:.2}" fill="{color}" fill-opacity="0.68" stroke="{stroke}" stroke-width="{stroke_w:.2}">
-  <title>{title}: {focus} focused - {density_label} density</title>
-</circle>
-<text x="{x:.2}" y="{label_y:.2}" text-anchor="middle" font-size="{font_size:.2}" font-weight="950" fill="#f4fbff">{short}</text>
-</g>"##,
-            stroke = if density > 0.5 { "#ffd166" } else { "#d8fbff" },
-            stroke_w = 1.4 + density * 4.0,
-            title = escape_html(&label),
-            focus = escape_html(&report::format_duration(row.focused_seconds)),
-            density_label = escape_html(&report::percent(density)),
-            label_y = y + 4.0,
-            font_size = if radius > 56.0 { 15.0 } else { 11.0 },
-            short = escape_html(&short),
-        ));
-    }
-
-    if bubbles.is_empty() {
-        return r#"<div class="chart-frame">No app constellation for this period.</div>"#
-            .to_string();
-    }
-
-    format!(
-        r##"<div class="chart-frame"><svg viewBox="0 0 640 360" role="img" aria-label="App constellation bubble chart">
-<defs>
-  <filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-</defs>
-<circle cx="320" cy="180" r="146" fill="none" stroke="rgba(77,232,255,0.14)" stroke-width="1" />
-<circle cx="320" cy="180" r="96" fill="none" stroke="rgba(77,232,255,0.10)" stroke-width="1" />
-<g filter="url(#glow)">{bubbles}</g>
-</svg></div>"##
-    )
-}
-
 fn heatmap_chart(cells: &[FocusHeatCell]) -> String {
     let max = cells
         .iter()
@@ -1127,113 +1630,6 @@ fn heatmap_chart(cells: &[FocusHeatCell]) -> String {
 {rects}
 {hour_labels}
 <text x="540" y="222" font-size="11" font-weight="850" fill="#9ab8bd">hour</text>
-</svg></div>"##
-    )
-}
-
-fn behavior_radar(report: &UsageReport, heatmap: &[FocusHeatCell]) -> String {
-    let app_count = report
-        .rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .count() as f64;
-    let total = report.total_focused_seconds.max(1);
-    let top_share = report
-        .rows
-        .iter()
-        .find(|row| row.focused_seconds > 0)
-        .map(|row| ratio(row.focused_seconds, total))
-        .unwrap_or(0.0);
-    let density = ratio(
-        report.total_focused_seconds,
-        report.total_open_seconds.max(1),
-    );
-    let streak = ratio(
-        longest_focus_streak(&report.daily) as i64,
-        report.daily.len().max(1) as i64,
-    );
-    let weekend = ratio(
-        report
-            .daily
-            .iter()
-            .filter_map(|day| {
-                chrono::NaiveDate::parse_from_str(&day.date, "%Y-%m-%d")
-                    .ok()
-                    .map(|date| (date, day))
-            })
-            .filter(|(date, _)| {
-                matches!(date.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun)
-            })
-            .map(|(_, day)| day.focused_seconds)
-            .sum::<i64>(),
-        total,
-    );
-    let night = ratio(
-        heatmap
-            .iter()
-            .filter(|cell| cell.hour < 6 || cell.hour >= 20)
-            .map(|cell| cell.focused_seconds)
-            .sum::<i64>(),
-        total,
-    );
-    let values = [
-        ("Variety", (app_count / 12.0).min(1.0)),
-        ("Density", density),
-        ("Top-heavy", top_share),
-        ("Streak", streak),
-        ("Night", night),
-        ("Weekend", weekend),
-    ];
-    let center = (180.0, 160.0);
-    let max_r = 112.0;
-    let points = values
-        .iter()
-        .enumerate()
-        .map(|(index, (_, value))| {
-            let angle = -std::f64::consts::FRAC_PI_2
-                + index as f64 * std::f64::consts::TAU / values.len() as f64;
-            (
-                center.0 + angle.cos() * max_r * value,
-                center.1 + angle.sin() * max_r * value,
-            )
-        })
-        .collect::<Vec<_>>();
-    let polygon = points
-        .iter()
-        .map(|(x, y)| format!("{x:.2},{y:.2}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let axes = values
-        .iter()
-        .enumerate()
-        .map(|(index, (label, value))| {
-            let angle =
-                -std::f64::consts::FRAC_PI_2 + index as f64 * std::f64::consts::TAU / values.len() as f64;
-            let x2 = center.0 + angle.cos() * max_r;
-            let y2 = center.1 + angle.sin() * max_r;
-            let lx = center.0 + angle.cos() * (max_r + 34.0);
-            let ly = center.1 + angle.sin() * (max_r + 22.0);
-            format!(
-                r##"<line x1="{cx:.2}" y1="{cy:.2}" x2="{x2:.2}" y2="{y2:.2}" stroke="rgba(255,255,255,0.16)" />
-<text x="{lx:.2}" y="{ly:.2}" text-anchor="middle" font-size="11" font-weight="900" fill="#d6fbff">{label}</text>
-<text x="{lx:.2}" y="{value_y:.2}" text-anchor="middle" font-size="10" font-weight="850" fill="#9ab8bd">{percent}</text>"##,
-                cx = center.0,
-                cy = center.1,
-                value_y = ly + 13.0,
-                label = escape_html(label),
-                percent = escape_html(&report::percent(*value)),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-
-    format!(
-        r##"<div class="chart-frame"><svg viewBox="0 0 360 330" role="img" aria-label="Behavior radar">
-<circle cx="180" cy="160" r="112" fill="none" stroke="rgba(255,255,255,0.12)" />
-<circle cx="180" cy="160" r="74" fill="none" stroke="rgba(255,255,255,0.10)" />
-<circle cx="180" cy="160" r="37" fill="none" stroke="rgba(255,255,255,0.08)" />
-{axes}
-<polygon points="{polygon}" fill="rgba(77,232,255,0.34)" stroke="#4de8ff" stroke-width="3" />
 </svg></div>"##
     )
 }
@@ -1443,19 +1839,74 @@ fn short_date(date: &str) -> String {
         .unwrap_or_else(|_| date.to_string())
 }
 
+fn average(total: i64, count: usize) -> i64 {
+    if count == 0 {
+        0
+    } else {
+        total.max(0) / count as i64
+    }
+}
+
+fn median(sorted: &[i64]) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2
+    } else {
+        sorted[mid]
+    }
+}
+
+fn hour_totals(cells: &[FocusHeatCell]) -> Vec<(u32, i64)> {
+    let mut totals = [0_i64; 24];
+    for cell in cells {
+        if let Some(total) = totals.get_mut(cell.hour as usize) {
+            *total += cell.focused_seconds.max(0);
+        }
+    }
+    let mut rows = totals
+        .into_iter()
+        .enumerate()
+        .map(|(hour, focused_seconds)| (hour as u32, focused_seconds))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    rows
+}
+
+fn hour_label(hour: u32) -> String {
+    format!("{:02}:00", hour.min(23))
+}
+
+fn effective_app_count(rows: &[AppTotals], total_focused_seconds: i64) -> f64 {
+    if total_focused_seconds <= 0 {
+        return 0.0;
+    }
+
+    let entropy = rows
+        .iter()
+        .filter(|row| row.focused_seconds > 0)
+        .map(|row| row.focused_seconds as f64 / total_focused_seconds as f64)
+        .filter(|share| *share > 0.0)
+        .map(|share| -share * share.ln())
+        .sum::<f64>();
+    entropy.exp()
+}
+
+fn excluded_seconds(day: &DayTotals) -> i64 {
+    day.idle_seconds
+        .saturating_add(day.locked_seconds)
+        .saturating_add(day.sleep_seconds)
+        .saturating_add(day.unobserved_seconds)
+}
+
 fn ratio(value: i64, total: i64) -> f64 {
     if total <= 0 {
         0.0
     } else {
         (value.max(0) as f64 / total as f64).clamp(0.0, 1.0)
     }
-}
-
-fn compact_label(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    value.chars().take(max_chars).collect::<String>()
 }
 
 fn escape_html(value: &str) -> String {
@@ -1520,10 +1971,11 @@ mod tests {
         .unwrap();
 
         assert!(html.contains("<!doctype html>"));
-        assert!(html.contains("Focus by day"));
+        assert!(html.contains("Daily pattern"));
         assert!(html.contains("Period insights"));
         assert!(html.contains("Week x hour heatmap"));
-        assert!(html.contains("App constellation"));
+        assert!(html.contains("Focus length distribution"));
+        assert!(html.contains("Workspace focus"));
         assert!(html.contains("Docs &lt;Dashboard&gt;"));
     }
 

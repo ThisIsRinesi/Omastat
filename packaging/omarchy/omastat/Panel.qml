@@ -53,8 +53,8 @@ Panel {
     if (hostWidget && hostWidget.refresh) hostWidget.refresh()
   }
 
-  function openTerminalReport() {
-    if (hostWidget && hostWidget.openTerminalReport) hostWidget.openTerminalReport()
+  function openOverviewReport() {
+    if (hostWidget && hostWidget.openOverviewReport) hostWidget.openOverviewReport()
   }
 
   function formatDuration(seconds) {
@@ -111,7 +111,7 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
         if (text === "r" || text === "R") root.refresh()
-        else if (text === "t" || text === "T") root.openTerminalReport()
+        else if (text === "o" || text === "O") root.openOverviewReport()
         else if (text === "p" || text === "P") root.togglePatterns()
       }
 
@@ -586,10 +586,10 @@ Panel {
 
             Button {
               Layout.fillWidth: true
-              text: "Terminal"
+              text: "Overview"
               foreground: root.foreground
               accent: root.accent
-              onClicked: root.openTerminalReport()
+              onClicked: root.openOverviewReport()
             }
           }
         }

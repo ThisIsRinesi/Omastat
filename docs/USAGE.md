@@ -58,17 +58,18 @@ new palette.
 
 ## HTML Export
 
-Create a static, self-contained replay:
+Create a static, self-contained overview:
 
 ```bash
 omastat export --lens week --output ~/Pictures/omastat-week.html
 omastat export --lens month --output ~/Pictures/omastat-month.html
-omastat export --lens life --title "Lifetime App Replay"
+omastat export --lens life --title "Lifetime App Overview"
 ```
 
-The export includes focused/open totals, structured period insights, stacked
-daily app columns, ranked apps, an app bubble chart, a week-by-hour heatmap,
-title rows when title capture is enabled, and Day/Week/Month/Year/Life totals.
+The export includes focused/open totals, structured period insights, daily
+pattern bars, ranked apps, app composition, workspace ranking, session length
+distribution, a week-by-hour heatmap, title rows when title capture is enabled,
+and Day/Week/Month/Year/Life totals.
 
 ## Data Export
 

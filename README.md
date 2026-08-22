@@ -17,7 +17,7 @@ Omarchy Quattro bar widget.
   or `opencode`, instead of only the terminal emulator.
 - Steam app IDs and common desktop classes are normalized to readable names.
 - Omarchy Quattro widget with today's total, app breakdown, 7-day patterns, and
-  a shortcut into the TUI.
+  a shortcut to the HTML overview.
 - Rich terminal dashboard with app composition pies, focus-flow charts, hourly
   peaks, heatmaps, workspace focus, focus block stats, and idle, locked, sleep,
   and unobserved signal gauges.
@@ -31,7 +31,7 @@ Omarchy Quattro bar widget.
   SQLite vacuuming.
 - TUI colors follow Noctalia, skwd-wall/Matugen, or the current Omarchy theme
   when those files are present.
-- Static HTML export for shareable day, week, month, year, and lifetime replays.
+- Static HTML overview export for shareable day, week, month, year, and lifetime dashboards.
 
 ## Install
 
@@ -67,8 +67,8 @@ It appears in the right bar section by default. Move it later with:
 omarchy bar move local.omastat --section right
 ```
 
-Click the widget for the popup, middle-click to open the TUI, and right-click to
-toggle icon-only mode.
+Click the widget for the popup, middle-click to open the HTML overview, and
+right-click to toggle icon-only mode.
 
 ## Usage
 

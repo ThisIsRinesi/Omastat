@@ -22,7 +22,7 @@
       "refreshIntervalSec": 60,
       "command": "omastat summary",
       "iconOnly": false,
-      "terminalCommand": "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'"
+      "overviewCommand": "bash -lc 'set -e; PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; out=\"${XDG_CACHE_HOME:-$HOME/.cache}/omastat/overview.html\"; mkdir -p \"${out%/*}\"; omastat export --lens day --output \"$out\"; xdg-open \"$out\" >/dev/null 2>&1 &'"
     },
     "schema": [
       {
@@ -47,10 +47,10 @@
         "defaultValue": false
       },
       {
-        "key": "terminalCommand",
+        "key": "overviewCommand",
         "type": "string",
-        "label": "Terminal command",
-        "defaultValue": "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'"
+        "label": "Overview command",
+        "defaultValue": "bash -lc 'set -e; PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; out=\"${XDG_CACHE_HOME:-$HOME/.cache}/omastat/overview.html\"; mkdir -p \"${out%/*}\"; omastat export --lens day --output \"$out\"; xdg-open \"$out\" >/dev/null 2>&1 &'"
       }
     ]
   }

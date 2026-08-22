@@ -28,6 +28,7 @@ BarWidget {
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property real openPanelIndicatorWidth: button.labelWidth
   readonly property string glyph: "󰔟"
+  readonly property string defaultOverviewCommand: "bash -lc 'set -e; PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; out=\"${XDG_CACHE_HOME:-$HOME/.cache}/omastat/overview.html\"; mkdir -p \"${out%/*}\"; omastat export --lens day --output \"$out\"; xdg-open \"$out\" >/dev/null 2>&1 &'"
   readonly property bool iconOnly: {
     var value = root.setting("iconOnly", false)
     return value === true || value === "true"
@@ -109,6 +110,7 @@ BarWidget {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.togglePanel() }
+    function overview() { root.openOverviewReport() }
     function status() {
       console.log("local.omastat status: opened=" + root.opened
         + " total=" + root.formatDuration(root.totalFocused)
@@ -129,7 +131,7 @@ BarWidget {
 
     onPressed: function(button) {
       if (button === Qt.RightButton) root.toggleIconOnly()
-      else if (button === Qt.MiddleButton) root.openTerminalReport()
+      else if (button === Qt.MiddleButton) root.openOverviewReport()
       else root.togglePanel()
     }
   }
@@ -260,9 +262,14 @@ BarWidget {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
 
-  function openTerminalReport() {
+  function openOverviewReport() {
     if (!root.bar) return
-    root.bar.run(String(root.setting("terminalCommand", "xdg-terminal-exec --hold bash -lc 'PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; omastat tui'")))
+    var command = String(root.setting("overviewCommand", root.defaultOverviewCommand)).trim()
+    root.bar.run(command.length > 0 ? command : root.defaultOverviewCommand)
+  }
+
+  function openTerminalReport() {
+    openOverviewReport()
   }
 
   function toggleIconOnly() {

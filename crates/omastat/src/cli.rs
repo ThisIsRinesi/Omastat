@@ -59,7 +59,7 @@ pub enum Commands {
         #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
         offset: i32,
     },
-    /// Export a one-page visual HTML replay.
+    /// Export a one-page visual HTML overview.
     Export {
         #[arg(long, value_enum, default_value = "month")]
         lens: LensArg,
