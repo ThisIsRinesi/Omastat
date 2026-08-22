@@ -490,54 +490,55 @@ Panel {
                   required property var modelData
 
                   width: parent.width
-                  implicitHeight: insightColumn.implicitHeight
+                  implicitHeight: insightColumn.implicitHeight + Style.space(12)
+
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Style.space(6)
+                    color: root.track
+                    opacity: 0.35
+                  }
 
                   Rectangle {
                     width: Style.space(3)
-                    height: parent.height
+                    height: parent.height - Style.space(10)
                     radius: width / 2
                     color: root.insightToneColor(modelData.tone)
-                    opacity: 0.75
+                    opacity: 0.9
                     anchors.left: parent.left
-                    anchors.top: parent.top
+                    anchors.leftMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
                   }
 
                   Column {
                     id: insightColumn
                     anchors.left: parent.left
-                    anchors.leftMargin: Style.space(9)
+                    anchors.leftMargin: Style.space(18)
                     anchors.right: parent.right
+                    anchors.rightMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(2)
 
-                    Item {
+                    Text {
                       width: parent.width
-                      implicitHeight: Math.max(labelText.implicitHeight, valueText.implicitHeight)
+                      text: String(modelData.label || "Insight")
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
 
-                      Text {
-                        id: labelText
-                        text: String(modelData.label || "")
-                        color: root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        elide: Text.ElideRight
-                        width: parent.width * 0.42
-                      }
-
-                      Text {
-                        id: valueText
-                        text: String(modelData.value || "")
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                        font.bold: true
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        horizontalAlignment: Text.AlignRight
-                        elide: Text.ElideRight
-                        width: parent.width * 0.56
-                      }
+                    Text {
+                      width: parent.width
+                      text: String(modelData.value || "")
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      wrapMode: Text.WordWrap
+                      maximumLineCount: 2
+                      elide: Text.ElideRight
                     }
 
                     Text {
