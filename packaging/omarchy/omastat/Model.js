@@ -13,19 +13,6 @@ function percent(value) {
   return Math.round(value * 100) + "%"
 }
 
-function fmtWords(seconds) {
-  seconds = Math.max(0, Math.floor(Number(seconds) || 0))
-  if (seconds <= 0) return "0 SECONDS"
-  if (seconds < 60) return seconds + (seconds === 1 ? " SECOND" : " SECONDS")
-  var mins = Math.floor(seconds / 60)
-  if (mins < 60) return mins + (mins === 1 ? " MINUTE" : " MINUTES")
-  var hours = Math.floor(mins / 60)
-  var rest = mins % 60
-  var out = hours + (hours === 1 ? " HOUR" : " HOURS")
-  if (rest > 0) out += " " + rest + " MINUTES"
-  return out
-}
-
 function fmtDelta(seconds) {
   return (seconds < 0 ? "-" : "+") + fmt(Math.abs(seconds))
 }
@@ -45,6 +32,11 @@ function firstNumber(object, keys, fallback) {
   return Math.max(0, Math.floor(Number(fallback) || 0))
 }
 
+function pad2(n) {
+  n = Math.floor(n)
+  return n < 10 ? "0" + n : String(n)
+}
+
 function appLabel(app) {
   var value = String(app || "App").replace(/^com\./, "").replace(/^org\./, "")
   var parts = value.split(".")
@@ -62,7 +54,10 @@ function appList(rows) {
     if (seconds <= 0) continue
     out.push({
       app: appLabel(rows[j].app_class),
+      app_class: String(rows[j].app_class || ""),
+      category: "",
       seconds: seconds,
+      open_seconds: Number(rows[j].open_seconds || 0),
       pct: total > 0 ? Math.round(100 * seconds / total) : 0
     })
   }
@@ -78,15 +73,22 @@ function groupedApps(apps, maxSlices) {
 
   var head = []
   var tailSeconds = 0
+  var tailOpen = 0
   var total = 0
   for (var i = 0; i < list.length; i++) total += Number(list[i].seconds || 0)
   for (var j = 0; j < list.length; j++) {
     if (j < max - 1) head.push(list[j])
-    else tailSeconds += Number(list[j].seconds || 0)
+    else {
+      tailSeconds += Number(list[j].seconds || 0)
+      tailOpen += Number(list[j].open_seconds || 0)
+    }
   }
   head.push({
     app: "Other",
+    app_class: "Other",
+    category: "mixed",
     seconds: tailSeconds,
+    open_seconds: tailOpen,
     pct: total > 0 ? Math.round(100 * tailSeconds / total) : 0
   })
   return head
@@ -98,12 +100,18 @@ function previousDateKey(key) {
   var date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
   if (isNaN(date.getTime())) return ""
   date.setDate(date.getDate() - 1)
+  return dateKey(date)
+}
+
+function dateKey(date) {
   return date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate())
 }
 
-function pad2(n) {
-  n = Math.floor(n)
-  return n < 10 ? "0" + n : String(n)
+function parseDateKey(key) {
+  var parts = String(key || "").split("-")
+  if (parts.length !== 3) return null
+  var date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
+  return isNaN(date.getTime()) ? null : date
 }
 
 function totalForDay(daily, key) {
@@ -130,11 +138,6 @@ function dayExcludedSeconds(day) {
     + firstNumber(day, ["unobserved_seconds"], 0)
 }
 
-function dayDensity(day) {
-  var open = dayOpenSeconds(day)
-  return open > 0 ? dayFocusedSeconds(day) / open : 0
-}
-
 function relativeDayLabel(day, todayKey) {
   var key = String(day && day.date || "")
   if (key === todayKey) return "Today"
@@ -142,9 +145,10 @@ function relativeDayLabel(day, todayKey) {
   return String(day && day.label || key || "")
 }
 
-function weekTrend(daily, todayKey) {
+function trendDays(daily, todayKey, lens) {
+  var list = (daily || []).slice()
+  if (String(lens || "day") === "day" && list.length > 7) list = list.slice(list.length - 7)
   var out = []
-  var list = daily || []
   for (var i = 0; i < list.length; i++) {
     var focused = dayFocusedSeconds(list[i])
     var open = dayOpenSeconds(list[i])
@@ -155,38 +159,228 @@ function weekTrend(daily, todayKey) {
       focused_seconds: focused,
       open_seconds: open,
       excluded_seconds: excluded,
-      density: open > 0 ? focused / open : 0,
       valueText: fmt(focused),
       openText: open > 0 ? fmt(open) : "--",
       excludedText: excluded > 0 ? fmt(excluded) : "0s",
       densityText: open > 0 ? percent(focused / open) : "--",
-      focusShareText: open > 0 ? "Focus " + percent(focused / open) : "Focus --",
-      label: String(list[i].label || ""),
+      label: compactDayLabel(list[i], todayKey),
+      fullLabel: relativeDayLabel(list[i], todayKey),
       isToday: String(list[i].date || "") === todayKey
     })
   }
   return out
 }
 
+function compactDayLabel(day, todayKey) {
+  var key = String(day && day.date || "")
+  if (key === todayKey) return "Today"
+  var label = String(day && day.label || key || "")
+  if (label.length <= 6) return label
+  var parts = label.split(" ")
+  return parts.length > 1 ? parts[0] + " " + parts[1] : label
+}
+
+function maxDailySeconds(days) {
+  var max = 0
+  for (var i = 0; i < (days || []).length; i++) max = Math.max(max, Number(days[i].seconds || 0))
+  return max
+}
+
 function weekTrendSummary(daily, todayKey) {
-  var list = weekTrend(daily, todayKey)
-  if (list.length === 0) return ""
-  var total = 0
-  var active = 0
-  var best = null
-  var today = null
-  for (var i = 0; i < list.length; i++) {
-    total += list[i].seconds
-    if (list[i].seconds > 0) active += 1
-    if (!best || list[i].seconds > best.seconds) best = list[i]
-    if (list[i].isToday) today = list[i]
-  }
+  var stats = consistencyStats(daily)
+  if (stats.totalDays <= 0) return ""
   var parts = []
-  if (today) parts.push("Today " + fmt(today.seconds))
-  if (best && best.seconds > 0) parts.push("Best " + String(best.label || best.key) + " " + fmt(best.seconds))
-  parts.push("Average " + fmt(Math.round(total / list.length)))
-  if (active !== list.length) parts.push(active + "/" + list.length + " days with focus")
+  var today = totalForDay(daily, todayKey)
+  if (today > 0) parts.push("Today " + fmt(today))
+  if (stats.bestDaySeconds > 0) parts.push("Best " + stats.bestDayLabel + " " + fmt(stats.bestDaySeconds))
+  parts.push("Average " + fmt(stats.dailyAverageSeconds))
+  parts.push(stats.activeDays + "/" + stats.totalDays + " active")
   return parts.join("  ")
+}
+
+function consistencyStats(daily) {
+  var list = daily || []
+  var active = 0
+  var total = 0
+  var best = null
+  var streak = 0
+  var longest = 0
+
+  for (var i = 0; i < list.length; i++) {
+    var focused = dayFocusedSeconds(list[i])
+    total += focused
+    if (!best || focused > best.seconds) {
+      best = {
+        label: String(list[i].label || list[i].date || ""),
+        seconds: focused
+      }
+    }
+    if (focused > 0) {
+      active += 1
+      streak += 1
+      longest = Math.max(longest, streak)
+    } else {
+      streak = 0
+    }
+  }
+
+  return {
+    activeDays: active,
+    totalDays: list.length,
+    longestStreak: longest,
+    dailyAverageSeconds: list.length > 0 ? Math.round(total / list.length) : 0,
+    bestDayLabel: best && best.seconds > 0 ? best.label : "--",
+    bestDaySeconds: best ? best.seconds : 0
+  }
+}
+
+function monthCells(daily, lens) {
+  var lensValue = String(lens || "month")
+  if (lensValue === "year" || lensValue === "life") return weekCells(daily)
+
+  var list = daily || []
+  if (list.length === 0) return []
+  var out = []
+  var first = parseDateKey(list[0].date)
+  var leading = first ? (first.getDay() + 6) % 7 : 0
+  for (var blank = 0; blank < leading; blank++) out.push({ blank: true, seconds: 0, label: "" })
+  for (var i = 0; i < list.length; i++) {
+    var date = parseDateKey(list[i].date)
+    out.push({
+      blank: false,
+      date: String(list[i].date || ""),
+      day: date ? date.getDate() : i + 1,
+      label: String(list[i].label || list[i].date || ""),
+      seconds: dayFocusedSeconds(list[i]),
+      open_seconds: dayOpenSeconds(list[i]),
+      excluded_seconds: dayExcludedSeconds(list[i])
+    })
+  }
+  return out
+}
+
+function weekCells(daily) {
+  var list = daily || []
+  if (list.length === 0) return []
+  var out = []
+  for (var start = 0; start < list.length; start += 7) {
+    var end = Math.min(start + 7, list.length)
+    var focused = 0
+    var open = 0
+    var excluded = 0
+    for (var i = start; i < end; i++) {
+      focused += dayFocusedSeconds(list[i])
+      open += dayOpenSeconds(list[i])
+      excluded += dayExcludedSeconds(list[i])
+    }
+    var first = list[start] || {}
+    var last = list[end - 1] || first
+    out.push({
+      blank: false,
+      weekly: true,
+      date: String(first.date || ""),
+      day: "W" + (out.length + 1),
+      label: compactRangeLabel(first, last),
+      seconds: focused,
+      open_seconds: open,
+      excluded_seconds: excluded
+    })
+  }
+  return out
+}
+
+function compactRangeLabel(first, last) {
+  var firstLabel = String(first && (first.label || first.date) || "")
+  var lastLabel = String(last && (last.label || last.date) || "")
+  if (firstLabel === lastLabel || lastLabel.length === 0) return firstLabel
+  return firstLabel + " - " + lastLabel
+}
+
+function maxMonthSeconds(cells) {
+  var max = 0
+  for (var i = 0; i < (cells || []).length; i++) if (!cells[i].blank) max = Math.max(max, Number(cells[i].seconds || 0))
+  return max
+}
+
+var WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+function weekdayLabels() {
+  return WEEKDAY_LABELS
+}
+
+function bucketLabels(count) {
+  var out = []
+  for (var i = 0; i < count; i++) out.push(String(i + 1))
+  return out
+}
+
+function heatmapCells(heatmap) {
+  var values = {}
+  for (var i = 0; i < (heatmap || []).length; i++) {
+    var item = heatmap[i] || {}
+    var weekday = Math.max(0, Math.min(6, Number(item.weekday || 0)))
+    var hour = Math.max(0, Math.min(23, Number(item.hour || 0)))
+    values[weekday + ":" + hour] = Number(item.focused_seconds || item.seconds || 0)
+  }
+
+  var out = []
+  for (var day = 0; day < 7; day++) {
+    for (var h = 0; h < 24; h++) {
+      var key = day + ":" + h
+      out.push({
+        weekday: day,
+        hour: h,
+        seconds: values[key] || 0
+      })
+    }
+  }
+  return out
+}
+
+function maxHeatSeconds(cells) {
+  var max = 0
+  for (var i = 0; i < (cells || []).length; i++) max = Math.max(max, Number(cells[i].seconds || 0))
+  return max
+}
+
+function heatIntensity(seconds, maxSeconds) {
+  seconds = Number(seconds || 0)
+  maxSeconds = Number(maxSeconds || 0)
+  if (seconds <= 0 || maxSeconds <= 0) return 0
+  return Math.max(0.16, Math.min(1, seconds / maxSeconds))
+}
+
+function hourLabel(hour) {
+  hour = Math.floor(Number(hour) || 0)
+  if (hour === 0) return "12A"
+  if (hour < 12) return hour + "A"
+  if (hour === 12) return "12P"
+  return (hour - 12) + "P"
+}
+
+function trendDetailText(day) {
+  if (!day) return ""
+  var parts = []
+  var label = String(day.fullLabel || day.label || day.key || "Day")
+  parts.push(label + ": " + fmt(Number(day.seconds || 0)) + " focused")
+  parts.push(String(day.openText || "--") + " open")
+  parts.push(String(day.densityText || "--") + " share")
+  if (Number(day.excluded_seconds || 0) > 0) parts.push(fmt(day.excluded_seconds) + " not counted")
+  return parts.join("  ")
+}
+
+function monthCellDetailText(cell) {
+  if (!cell || cell.blank) return ""
+  var parts = []
+  parts.push(String(cell.label || cell.date || "Day") + ": " + fmt(Number(cell.seconds || 0)) + " focused")
+  if (Number(cell.open_seconds || 0) > 0) parts.push(fmt(cell.open_seconds) + " open")
+  if (Number(cell.excluded_seconds || 0) > 0) parts.push(fmt(cell.excluded_seconds) + " not counted")
+  return parts.join("  ")
+}
+
+function heatCellDetailText(cell) {
+  if (!cell) return ""
+  var weekday = WEEKDAY_LABELS[Math.max(0, Math.min(6, Number(cell.weekday || 0)))] || "Day"
+  return weekday + " " + hourLabel(cell.hour) + ": " + fmt(Number(cell.seconds || 0)) + " focused"
 }
 
 function insights(rows, daily, todayKey, totalSeconds) {
@@ -207,15 +401,11 @@ function insights(rows, daily, todayKey, totalSeconds) {
     out.push({ label: "Compared with yesterday", value: fmtDelta(total - yesterday) })
   }
 
-  var best = null
-  for (var i = 0; i < (daily || []).length; i++) {
-    if (!best || dayFocusedSeconds(daily[i]) > dayFocusedSeconds(best))
-      best = daily[i]
-  }
-  if (best && dayFocusedSeconds(best) > 0) {
+  var stats = consistencyStats(daily)
+  if (stats.bestDaySeconds > 0) {
     out.push({
-      label: "Best day (7d)",
-      value: relativeDayLabel(best, todayKey) + " - " + fmt(dayFocusedSeconds(best))
+      label: "Best day",
+      value: stats.bestDayLabel + " - " + fmt(stats.bestDaySeconds)
     })
   }
 

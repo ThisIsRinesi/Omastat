@@ -9,8 +9,11 @@ if command -v hours-played >/dev/null 2>&1; then
 fi
 
 service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/local.omastat"
 mkdir -p "$service_dir"
 install -m 0644 "$repo_root/packaging/systemd/omastat.service" "$service_dir/omastat.service"
+mkdir -p "$plugin_dir"
+rsync -a --delete "$repo_root/packaging/omarchy/omastat/" "$plugin_dir/"
 
 systemctl --user daemon-reload
 if systemctl --user list-unit-files --no-legend hours-played.service >/dev/null 2>&1; then
@@ -22,3 +25,7 @@ fi
 systemctl --user enable omastat.service >/dev/null
 systemctl --user restart omastat.service
 systemctl --user --no-pager --lines=20 status omastat.service
+
+if command -v omarchy >/dev/null 2>&1; then
+  omarchy restart shell
+fi

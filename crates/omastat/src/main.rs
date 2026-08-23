@@ -65,8 +65,9 @@ async fn main() -> Result<()> {
                 cli.json,
             )?;
         }
-        Commands::Summary { days } => {
-            let report = cli::summary_report(&storage, &mut steam, &config, days)?;
+        Commands::Summary { lens, offset, days } => {
+            let report =
+                cli::summary_report(&storage, &mut steam, &config, lens.into(), offset, days)?;
             cli::print_summary(&report)?;
         }
         Commands::Insights { lens, offset } => {

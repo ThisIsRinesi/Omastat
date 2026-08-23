@@ -13,16 +13,14 @@
   },
   "barWidget": {
     "displayName": "Omastat",
-    "description": "Shows today's focused total, app breakdown, and 7-day usage patterns.",
+    "description": "Shows focused time, app mix, heatmaps, and insights in a QML analytics panel.",
     "category": "Utilities",
     "aliases": ["omastat", "usage", "time", "focus"],
     "defaultSection": "right",
     "allowMultiple": false,
     "defaults": {
       "refreshIntervalSec": 60,
-      "command": "omastat summary",
-      "iconOnly": false,
-      "overviewCommand": "bash -lc 'set -e; PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; out=\"${XDG_CACHE_HOME:-$HOME/.cache}/omastat/overview.html\"; mkdir -p \"${out%/*}\"; omastat export --lens day --output \"$out\"; xdg-open \"$out\" >/dev/null 2>&1 &'"
+      "iconOnly": false
     },
     "schema": [
       {
@@ -35,22 +33,10 @@
         "defaultValue": 60
       },
       {
-        "key": "command",
-        "type": "string",
-        "label": "Report command",
-        "defaultValue": "omastat summary"
-      },
-      {
         "key": "iconOnly",
         "type": "boolean",
         "label": "Icon-only mode",
         "defaultValue": false
-      },
-      {
-        "key": "overviewCommand",
-        "type": "string",
-        "label": "Overview command",
-        "defaultValue": "bash -lc 'set -e; PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; out=\"${XDG_CACHE_HOME:-$HOME/.cache}/omastat/overview.html\"; mkdir -p \"${out%/*}\"; omastat export --lens day --output \"$out\"; xdg-open \"$out\" >/dev/null 2>&1 &'"
       }
     ]
   }

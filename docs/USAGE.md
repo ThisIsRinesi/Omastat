@@ -9,6 +9,8 @@ omastat apps
 omastat range --from 2026-07-01 --to 2026-07-30
 omastat --json today
 omastat summary
+omastat summary --lens week --offset -1
+omastat summary --lens month --days 31
 omastat insights --json
 omastat insights --lens week --offset -1 --json
 omastat goals --lens week
@@ -16,8 +18,10 @@ omastat digest --lens week
 omastat widget-insight --json
 ```
 
-`summary` is the compact JSON report used by the Omarchy widget. Its
-`insights` field contains structured records with `kind`, `category`, `tone`,
+`summary` is the compact JSON report used by the Omarchy widget. It accepts
+`--lens day|week|month|year|life` and `--offset -N`; the default remains the
+current day. Its payload includes app totals, daily totals, a week-by-hour
+`heatmap`, and structured `insights` records with `kind`, `category`, `tone`,
 `title`, `value`, `explanation`, `confidence`, `evidence`, and `supporting`
 fields so widgets and future commands can use the same analysis output without
 parsing display labels.
@@ -58,7 +62,7 @@ new palette.
 
 ## HTML Export
 
-Create a static, self-contained overview:
+Create a static, self-contained CLI overview:
 
 ```bash
 omastat export --lens week --output ~/Pictures/omastat-week.html

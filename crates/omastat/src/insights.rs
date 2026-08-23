@@ -42,6 +42,7 @@ pub struct AnalysisInput<'a> {
     pub workspaces: &'a [WorkspaceTotals],
     pub app_workspaces: &'a [AppWorkspaceTotals],
     pub today_key: &'a str,
+    pub selected_day_key: &'a str,
     pub period: AnalysisPeriod<'a>,
     pub previous_period: Option<AnalysisComparisonPeriod>,
     pub total_focused_seconds: i64,
@@ -302,7 +303,8 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         return;
     }
 
-    let Some((comparison_date, yesterday)) = yesterday_total(input.daily, input.today_key) else {
+    let Some((comparison_date, yesterday)) = yesterday_total(input.daily, input.selected_day_key)
+    else {
         return;
     };
     if yesterday <= 0 {
@@ -310,21 +312,31 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
     }
 
     let delta = input.total_focused_seconds - yesterday;
+    let selected_label = selected_day_label(input.period);
+    let comparison_label = if selected_label == "Today" {
+        "Yesterday"
+    } else {
+        "Previous day"
+    };
     out.push(Insight {
         kind: InsightKind::DayComparison,
         category: InsightCategory::Patterns,
         tone: comparison_tone(delta),
-        title: "vs yesterday".to_string(),
+        title: if selected_label == "Today" {
+            "vs yesterday".to_string()
+        } else {
+            "vs previous day".to_string()
+        },
         value: signed_duration(delta),
         explanation: "Compares focused time for the selected day with the previous local day."
             .to_string(),
         confidence: confidence(input.daily.len(), 2),
         evidence: evidence(input, 2),
         supporting: period_support(input.period).with_comparison(ComparisonSupport {
-            date: input.today_key,
-            label: selected_day_label(input.period),
+            date: input.selected_day_key,
+            label: selected_label,
             comparison_date: &comparison_date,
-            comparison_label: "Yesterday",
+            comparison_label,
             focused_seconds: input.total_focused_seconds,
             comparison_seconds: yesterday,
             delta_seconds: delta,
@@ -1681,6 +1693,46 @@ mod tests {
     }
 
     #[test]
+    fn historical_day_comparison_uses_selected_day_not_real_today() {
+        let rows = vec![AppTotals {
+            app_class: "firefox".to_string(),
+            focused_seconds: 2400,
+            open_seconds: 3600,
+        }];
+        let daily = vec![
+            day("2026-01-11", "Jan 11", 1800),
+            day("2026-01-12", "Jan 12", 2400),
+        ];
+        let mut input = input(&rows, &daily, 2400, 3600, 0, 0);
+        input.today_key = "2026-01-14";
+        input.selected_day_key = "2026-01-12";
+        input.period = AnalysisPeriod {
+            lens: AnalysisLens::Day,
+            label: "Jan 12",
+            start_date: Some("2026-01-12"),
+            end_date: Some("2026-01-12"),
+        };
+
+        let insights = analyze(input);
+        let comparison = insights
+            .iter()
+            .find(|insight| insight.kind == InsightKind::DayComparison)
+            .unwrap();
+
+        assert_eq!(comparison.title, "vs previous day");
+        assert_eq!(comparison.value, "+10m");
+        assert_eq!(comparison.supporting.date.as_deref(), Some("2026-01-12"));
+        assert_eq!(
+            comparison.supporting.comparison_date.as_deref(),
+            Some("2026-01-11")
+        );
+        assert_eq!(
+            comparison.supporting.comparison_label.as_deref(),
+            Some("Previous day")
+        );
+    }
+
+    #[test]
     fn emits_first_pass_pattern_quality_app_and_workspace_facts() {
         let rows = vec![
             AppTotals {
@@ -1858,6 +1910,7 @@ mod tests {
             workspaces: &[],
             app_workspaces: &[],
             today_key: "2026-01-14",
+            selected_day_key: "2026-01-14",
             period: AnalysisPeriod {
                 lens: AnalysisLens::Day,
                 label: "Today",
@@ -1890,6 +1943,7 @@ mod tests {
             workspaces,
             app_workspaces,
             today_key: "2026-01-14",
+            selected_day_key: "2026-01-14",
             period: AnalysisPeriod {
                 lens: AnalysisLens::Day,
                 label: "Today",

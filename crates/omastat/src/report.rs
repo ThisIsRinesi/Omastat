@@ -5,7 +5,7 @@ use crate::{
         self, AnalysisComparisonPeriod, AnalysisInput, AnalysisLens, AnalysisPeriod, Insight,
     },
     steam::SteamResolver,
-    storage::{AppTotals, AppWorkspaceTotals, DayTotals, Storage},
+    storage::{AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, Storage},
 };
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
@@ -57,6 +57,7 @@ pub struct UsageReport {
     pub rows: Vec<AppTotals>,
     pub apps: Vec<AppBreakdown>,
     pub daily: Vec<DayTotals>,
+    pub heatmap: Vec<FocusHeatCell>,
     pub insights: Vec<Insight>,
     pub widget_insight: Option<WidgetInsight>,
 }
@@ -195,10 +196,8 @@ fn usage_report_for_period_with_days(
     let total_focused_seconds = focused_total(&rows);
     let total_open_seconds = open_total(&rows);
     let session_totals = storage.session_totals_between(period.start_ts, period.query_end_ts)?;
-    let today_key = daily
-        .last()
-        .map(|day| day.date.clone())
-        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    let today_key = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let selected_day_key = selected_day_key(lens, &period, &daily, &today_key);
     let apps = app_breakdown_with_config(&rows, 6, config);
     let rollups = storage.focused_rollups_between(period.start_ts, period.query_end_ts, 8, 64)?;
     let heatmap = rollups.heatmap;
@@ -221,6 +220,7 @@ fn usage_report_for_period_with_days(
         workspaces: &workspaces,
         app_workspaces: &app_workspaces,
         today_key: &today_key,
+        selected_day_key: &selected_day_key,
         period: AnalysisPeriod {
             lens: lens.into(),
             label: &period.meta.label,
@@ -256,6 +256,7 @@ fn usage_report_for_period_with_days(
         rows,
         apps,
         daily,
+        heatmap,
         insights,
         widget_insight,
     })
@@ -539,13 +540,36 @@ fn daily_for_period(
     };
 
     if lens == Lens::Day
-        && period.meta.offset == 0
         && let Some(days) = trailing_days_override
     {
-        return storage.daily_totals(days);
+        if period.meta.offset == 0 {
+            return storage.daily_totals(days);
+        }
+
+        let days = days.max(1) as usize;
+        let start_date = start_date - Duration::days(days.saturating_sub(1) as i64);
+        return storage.daily_totals_for_local_dates(start_date, days, period.query_end_ts);
     }
 
     storage.daily_totals_for_local_dates(start_date, period.day_count, period.query_end_ts)
+}
+
+fn selected_day_key(
+    lens: Lens,
+    period: &PeriodBounds,
+    daily: &[DayTotals],
+    today_key: &str,
+) -> String {
+    if lens != Lens::Day {
+        return today_key.to_string();
+    }
+
+    period
+        .meta
+        .start_date
+        .clone()
+        .or_else(|| daily.last().map(|day| day.date.clone()))
+        .unwrap_or_else(|| today_key.to_string())
 }
 
 fn previous_period_comparison(
@@ -712,6 +736,70 @@ mod tests {
     }
 
     #[test]
+    fn historical_day_summary_includes_trailing_days_for_comparison() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("omastat.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config)?;
+        let selected_date = Local::now().date_naive() - Duration::days(1);
+        let previous_date = selected_date - Duration::days(1);
+        let previous_start = local_midnight(previous_date)?.timestamp() + 60 * 60;
+        let selected_start = local_midnight(selected_date)?.timestamp() + 60 * 60;
+
+        let previous = storage.start_interval(
+            crate::storage::IntervalKind::Focused,
+            "code",
+            None,
+            None,
+            previous_start,
+        )?;
+        storage.close_interval(previous, previous_start + 30 * 60)?;
+
+        let selected = storage.start_interval(
+            crate::storage::IntervalKind::Focused,
+            "code",
+            None,
+            None,
+            selected_start,
+        )?;
+        storage.close_interval(selected, selected_start + 40 * 60)?;
+
+        let mut steam = SteamResolver::default();
+        let report = usage_report_for_period_with_days(
+            &storage,
+            &mut steam,
+            &config,
+            Lens::Day,
+            -1,
+            Some(2),
+        )?;
+
+        let selected_key = selected_date.format("%Y-%m-%d").to_string();
+        let previous_key = previous_date.format("%Y-%m-%d").to_string();
+
+        assert_eq!(
+            report.period.start_date.as_deref(),
+            Some(selected_key.as_str())
+        );
+        assert_eq!(report.daily.len(), 2);
+        assert_eq!(report.daily[0].date, previous_key);
+        assert_eq!(report.daily[0].focused_seconds, 30 * 60);
+        assert_eq!(report.daily[1].date, selected_key);
+        assert_eq!(report.daily[1].focused_seconds, 40 * 60);
+
+        let comparison = report
+            .insights
+            .iter()
+            .find(|insight| insight.kind == crate::insights::InsightKind::DayComparison)
+            .expect("historical report should compare with the previous day");
+
+        assert_eq!(comparison.title, "vs previous day");
+        assert_eq!(comparison.value, "+10m");
+
+        Ok(())
+    }
+
+    #[test]
     fn insights_report_json_keeps_structured_payload_compact() {
         let usage = UsageReport {
             generated_at: 1234,
@@ -739,6 +827,11 @@ mod tests {
             }],
             apps: Vec::new(),
             daily: Vec::new(),
+            heatmap: vec![FocusHeatCell {
+                weekday: 1,
+                hour: 9,
+                focused_seconds: 1800,
+            }],
             insights: vec![Insight {
                 kind: crate::insights::InsightKind::TopApp,
                 category: crate::insights::InsightCategory::Apps,
@@ -758,6 +851,12 @@ mod tests {
             widget_insight: None,
         };
 
+        let summary_json = serde_json::to_value(&usage).unwrap();
+
+        assert_eq!(summary_json["heatmap"][0]["weekday"], 1);
+        assert_eq!(summary_json["heatmap"][0]["hour"], 9);
+        assert_eq!(summary_json["heatmap"][0]["focused_seconds"], 1800);
+
         let json = serde_json::to_value(InsightsReport::from(usage)).unwrap();
 
         assert_eq!(json["schema_version"], 1);
@@ -768,5 +867,6 @@ mod tests {
         assert!(json.get("rows").is_none());
         assert!(json.get("daily").is_none());
         assert!(json.get("apps").is_none());
+        assert!(json.get("heatmap").is_none());
     }
 }

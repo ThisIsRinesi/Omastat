@@ -11,13 +11,13 @@ for tool in qmllint qmlformat; do
   fi
 done
 
-qmllint \
-  "$widget_dir/BarWidget.qml" \
-  "$widget_dir/Panel.qml" \
-  "$widget_dir/Model.js"
+mapfile -t qml_files < <(find "$widget_dir" -maxdepth 1 -type f -name '*.qml' | sort)
 
-qmlformat -n "$widget_dir/BarWidget.qml" >/dev/null
-qmlformat -n "$widget_dir/Panel.qml" >/dev/null
+qmllint "${qml_files[@]}" "$widget_dir/Model.js"
+
+for qml_file in "${qml_files[@]}"; do
+  qmlformat -n "$qml_file" >/dev/null
+done
 
 if command -v node >/dev/null 2>&1; then
   node --check "$widget_dir/Model.js"

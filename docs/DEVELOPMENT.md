@@ -9,6 +9,7 @@ cargo run -p omastat --bin omastatd
 cargo run -p omastat -- today
 cargo run -p omastat -- --json today
 cargo run -p omastat -- summary
+cargo run -p omastat -- summary --lens week --offset -1
 cargo run -p omastat -- insights --lens week --json
 cargo run -p omastat -- export --lens month --output /tmp/omastat-export.html
 cargo run -p omastat -- export-data --lens week --format csv --output /tmp/omastat-export-data

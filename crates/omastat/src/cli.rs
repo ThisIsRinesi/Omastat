@@ -13,6 +13,7 @@ use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate, TimeZone};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
@@ -32,6 +33,19 @@ pub struct Cli {
     pub command: Commands,
 }
 
+fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    let json = serde_json::to_string_pretty(value)?;
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(json.as_bytes())
+        .and_then(|_| stdout.write_all(b"\n"))
+    {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Show today's app totals.
@@ -47,8 +61,12 @@ pub enum Commands {
         #[arg(long)]
         to: String,
     },
-    /// Show panel-ready JSON with today's apps and recent daily totals.
+    /// Show panel-ready JSON for an analytics period.
     Summary {
+        #[arg(long, value_enum, default_value = "day")]
+        lens: LensArg,
+        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+        offset: i32,
         #[arg(long, default_value_t = 7)]
         days: u32,
     },
@@ -176,8 +194,7 @@ impl From<DataExportScopeArg> for DataExportScope {
 
 pub fn print_report(title: &str, rows: Vec<AppTotals>, config: &Config, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-        return Ok(());
+        return print_json(&rows);
     }
 
     println!("{title}");
@@ -208,14 +225,19 @@ pub fn summary_report(
     storage: &Storage,
     steam: &mut SteamResolver,
     config: &Config,
+    lens: Lens,
+    offset: i32,
     days: u32,
 ) -> Result<UsageReport> {
-    report::usage_report(storage, steam, config, Lens::Day, days)
+    if lens == Lens::Day && offset == 0 {
+        return report::usage_report(storage, steam, config, lens, days);
+    }
+
+    report::usage_report_for_period(storage, steam, config, lens, offset)
 }
 
 pub fn print_summary(report: &UsageReport) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(report)?);
-    Ok(())
+    print_json(report)
 }
 
 pub fn insights_report(
@@ -234,8 +256,7 @@ pub fn insights_report(
 
 pub fn print_insights(report: &InsightsReport, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(report)?);
-        return Ok(());
+        return print_json(report);
     }
 
     println!("Insights - {}", report.period.label);
@@ -336,8 +357,7 @@ pub fn goal_report(
 
 pub fn print_goal_report(report: &GoalReport, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(report)?);
-        return Ok(());
+        return print_json(report);
     }
 
     println!("Goals - {}", report.period_label);
@@ -399,8 +419,7 @@ pub fn digest_report(
 
 pub fn print_digest(report: &DigestReport, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(report)?);
-        return Ok(());
+        return print_json(report);
     }
 
     println!("Digest - {}", report.period_label);
@@ -435,8 +454,7 @@ pub fn widget_insight_report(
 
 pub fn print_widget_insight(insight: Option<WidgetInsight>, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&insight)?);
-        return Ok(());
+        return print_json(&insight);
     }
     match insight {
         Some(insight) => println!("{}", insight.text),
@@ -472,8 +490,7 @@ pub fn purge_cutoff(
 
 pub fn print_purge_report(report: &PurgeReport, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(report)?);
-        return Ok(());
+        return print_json(report);
     }
     println!(
         "{} purge",
@@ -599,8 +616,7 @@ fn build_goal_report(report: &UsageReport, config: &Config) -> GoalReport {
 
 pub fn print_title_repair(repair: &TitleRepair, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(repair)?);
-        return Ok(());
+        return print_json(repair);
     }
 
     if repair.dry_run {
@@ -856,6 +872,23 @@ mod tests {
                 assert_eq!(offset, -1);
             }
             other => panic!("expected insights command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_summary_period_options() {
+        let cli = Cli::try_parse_from([
+            "omastat", "summary", "--lens", "month", "--offset", "-1", "--days", "31",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Summary { lens, offset, days } => {
+                assert!(matches!(lens, LensArg::Month));
+                assert_eq!(offset, -1);
+                assert_eq!(days, 31);
+            }
+            other => panic!("expected summary command, got {other:?}"),
         }
     }
 

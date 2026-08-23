@@ -436,6 +436,7 @@ mod tests {
             rows,
             apps,
             daily,
+            heatmap: Vec::new(),
             insights,
             widget_insight: None,
         };

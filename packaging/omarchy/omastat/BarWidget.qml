@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -15,24 +14,35 @@ BarWidget {
   property string updatedText: ""
   property bool refreshRunning: false
   property bool refreshQueued: false
+  property string selectedLens: "day"
+  property int selectedOffset: 0
+  property string loadingLens: "day"
+  property int loadingOffset: 0
+  property var reportsByKey: ({})
   property var rows: []
   property var reportApps: []
   property var reportInsights: []
   property var widgetInsight: null
   property var daily: []
+  property var heatmap: []
   property string todayKey: ""
+  property string lensLabel: "DAY"
   property string periodLabel: "Today"
   property int totalFocused: 0
   property int totalOpen: 0
+  property int totalIdle: 0
+  property int totalLocked: 0
+  property int totalSleep: 0
+  property int totalUnobserved: 0
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property real openPanelIndicatorWidth: button.labelWidth
   readonly property string glyph: "󰔟"
-  readonly property string defaultOverviewCommand: "bash -lc 'set -e; PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; out=\"${XDG_CACHE_HOME:-$HOME/.cache}/omastat/overview.html\"; mkdir -p \"${out%/*}\"; omastat export --lens day --output \"$out\"; xdg-open \"$out\" >/dev/null 2>&1 &'"
   readonly property bool iconOnly: {
     var value = root.setting("iconOnly", false)
     return value === true || value === "true"
   }
+  readonly property string currentKey: root.reportKey(root.selectedLens, root.selectedOffset)
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -41,18 +51,27 @@ BarWidget {
 
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
+  onSelectedLensChanged: injectPanel()
+  onSelectedOffsetChanged: injectPanel()
   onRowsChanged: injectPanel()
   onReportAppsChanged: injectPanel()
   onReportInsightsChanged: injectPanel()
   onWidgetInsightChanged: injectPanel()
   onDailyChanged: injectPanel()
+  onHeatmapChanged: injectPanel()
   onTodayKeyChanged: injectPanel()
+  onLensLabelChanged: injectPanel()
   onPeriodLabelChanged: injectPanel()
   onTotalFocusedChanged: injectPanel()
   onTotalOpenChanged: injectPanel()
+  onTotalIdleChanged: injectPanel()
+  onTotalLockedChanged: injectPanel()
+  onTotalSleepChanged: injectPanel()
+  onTotalUnobservedChanged: injectPanel()
   onStatusTextChanged: injectPanel()
   onErrorTextChanged: injectPanel()
   onUpdatedTextChanged: injectPanel()
+  onRefreshRunningChanged: injectPanel()
 
   Timer {
     interval: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 1000
@@ -101,24 +120,6 @@ BarWidget {
     }
   }
 
-  IpcHandler {
-    target: "local.omastat"
-
-    function refresh() { root.refresh() }
-    function open() { root.open() }
-    function close() { root.close() }
-    function show() { root.open() }
-    function hide() { root.close() }
-    function toggle() { root.togglePanel() }
-    function overview() { root.openOverviewReport() }
-    function status() {
-      console.log("local.omastat status: opened=" + root.opened
-        + " total=" + root.formatDuration(root.totalFocused)
-        + " apps=" + root.rows.length
-        + " updated=" + root.updatedText)
-    }
-  }
-
   WidgetButton {
     id: button
     anchors.fill: parent
@@ -131,7 +132,7 @@ BarWidget {
 
     onPressed: function(button) {
       if (button === Qt.RightButton) root.toggleIconOnly()
-      else if (button === Qt.MiddleButton) root.openOverviewReport()
+      else if (button === Qt.MiddleButton) root.refresh()
       else root.togglePanel()
     }
   }
@@ -141,85 +142,112 @@ BarWidget {
       refreshQueued = true
       return
     }
+    loadingLens = selectedLens
+    loadingOffset = selectedOffset
     errorText = ""
     statusText = "Refreshing"
-    reportProcess.command = shellCommand(String(root.setting("command", "omastat summary")))
+    reportProcess.command = shellCommand(summaryCommand(loadingLens, loadingOffset))
     reportProcess.running = true
   }
 
+  function setPeriod(lens, offset) {
+    var nextLens = normalizedLens(lens)
+    var nextOffset = Math.min(0, Math.floor(Number(offset) || 0))
+    if (nextLens === "life") nextOffset = 0
+    if (nextLens === selectedLens && nextOffset === selectedOffset) return
+
+    selectedLens = nextLens
+    selectedOffset = nextOffset
+    var cached = reportsByKey[reportKey(selectedLens, selectedOffset)]
+    if (cached) applyReport(cached, false)
+    else refresh()
+  }
+
+  function shiftPeriod(delta) {
+    if (selectedLens === "life") return
+    setPeriod(selectedLens, selectedOffset + Math.floor(Number(delta) || 0))
+  }
+
   function parseReport(text) {
-    var parsed = []
+    var parsed = null
     try {
-      parsed = JSON.parse(String(text || "[]"))
+      parsed = JSON.parse(String(text || "{}"))
     } catch (error) {
-      rows = []
-      reportApps = []
-      reportInsights = []
-      widgetInsight = null
-      daily = []
-      todayKey = ""
-      periodLabel = "Today"
-      totalFocused = 0
-      totalOpen = 0
+      clearReport("Report JSON parse failed", "Parse failed")
       displayText = root.glyph + " !"
       tooltip = "Omastat report parse failed"
-      errorText = "Report JSON parse failed"
-      statusText = "Parse failed"
       return
     }
 
-    if (Array.isArray(parsed)) {
-      rows = parsed
-      reportApps = []
-      reportInsights = []
-      widgetInsight = null
-      daily = []
-      todayKey = ""
-      periodLabel = "Today"
-      totalFocused = sumSeconds(rows, "focused_seconds")
-      totalOpen = sumSeconds(rows, "open_seconds")
-    } else if (parsed && typeof parsed === "object") {
-      rows = Array.isArray(parsed.rows) ? parsed.rows : []
-      reportApps = Array.isArray(parsed.apps) ? normalizeApps(parsed.apps) : []
-      reportInsights = Array.isArray(parsed.insights) ? normalizeInsights(parsed.insights) : []
-      widgetInsight = parsed.widget_insight && typeof parsed.widget_insight === "object" ? normalizeWidgetInsight(parsed.widget_insight) : null
-      daily = Array.isArray(parsed.daily) ? normalizeDaily(parsed.daily) : []
-      todayKey = String(parsed.today_key || "")
-      periodLabel = parsed.period && typeof parsed.period === "object" ? String(parsed.period.label || "Today") : "Today"
-      totalFocused = numericField(parsed, "total_focused_seconds", sumSeconds(rows, "focused_seconds"))
-      totalOpen = numericField(parsed, "total_open_seconds", sumSeconds(rows, "open_seconds"))
-    } else {
-      rows = []
-      reportApps = []
-      reportInsights = []
-      widgetInsight = null
-      daily = []
-      todayKey = ""
-      periodLabel = "Today"
-      totalFocused = 0
-      totalOpen = 0
-    }
-    updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
+    var report = normalizeReport(parsed)
+    var key = reportKey(loadingLens, loadingOffset)
+    var cache = reportsByKey || {}
+    cache[key] = report
+    reportsByKey = cache
+    if (key === currentKey) applyReport(report, true)
+  }
 
-    if ((rows.length === 0 && reportApps.length === 0) || totalFocused <= 0) {
+  function applyReport(report, markUpdated) {
+    rows = report.rows
+    reportApps = report.apps
+    reportInsights = report.insights
+    widgetInsight = report.widgetInsight
+    daily = report.daily
+    heatmap = report.heatmap
+    todayKey = report.todayKey
+    lensLabel = report.lensLabel
+    periodLabel = report.periodLabel
+    totalFocused = report.totalFocused
+    totalOpen = report.totalOpen
+    totalIdle = report.totalIdle
+    totalLocked = report.totalLocked
+    totalSleep = report.totalSleep
+    totalUnobserved = report.totalUnobserved
+    if (markUpdated) updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
+    updateDisplay(report)
+    injectPanel()
+  }
+
+  function clearReport(error, status) {
+    rows = []
+    reportApps = []
+    reportInsights = []
+    widgetInsight = null
+    daily = []
+    heatmap = []
+    todayKey = ""
+    lensLabel = "DAY"
+    periodLabel = "Today"
+    totalFocused = 0
+    totalOpen = 0
+    totalIdle = 0
+    totalLocked = 0
+    totalSleep = 0
+    totalUnobserved = 0
+    errorText = error
+    statusText = status
+  }
+
+  function updateDisplay(report) {
+    if ((report.rows.length === 0 && report.apps.length === 0) || report.totalFocused <= 0) {
       displayText = root.glyph + " 0s"
-      tooltip = "No focused time today"
-      statusText = "No focused time today"
+      tooltip = String(report.periodLabel || "Today") + ": no focused time"
+      statusText = "No focused time"
       errorText = ""
       return
     }
 
-    var top = reportApps.length > 0 ? reportApps[0] : rows[0]
-    displayText = root.glyph + " " + formatDuration(totalFocused)
-    tooltip = "Today: " + formatDuration(totalFocused) + " focused"
-      + "\nOpen: " + formatDuration(totalOpen)
+    var top = report.apps.length > 0 ? report.apps[0] : report.rows[0]
+    displayText = root.glyph + " " + formatDuration(report.totalFocused)
+    tooltip = String(report.periodLabel || "Today") + ": " + formatDuration(report.totalFocused) + " focused"
+      + "\nOpen: " + formatDuration(report.totalOpen)
       + "\nTop: " + topAppLabel(top)
       + " (" + formatDuration(topAppSeconds(top)) + ")"
-    if (widgetInsight && widgetInsight.text)
-      tooltip += "\nInsight: " + String(widgetInsight.text)
-    statusText = widgetInsight && widgetInsight.text
-      ? String(widgetInsight.text)
-      : Math.max(rows.length, reportApps.length) + " apps with focus"
+    if (report.widgetInsight && report.widgetInsight.text)
+      tooltip += "\nInsight: " + String(report.widgetInsight.text)
+    statusText = report.widgetInsight && report.widgetInsight.text
+      ? String(report.widgetInsight.text)
+      : Math.max(report.rows.length, report.apps.length) + " apps with focus"
     errorText = ""
   }
 
@@ -230,15 +258,24 @@ BarWidget {
     if ("settings" in target) target.settings = root.settings
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
+    if ("selectedLens" in target) target.selectedLens = root.selectedLens
+    if ("selectedOffset" in target) target.selectedOffset = root.selectedOffset
+    if ("refreshRunning" in target) target.refreshRunning = root.refreshRunning
     if ("rows" in target) target.rows = root.rows
     if ("reportApps" in target) target.reportApps = root.reportApps
     if ("reportInsights" in target) target.reportInsights = root.reportInsights
     if ("widgetInsight" in target) target.widgetInsight = root.widgetInsight
     if ("daily" in target) target.daily = root.daily
+    if ("heatmap" in target) target.heatmap = root.heatmap
     if ("todayKey" in target) target.todayKey = root.todayKey
+    if ("lensLabel" in target) target.lensLabel = root.lensLabel
     if ("periodLabel" in target) target.periodLabel = root.periodLabel
     if ("totalFocused" in target) target.totalFocused = root.totalFocused
     if ("totalOpen" in target) target.totalOpen = root.totalOpen
+    if ("totalIdle" in target) target.totalIdle = root.totalIdle
+    if ("totalLocked" in target) target.totalLocked = root.totalLocked
+    if ("totalSleep" in target) target.totalSleep = root.totalSleep
+    if ("totalUnobserved" in target) target.totalUnobserved = root.totalUnobserved
     if ("statusText" in target) target.statusText = root.statusText
     if ("errorText" in target) target.errorText = root.errorText
     if ("updatedText" in target) target.updatedText = root.updatedText
@@ -262,45 +299,82 @@ BarWidget {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
 
-  function openOverviewReport() {
-    if (!root.bar) return
-    root.bar.run(root.overviewCommand())
-  }
-
-  function overviewCommand() {
-    var command = String(root.setting("overviewCommand", root.defaultOverviewCommand)).trim()
-    return command.length > 0 && !root.isStaleTerminalOverviewCommand(command)
-      ? command
-      : root.defaultOverviewCommand
-  }
-
-  function isStaleTerminalOverviewCommand(command) {
-    var normalized = String(command).toLowerCase()
-      .split("\"").join("")
-      .split("'").join("")
-      .replace(/\s+/g, " ")
-    return normalized.indexOf("omastat tui") !== -1
-  }
-
-  function openTerminalReport() {
-    openOverviewReport()
-  }
-
   function toggleIconOnly() {
     var next = !root.iconOnly
     var entry = { id: root.moduleName }
     var current = root.settings || {}
-    for (var key in current) if (key !== "id") entry[key] = current[key]
+    for (var key in current) if (key !== "id" && key !== "overviewCommand") entry[key] = current[key]
     entry.iconOnly = next
     root.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
+  function summaryCommand(lens, offset) {
+    var safeLens = normalizedLens(lens)
+    var safeOffset = safeLens === "life" ? 0 : Math.min(0, Math.floor(Number(offset) || 0))
+    return "omastat summary --lens " + safeLens
+      + " --offset " + safeOffset
+      + " --days 31"
+  }
+
   function shellCommand(command) {
-    var value = String(command || "").trim()
-    if (value.length === 0) value = "omastat summary"
-    return ["bash", "-lc", "PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; " + value]
+    return ["bash", "-lc", "PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; " + command]
+  }
+
+  function reportKey(lens, offset) {
+    var safeLens = normalizedLens(lens)
+    var safeOffset = safeLens === "life" ? 0 : Math.min(0, Math.floor(Number(offset) || 0))
+    return safeLens + ":" + safeOffset
+  }
+
+  function normalizedLens(lens) {
+    var value = String(lens || "day").toLowerCase()
+    if (value === "week" || value === "month" || value === "year" || value === "life") return value
+    return "day"
+  }
+
+  function normalizeReport(parsed) {
+    if (Array.isArray(parsed)) {
+      var legacyRows = parsed
+      return {
+        rows: legacyRows,
+        apps: [],
+        insights: [],
+        widgetInsight: null,
+        daily: [],
+        heatmap: [],
+        todayKey: "",
+        lensLabel: "DAY",
+        periodLabel: "Today",
+        totalFocused: sumSeconds(legacyRows, "focused_seconds"),
+        totalOpen: sumSeconds(legacyRows, "open_seconds"),
+        totalIdle: 0,
+        totalLocked: 0,
+        totalSleep: 0,
+        totalUnobserved: 0
+      }
+    }
+
+    var object = parsed && typeof parsed === "object" ? parsed : {}
+    var rows = Array.isArray(object.rows) ? object.rows : []
+    return {
+      rows: rows,
+      apps: Array.isArray(object.apps) ? normalizeApps(object.apps) : [],
+      insights: Array.isArray(object.insights) ? normalizeInsights(object.insights) : [],
+      widgetInsight: object.widget_insight && typeof object.widget_insight === "object" ? normalizeWidgetInsight(object.widget_insight) : null,
+      daily: Array.isArray(object.daily) ? normalizeDaily(object.daily) : [],
+      heatmap: Array.isArray(object.heatmap) ? normalizeHeatmap(object.heatmap) : [],
+      todayKey: String(object.today_key || ""),
+      lensLabel: String(object.lens_label || object.lens || "DAY").toUpperCase(),
+      periodLabel: object.period && typeof object.period === "object" ? String(object.period.label || "Today") : "Today",
+      totalFocused: numericField(object, "total_focused_seconds", sumSeconds(rows, "focused_seconds")),
+      totalOpen: numericField(object, "total_open_seconds", sumSeconds(rows, "open_seconds")),
+      totalIdle: numericField(object, "total_idle_seconds", 0),
+      totalLocked: numericField(object, "total_locked_seconds", 0),
+      totalSleep: numericField(object, "total_sleep_seconds", 0),
+      totalUnobserved: numericField(object, "total_unobserved_seconds", 0)
+    }
   }
 
   function sumSeconds(list, key) {
@@ -326,6 +400,8 @@ BarWidget {
       if (isNaN(rawShare)) rawShare = 0
       output.push({
         app: String(item.label || item.app || item.app_class || "App"),
+        app_class: String(item.app_class || item.app || ""),
+        category: String(item.category || ""),
         seconds: seconds,
         open_seconds: numericField(item, "open_seconds", 0),
         pct: Math.round(Math.max(0, Math.min(1, rawShare)) * 100)
@@ -367,6 +443,19 @@ BarWidget {
     return output
   }
 
+  function normalizeHeatmap(list) {
+    var output = []
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i] || {}
+      output.push({
+        weekday: Math.max(0, Math.min(6, numericField(item, "weekday", 0))),
+        hour: Math.max(0, Math.min(23, numericField(item, "hour", 0))),
+        focused_seconds: numericField(item, "focused_seconds", numericField(item, "seconds", 0))
+      })
+    }
+    return output
+  }
+
   function normalizeInsights(list) {
     var output = []
     for (var i = 0; i < list.length; i++) {
@@ -402,7 +491,7 @@ BarWidget {
     var kind = String(item && item.kind || "")
     switch (kind) {
       case "top-app": return "Top app"
-      case "day-comparison": return "Compared with yesterday"
+      case "day-comparison": return root.loadingOffset < 0 ? "Compared with previous day" : "Compared with yesterday"
       case "period-comparison": return "Compared with last period"
       case "best-day": return "Best day"
       case "worst-active-day": return "Lightest day"
