@@ -1,4 +1,5 @@
 use crate::{
+    clock,
     config::Config,
     hyprland::{self, Event, EventStream, Snapshot, Window},
     identity, session,
@@ -40,6 +41,25 @@ struct FocusedInterval {
     interval_id: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FocusTarget {
+    address: String,
+    app_class: String,
+    title: Option<String>,
+    workspace: Option<String>,
+    monitor: Option<String>,
+}
+
+impl FocusedInterval {
+    fn matches_target(&self, target: &FocusTarget) -> bool {
+        self.address == target.address
+            && self.app_class == target.app_class
+            && self.title == target.title
+            && self.workspace == target.workspace
+            && self.monitor == target.monitor
+    }
+}
+
 struct SessionPauseInterval {
     kind: SessionIntervalKind,
     interval_id: i64,
@@ -61,7 +81,7 @@ impl Tracker {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let daemon_start = self.storage.start_daemon_run(unix_now())?;
+        let daemon_start = self.storage.start_daemon_run(clock::unix_now())?;
         self.daemon_run_id = Some(daemon_start.run_id);
         if let Some(recovery) = daemon_start.recovery {
             info!(
@@ -185,7 +205,7 @@ impl Tracker {
     }
 
     async fn recover_startup_state(&mut self) -> Result<()> {
-        let now = unix_now();
+        let now = clock::unix_now();
         match hyprland::snapshot().await {
             Ok(snapshot) => self.apply_startup_snapshot(snapshot, now),
             Err(error) => {
@@ -374,7 +394,7 @@ impl Tracker {
                 &app_class,
                 None,
                 None,
-                unix_now(),
+                clock::unix_now(),
             )?;
             self.state.open_interval_ids.insert(app_class, id);
         }
@@ -401,7 +421,8 @@ impl Tracker {
             if *count == 0 {
                 self.state.app_open_counts.remove(&app_class);
                 if let Some(interval_id) = self.state.open_interval_ids.remove(&app_class) {
-                    self.storage.close_interval(interval_id, unix_now())?;
+                    self.storage
+                        .close_interval(interval_id, clock::unix_now())?;
                 }
             }
         }
@@ -415,7 +436,7 @@ impl Tracker {
 
     #[cfg(test)]
     fn set_focus_paused(&mut self, paused: bool) -> Result<()> {
-        self.set_focus_paused_at(paused, unix_now())
+        self.set_focus_paused_at(paused, clock::unix_now())
     }
 
     fn set_focus_paused_at(&mut self, paused: bool, now: i64) -> Result<()> {
@@ -457,7 +478,7 @@ impl Tracker {
         match session::status().await {
             Ok(status) => {
                 let pause_kind = self.session_pause_kind(&status);
-                self.set_session_pause(pause_kind, Some(status.source), unix_now())?;
+                self.set_session_pause(pause_kind, Some(status.source), clock::unix_now())?;
             }
             Err(error) => {
                 debug!("session status unavailable: {error:#}");
@@ -477,7 +498,7 @@ impl Tracker {
     }
 
     async fn apply_sleep_event(&mut self, event: session::SleepEvent) -> Result<()> {
-        let now = unix_now();
+        let now = clock::unix_now();
         match event {
             session::SleepEvent::Preparing => self.start_sleep_at(now)?,
             session::SleepEvent::Resumed => {
@@ -590,39 +611,14 @@ impl Tracker {
     }
 
     fn sync_focused_interval(&mut self) -> Result<()> {
-        self.sync_focused_interval_at(unix_now())
+        self.sync_focused_interval_at(clock::unix_now())
     }
 
     fn sync_focused_interval_at(&mut self, now: i64) -> Result<()> {
-        let target = if self.state.focus_paused {
-            None
-        } else {
-            self.state
-                .active_address
-                .clone()
-                .and_then(|address| self.state.windows.get(&address).cloned())
-                .and_then(|window| {
-                    terminal::should_track_class(&window.class).then(|| {
-                        let app_class = self.focused_app_class(&window);
-                        let title = self.focused_title(&window, &app_class);
-                        (
-                            window.address.clone(),
-                            app_class,
-                            title,
-                            window.workspace.clone(),
-                            window.monitor.clone(),
-                        )
-                    })
-                })
-        };
+        let target = self.focus_target();
 
-        if let (Some(focused), Some((address, app_class, title, workspace, monitor))) =
-            (self.state.focused.as_ref(), target.as_ref())
-            && focused.address == *address
-            && focused.app_class == *app_class
-            && focused.title == *title
-            && focused.workspace == *workspace
-            && focused.monitor == *monitor
+        if let (Some(focused), Some(target)) = (self.state.focused.as_ref(), target.as_ref())
+            && focused.matches_target(target)
         {
             return Ok(());
         }
@@ -631,35 +627,57 @@ impl Tracker {
             self.storage.close_interval(previous.interval_id, now)?;
         }
 
-        let Some((address, app_class, title, workspace, monitor)) = target else {
+        let Some(target) = target else {
             return Ok(());
         };
 
         let interval_id = self.storage.start_interval_with_metadata(
             IntervalKind::Focused,
-            &app_class,
+            &target.app_class,
             IntervalMetadata {
-                window_address: Some(&address),
-                title: title.as_deref(),
-                workspace: workspace.as_deref(),
-                monitor: monitor.as_deref(),
+                window_address: Some(&target.address),
+                title: target.title.as_deref(),
+                workspace: target.workspace.as_deref(),
+                monitor: target.monitor.as_deref(),
             },
             now,
         )?;
 
         self.state.focused = Some(FocusedInterval {
-            address,
-            app_class,
-            title,
-            workspace,
-            monitor,
+            address: target.address,
+            app_class: target.app_class,
+            title: target.title,
+            workspace: target.workspace,
+            monitor: target.monitor,
             interval_id,
         });
         Ok(())
     }
 
+    fn focus_target(&mut self) -> Option<FocusTarget> {
+        if self.state.focus_paused {
+            return None;
+        }
+
+        let address = self.state.active_address.clone()?;
+        let window = self.state.windows.get(&address).cloned()?;
+        if !terminal::should_track_class(&window.class) {
+            return None;
+        }
+
+        let app_class = self.focused_app_class(&window);
+        let title = self.focused_title(&window, &app_class);
+        Some(FocusTarget {
+            address: window.address,
+            app_class,
+            title,
+            workspace: window.workspace,
+            monitor: window.monitor,
+        })
+    }
+
     fn shutdown(&mut self) -> Result<()> {
-        let now = unix_now();
+        let now = clock::unix_now();
         if let Some(previous) = self.state.focused.take() {
             debug!("closing focused interval for {}", previous.app_class);
             self.storage.close_interval(previous.interval_id, now)?;
@@ -679,14 +697,11 @@ impl Tracker {
 
     fn record_heartbeat(&mut self) -> Result<()> {
         if let Some(run_id) = self.daemon_run_id {
-            self.storage.record_daemon_heartbeat(run_id, unix_now())?;
+            self.storage
+                .record_daemon_heartbeat(run_id, clock::unix_now())?;
         }
         Ok(())
     }
-}
-
-fn unix_now() -> i64 {
-    chrono::Utc::now().timestamp()
 }
 
 #[cfg(unix)]
@@ -783,9 +798,6 @@ mod tests {
                 100,
             )
             .unwrap();
-        let stale_focus = storage
-            .start_interval(IntervalKind::Focused, "code", Some("0x2"), None, 100)
-            .unwrap();
         let mut tracker = Tracker::new(storage, config);
 
         tracker
@@ -821,7 +833,6 @@ mod tests {
         assert!(restored_focus.is_some_and(|id| unclosed_ids.contains(&id)));
         assert!(!unclosed_ids.contains(&live_focus));
         assert!(!unclosed_ids.contains(&stale_open));
-        assert!(!unclosed_ids.contains(&stale_focus));
         assert_eq!(unclosed_ids.len(), 2);
     }
 

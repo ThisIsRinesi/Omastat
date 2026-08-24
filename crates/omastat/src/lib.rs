@@ -1,4 +1,6 @@
+pub mod analytics;
 pub mod cli;
+pub mod clock;
 pub mod config;
 pub mod export;
 pub mod hyprland;

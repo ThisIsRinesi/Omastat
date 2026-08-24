@@ -77,6 +77,7 @@ omastat today
 omastat week
 omastat summary
 omastat summary --lens week --offset -1
+omastat widget-summary --lens day
 omastat insights --json
 omastat goals --lens week
 omastat digest --lens week

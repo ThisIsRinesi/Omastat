@@ -20,7 +20,7 @@ use std::{
 };
 
 const CLOCK_REFRESH: Duration = Duration::from_secs(1);
-const AUTO_REFRESH: Duration = Duration::from_secs(5);
+const AUTO_REFRESH: Duration = Duration::from_secs(30);
 
 pub fn run(storage: Storage, config: Config) -> Result<()> {
     enable_raw_mode()?;

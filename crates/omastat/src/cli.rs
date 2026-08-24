@@ -1,8 +1,11 @@
+use crate::clock;
 use crate::config::Config;
 use crate::export::DataExportScope;
 use crate::hyprland;
 use crate::insights::{InsightCategory, InsightConfidence, InsightTone};
-use crate::report::{self, AppBreakdown, InsightsReport, Lens, UsageReport, WidgetInsight};
+use crate::report::{
+    self, AppBreakdown, InsightsReport, Lens, UsageReport, WidgetInsight, WidgetSummaryReport,
+};
 use crate::session;
 use crate::steam::SteamResolver;
 use crate::storage::{
@@ -132,6 +135,13 @@ pub enum Commands {
     },
     /// Show one high-signal insight suitable for a bar widget.
     WidgetInsight {
+        #[arg(long, value_enum, default_value = "day")]
+        lens: LensArg,
+        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+        offset: i32,
+    },
+    /// Show a lightweight bar-widget summary without full analytics rollups.
+    WidgetSummary {
         #[arg(long, value_enum, default_value = "day")]
         lens: LensArg,
         #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
@@ -452,6 +462,16 @@ pub fn widget_insight_report(
     Ok(report.widget_insight)
 }
 
+pub fn widget_summary_report(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    offset: i32,
+) -> Result<WidgetSummaryReport> {
+    report::widget_summary_for_period(storage, steam, config, lens, offset)
+}
+
 pub fn print_widget_insight(insight: Option<WidgetInsight>, json: bool) -> Result<()> {
     if json {
         return print_json(&insight);
@@ -461,6 +481,10 @@ pub fn print_widget_insight(insight: Option<WidgetInsight>, json: bool) -> Resul
         None => println!("No insight for this period yet."),
     }
     Ok(())
+}
+
+pub fn print_widget_summary(summary: &WidgetSummaryReport) -> Result<()> {
+    print_json(summary)
 }
 
 pub fn purge_cutoff(
@@ -477,7 +501,7 @@ pub fn purge_cutoff(
     }
     if let Some(days) = older_than_days {
         return Ok(Some(
-            (Local::now() - Duration::days(days as i64)).timestamp(),
+            (clock::local_now() - Duration::days(days as i64)).timestamp(),
         ));
     }
     let date = NaiveDate::parse_from_str(before.unwrap_or_default(), "%Y-%m-%d")?;
@@ -674,6 +698,15 @@ pub async fn doctor(config: &Config, database: Option<&Path>) -> Result<()> {
     println!("Config");
     println!("  Path: {}", config.path.display());
     println!("  Title capture: {:?}", config.privacy.title_capture);
+    let warnings = config.warnings();
+    if warnings.is_empty() {
+        println!("  Warnings: none");
+    } else {
+        println!("  Warnings:");
+        for warning in warnings {
+            println!("    {}: {}", warning.field, warning.message);
+        }
+    }
 
     print_storage_diagnostic(&Storage::diagnose(database));
 
@@ -839,19 +872,7 @@ fn truncate(value: &str, width: usize) -> String {
 }
 
 fn format_duration(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else {
-        format!("{minutes}m")
-    }
+    crate::analytics::format_duration(seconds)
 }
 
 #[cfg(test)]
@@ -889,6 +910,27 @@ mod tests {
                 assert_eq!(days, 31);
             }
             other => panic!("expected summary command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_widget_summary_period_options() {
+        let cli = Cli::try_parse_from([
+            "omastat",
+            "widget-summary",
+            "--lens",
+            "week",
+            "--offset",
+            "-1",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::WidgetSummary { lens, offset } => {
+                assert!(matches!(lens, LensArg::Week));
+                assert_eq!(offset, -1);
+            }
+            other => panic!("expected widget-summary command, got {other:?}"),
         }
     }
 

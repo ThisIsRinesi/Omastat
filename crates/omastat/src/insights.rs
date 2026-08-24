@@ -1,5 +1,5 @@
 use crate::{
-    identity,
+    analytics, identity,
     storage::{
         AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, TimelineInterval, WorkspaceTotals,
     },
@@ -231,7 +231,7 @@ pub fn analyze(input: AnalysisInput<'_>) -> Vec<Insight> {
     out
 }
 
-const DEEP_BLOCK_SECONDS: i64 = 25 * 60;
+const DEEP_BLOCK_SECONDS: i64 = analytics::DEEP_BLOCK_SECONDS;
 const MIN_APP_DENSITY_OPEN_SECONDS: i64 = 10 * 60;
 const MIN_FRAGMENTED_APP_SECONDS: i64 = 15 * 60;
 const MIN_AFFINITY_APP_SECONDS: i64 = 20 * 60;
@@ -345,9 +345,26 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
 }
 
 fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
-    if input.period.lens != AnalysisLens::Week {
-        return;
-    }
+    let (label, minimum_days, explanation) = match input.period.lens {
+        AnalysisLens::Week => (
+            "week",
+            7,
+            "Compares this week with the previous local Monday-through-Sunday week.",
+        ),
+        AnalysisLens::Month => (
+            "month",
+            14,
+            "Compares this month with the previous local calendar month.",
+        ),
+        AnalysisLens::Year => (
+            "year",
+            30,
+            "Compares this year with the previous local calendar year.",
+        ),
+        AnalysisLens::Day | AnalysisLens::Life => {
+            return;
+        }
+    };
 
     let Some(previous) = input.previous_period.as_ref() else {
         return;
@@ -370,12 +387,11 @@ fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         kind: InsightKind::PeriodComparison,
         category: InsightCategory::Patterns,
         tone: comparison_tone(delta),
-        title: "vs previous week".to_string(),
+        title: format!("vs previous {label}"),
         value: signed_duration(delta),
-        explanation: "Compares this week with the previous local Monday-through-Sunday week."
-            .to_string(),
-        confidence: confidence(input.daily.len(), 7),
-        evidence: evidence(input, 7),
+        explanation: explanation.to_string(),
+        confidence: confidence(input.daily.len(), minimum_days),
+        evidence: evidence(input, minimum_days),
         supporting: support,
     });
 }
@@ -1179,15 +1195,7 @@ fn focus_blocks(intervals: &[TimelineInterval]) -> Vec<FocusBlock> {
 }
 
 fn median(sorted: &[i64]) -> i64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let mid = sorted.len() / 2;
-    if sorted.len().is_multiple_of(2) {
-        (sorted[mid - 1] + sorted[mid]) / 2
-    } else {
-        sorted[mid]
-    }
+    analytics::median(sorted)
 }
 
 fn current_active_streak(days: &[DayTotals]) -> usize {
@@ -1212,41 +1220,37 @@ fn longest_active_streak(days: &[DayTotals]) -> usize {
 }
 
 fn peak_hour(cells: &[FocusHeatCell]) -> Option<HourTotal> {
-    let mut hours = [0_i64; 24];
-    for cell in cells {
-        if let Some(total) = hours.get_mut(cell.hour as usize) {
-            *total += cell.focused_seconds.max(0);
-        }
-    }
-
-    hours
-        .into_iter()
-        .enumerate()
-        .max_by_key(|(_, seconds)| *seconds)
-        .filter(|(_, seconds)| *seconds > 0)
-        .map(|(hour, focused_seconds)| HourTotal {
-            hour: hour as u32,
-            focused_seconds,
-        })
+    analytics::peak_hour(cells).map(|peak| HourTotal {
+        hour: peak.hour,
+        focused_seconds: peak.focused_seconds,
+    })
 }
 
 fn peak_weekday(cells: &[FocusHeatCell]) -> Option<WeekdayTotal> {
-    let mut weekdays = [0_i64; 7];
-    for cell in cells {
-        if let Some(total) = weekdays.get_mut(cell.weekday as usize) {
-            *total += cell.focused_seconds.max(0);
-        }
-    }
+    analytics::peak_weekday(cells).map(|peak| WeekdayTotal {
+        weekday: peak.weekday,
+        focused_seconds: peak.focused_seconds,
+    })
+}
 
-    weekdays
-        .into_iter()
-        .enumerate()
-        .max_by_key(|(_, seconds)| *seconds)
-        .filter(|(_, seconds)| *seconds > 0)
-        .map(|(weekday, focused_seconds)| WeekdayTotal {
-            weekday: weekday as u32,
-            focused_seconds,
-        })
+fn effective_app_count(rows: &[AppTotals], total_focused_seconds: i64) -> f64 {
+    analytics::effective_app_count(rows, total_focused_seconds)
+}
+
+fn signed_duration(seconds: i64) -> String {
+    analytics::signed_duration(seconds)
+}
+
+fn format_duration(seconds: i64) -> String {
+    analytics::format_duration(seconds)
+}
+
+fn percent(value: f64) -> String {
+    analytics::percent(value)
+}
+
+fn ratio(value: i64, total: i64) -> f64 {
+    analytics::ratio(value, total)
 }
 
 fn most_fragmented_app(blocks: &[FocusBlock]) -> Option<FragmentedApp> {
@@ -1433,21 +1437,6 @@ fn active_app_count(rows: &[AppTotals]) -> usize {
     rows.iter().filter(|row| row.focused_seconds > 0).count()
 }
 
-fn effective_app_count(rows: &[AppTotals], total_focused_seconds: i64) -> f64 {
-    if total_focused_seconds <= 0 {
-        return 0.0;
-    }
-
-    let entropy = rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .map(|row| row.focused_seconds as f64 / total_focused_seconds as f64)
-        .filter(|share| *share > 0.0)
-        .map(|share| -share * share.ln())
-        .sum::<f64>();
-    entropy.exp()
-}
-
 fn mean_seconds(values: &[i64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -1506,11 +1495,6 @@ fn per_hour(count: usize, focused_seconds: i64) -> f64 {
     }
 }
 
-fn signed_duration(seconds: i64) -> String {
-    let sign = if seconds < 0 { "-" } else { "+" };
-    format!("{sign}{}", format_duration(seconds.abs()))
-}
-
 fn hour_label(hour: u32) -> String {
     let hour = hour % 24;
     let suffix = if hour < 12 { "AM" } else { "PM" };
@@ -1555,36 +1539,6 @@ fn format_decimal(value: f64) -> String {
         format!("{:.0}", value)
     } else {
         format!("{:.1}", value)
-    }
-}
-
-fn format_duration(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return format!("{minutes}m");
-    }
-    let hours = minutes / 60;
-    let rest = minutes % 60;
-    if rest == 0 {
-        format!("{hours}h")
-    } else {
-        format!("{hours}h {rest}m")
-    }
-}
-
-fn percent(value: f64) -> String {
-    format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0)
-}
-
-fn ratio(value: i64, total: i64) -> f64 {
-    if total <= 0 {
-        0.0
-    } else {
-        value.max(0) as f64 / total as f64
     }
 }
 
@@ -1853,6 +1807,47 @@ mod tests {
         assert_eq!(trend.value, "+1h");
         assert_eq!(trend.tone, InsightTone::Positive);
         assert_eq!(trend.supporting.comparison_seconds, Some(3600));
+    }
+
+    #[test]
+    fn emits_month_vs_previous_month_trend() {
+        let rows = vec![AppTotals {
+            app_class: "ghostty".to_string(),
+            focused_seconds: 14_400,
+            open_seconds: 18_000,
+        }];
+        let daily = vec![
+            day("2026-01-12", "Mon", 3600),
+            day("2026-01-13", "Tue", 3600),
+            day("2026-01-14", "Wed", 7200),
+        ];
+        let mut analysis = input(&rows, &daily, 14_400, 18_000, 0, 0);
+        analysis.period = AnalysisPeriod {
+            lens: AnalysisLens::Month,
+            label: "January 2026",
+            start_date: Some("2026-01-01"),
+            end_date: Some("2026-01-31"),
+        };
+        analysis.previous_period = Some(AnalysisComparisonPeriod {
+            label: "December 2025".to_string(),
+            start_date: Some("2025-12-01".to_string()),
+            end_date: Some("2025-12-31".to_string()),
+            focused_seconds: 7200,
+        });
+
+        let insights = analyze(analysis);
+        let trend = insights
+            .iter()
+            .find(|insight| insight.kind == InsightKind::PeriodComparison)
+            .unwrap();
+
+        assert_eq!(trend.title, "vs previous month");
+        assert_eq!(trend.value, "+2h");
+        assert_eq!(trend.tone, InsightTone::Positive);
+        assert_eq!(
+            trend.supporting.comparison_label.as_deref(),
+            Some("December 2025")
+        );
     }
 
     #[test]

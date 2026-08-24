@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
         cli::doctor(&config, cli.database.as_deref()).await?;
         return Ok(());
     }
+    config.log_warnings();
 
     let storage_mode = match &cli.command {
         Commands::RepairTitles { .. } | Commands::Purge { .. } => StorageOpenMode::ReadWriteMigrate,
@@ -159,11 +160,16 @@ async fn main() -> Result<()> {
                 cli::widget_insight_report(&storage, &mut steam, &config, lens.into(), offset)?;
             cli::print_widget_insight(insight, cli.json)?;
         }
+        Commands::WidgetSummary { lens, offset } => {
+            let summary =
+                cli::widget_summary_report(&storage, &mut steam, &config, lens.into(), offset)?;
+            cli::print_widget_summary(&summary)?;
+        }
         Commands::Tui => {
             tui::run(storage, config)?;
         }
         Commands::RepairTitles { dry_run } => {
-            let repair = storage.repair_titles(&mut steam, dry_run)?;
+            let repair = storage.repair_titles(&mut steam, &config, dry_run)?;
             cli::print_title_repair(&repair, cli.json)?;
         }
         Commands::Doctor => unreachable!("doctor is handled before storage opens"),

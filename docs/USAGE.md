@@ -16,6 +16,7 @@ omastat insights --lens week --offset -1 --json
 omastat goals --lens week
 omastat digest --lens week
 omastat widget-insight --json
+omastat widget-summary --lens day
 ```
 
 `summary` is the compact JSON report used by the Omarchy widget. It accepts
@@ -25,6 +26,12 @@ current day. Its payload includes app totals, daily totals, a week-by-hour
 `title`, `value`, `explanation`, `confidence`, `evidence`, and `supporting`
 fields so widgets and future commands can use the same analysis output without
 parsing display labels.
+
+`widget-summary` is the lightweight JSON path used by the closed bar widget. It
+returns current totals, period metadata, top-app display data, and preformatted
+bar text without daily history, heatmaps, timeline rollups, or full insight
+analysis. Opening the widget panel still uses `summary` for the full analytics
+view.
 
 `insights --json` emits the same structured insight records with period
 metadata and focused/open/system totals, but leaves out the heavier app rows and

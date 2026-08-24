@@ -1,11 +1,12 @@
 use crate::{
+    clock,
     config::Config,
     identity,
     insights::{
         self, AnalysisComparisonPeriod, AnalysisInput, AnalysisLens, AnalysisPeriod, Insight,
     },
     steam::SteamResolver,
-    storage::{AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, Storage},
+    storage::{AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, FocusedRollups, Storage},
 };
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
@@ -62,6 +63,12 @@ pub struct UsageReport {
     pub widget_insight: Option<WidgetInsight>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UsageReportWithRollups {
+    pub report: UsageReport,
+    pub rollups: FocusedRollups,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InsightsReport {
     pub schema_version: u32,
@@ -91,6 +98,28 @@ pub struct WidgetInsight {
     pub value: String,
     pub tone: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WidgetSummaryReport {
+    pub schema_version: u32,
+    pub generated_at: i64,
+    pub query_start_ts: i64,
+    pub query_end_ts: i64,
+    pub today_key: String,
+    pub lens: Lens,
+    pub lens_label: &'static str,
+    pub period: Period,
+    pub total_focused_seconds: i64,
+    pub total_open_seconds: i64,
+    pub total_idle_seconds: i64,
+    pub total_locked_seconds: i64,
+    pub total_sleep_seconds: i64,
+    pub total_unobserved_seconds: i64,
+    pub top_app: Option<AppBreakdown>,
+    pub display_value: String,
+    pub tooltip: String,
+    pub status_text: String,
 }
 
 impl Lens {
@@ -159,7 +188,15 @@ pub fn usage_report(
     lens: Lens,
     days: u32,
 ) -> Result<UsageReport> {
-    usage_report_for_period_with_days(storage, steam, config, lens, 0, Some(days.max(1)))
+    Ok(usage_report_with_rollups_for_period_with_days(
+        storage,
+        steam,
+        config,
+        lens,
+        0,
+        Some(days.max(1)),
+    )?
+    .report)
 }
 
 pub fn usage_report_for_period(
@@ -169,7 +206,37 @@ pub fn usage_report_for_period(
     lens: Lens,
     offset: i32,
 ) -> Result<UsageReport> {
-    usage_report_for_period_with_days(storage, steam, config, lens, offset, None)
+    Ok(
+        usage_report_with_rollups_for_period_with_days(storage, steam, config, lens, offset, None)?
+            .report,
+    )
+}
+
+pub fn usage_report_with_rollups(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    days: u32,
+) -> Result<UsageReportWithRollups> {
+    usage_report_with_rollups_for_period_with_days(
+        storage,
+        steam,
+        config,
+        lens,
+        0,
+        Some(days.max(1)),
+    )
+}
+
+pub fn usage_report_with_rollups_for_period(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    offset: i32,
+) -> Result<UsageReportWithRollups> {
+    usage_report_with_rollups_for_period_with_days(storage, steam, config, lens, offset, None)
 }
 
 pub fn insights_report_for_period(
@@ -182,6 +249,74 @@ pub fn insights_report_for_period(
     usage_report_for_period(storage, steam, config, lens, offset).map(InsightsReport::from)
 }
 
+pub fn widget_summary_for_period(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    offset: i32,
+) -> Result<WidgetSummaryReport> {
+    let period = period_for_lens(lens, offset)?;
+    let rows = steam.resolve_totals(rows_for_period(storage, lens, &period)?);
+    let total_focused_seconds = focused_total(&rows);
+    let total_open_seconds = open_total(&rows);
+    let session_totals = storage.session_totals_between(period.start_ts, period.query_end_ts)?;
+    let top_app = rows.iter().find(|row| row.focused_seconds > 0).map(|row| {
+        let label = config.app_label(&row.app_class, || app_label(&row.app_class));
+        let category = config.app_category(&row.app_class);
+        AppBreakdown {
+            app_class: row.app_class.clone(),
+            label,
+            category,
+            focused_seconds: row.focused_seconds,
+            open_seconds: row.open_seconds,
+            share: crate::analytics::ratio(row.focused_seconds, total_focused_seconds.max(1)),
+        }
+    });
+    let display_value = format_duration(total_focused_seconds);
+    let period_label = period.meta.label.clone();
+    let tooltip = match top_app.as_ref() {
+        Some(app) if total_focused_seconds > 0 => format!(
+            "{period_label}: {} focused\nOpen: {}\nTop: {} ({})",
+            format_duration(total_focused_seconds),
+            format_duration(total_open_seconds),
+            app.label,
+            format_duration(app.focused_seconds)
+        ),
+        _ => format!("{period_label}: no focused time"),
+    };
+    let status_text = match top_app.as_ref() {
+        Some(app) if total_focused_seconds > 0 => format!(
+            "{} focused, top {}",
+            format_duration(total_focused_seconds),
+            app.label
+        ),
+        _ => "No focused time".to_string(),
+    };
+
+    Ok(WidgetSummaryReport {
+        schema_version: 1,
+        generated_at: clock::unix_now(),
+        query_start_ts: period.start_ts,
+        query_end_ts: period.query_end_ts,
+        today_key: clock::local_now().format("%Y-%m-%d").to_string(),
+        lens,
+        lens_label: lens.label(),
+        period: period.meta,
+        total_focused_seconds,
+        total_open_seconds,
+        total_idle_seconds: session_totals.idle_seconds,
+        total_locked_seconds: session_totals.locked_seconds,
+        total_sleep_seconds: session_totals.sleep_seconds,
+        total_unobserved_seconds: session_totals.unobserved_seconds,
+        top_app,
+        display_value,
+        tooltip,
+        status_text,
+    })
+}
+
+#[cfg(test)]
 fn usage_report_for_period_with_days(
     storage: &Storage,
     steam: &mut SteamResolver,
@@ -190,27 +325,47 @@ fn usage_report_for_period_with_days(
     offset: i32,
     trailing_days_override: Option<u32>,
 ) -> Result<UsageReport> {
+    Ok(usage_report_with_rollups_for_period_with_days(
+        storage,
+        steam,
+        config,
+        lens,
+        offset,
+        trailing_days_override,
+    )?
+    .report)
+}
+
+fn usage_report_with_rollups_for_period_with_days(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    offset: i32,
+    trailing_days_override: Option<u32>,
+) -> Result<UsageReportWithRollups> {
     let period = period_for_lens(lens, offset)?;
     let rows = steam.resolve_totals(rows_for_period(storage, lens, &period)?);
     let daily = daily_for_period(storage, lens, &period, trailing_days_override)?;
     let total_focused_seconds = focused_total(&rows);
     let total_open_seconds = open_total(&rows);
     let session_totals = storage.session_totals_between(period.start_ts, period.query_end_ts)?;
-    let today_key = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today_key = clock::local_now().format("%Y-%m-%d").to_string();
     let selected_day_key = selected_day_key(lens, &period, &daily, &today_key);
     let apps = app_breakdown_with_config(&rows, 6, config);
     let rollups = storage.focused_rollups_between(period.start_ts, period.query_end_ts, 8, 64)?;
-    let heatmap = rollups.heatmap;
+    let heatmap = rollups.heatmap.clone();
     let focus_intervals = rollups
         .focus_intervals
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|mut interval| {
             interval.app_class = steam.resolve_class(&interval.app_class);
             interval
         })
         .collect::<Vec<_>>();
-    let workspaces = rollups.workspaces;
-    let app_workspaces = resolve_app_workspace_totals(rollups.app_workspaces, steam);
+    let workspaces = rollups.workspaces.clone();
+    let app_workspaces = resolve_app_workspace_totals(rollups.app_workspaces.clone(), steam);
     let previous_period = previous_period_comparison(storage, steam, lens, offset)?;
     let insights = insights::analyze(AnalysisInput {
         rows: &rows,
@@ -236,10 +391,10 @@ fn usage_report_for_period_with_days(
         total_unobserved_seconds: session_totals.unobserved_seconds,
     });
 
-    let generated_at = chrono::Utc::now().timestamp();
+    let generated_at = clock::unix_now();
     let widget_insight = widget_insight_for(&insights, generated_at);
 
-    Ok(UsageReport {
+    let report = UsageReport {
         generated_at,
         query_start_ts: period.start_ts,
         query_end_ts: period.query_end_ts,
@@ -259,7 +414,8 @@ fn usage_report_for_period_with_days(
         heatmap,
         insights,
         widget_insight,
-    })
+    };
+    Ok(UsageReportWithRollups { report, rollups })
 }
 
 impl From<UsageReport> for InsightsReport {
@@ -438,7 +594,7 @@ struct PeriodBounds {
 }
 
 fn period_for_lens(lens: Lens, offset: i32) -> Result<PeriodBounds> {
-    let now = Local::now();
+    let now = clock::local_now();
     let today = now.date_naive();
     let offset = offset.min(0);
 
@@ -578,7 +734,7 @@ fn previous_period_comparison(
     lens: Lens,
     offset: i32,
 ) -> Result<Option<AnalysisComparisonPeriod>> {
-    if lens != Lens::Week {
+    if !matches!(lens, Lens::Week | Lens::Month | Lens::Year) {
         return Ok(None);
     }
 
@@ -638,25 +794,11 @@ fn add_months(date: NaiveDate, months: i32) -> Result<NaiveDate> {
 }
 
 pub fn format_duration(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return format!("{minutes}m");
-    }
-    let hours = minutes / 60;
-    let rest = minutes % 60;
-    if rest == 0 {
-        format!("{hours}h")
-    } else {
-        format!("{hours}h {rest}m")
-    }
+    crate::analytics::format_duration(seconds)
 }
 
 pub fn percent(value: f64) -> String {
-    format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0)
+    crate::analytics::percent(value)
 }
 
 #[cfg(test)]

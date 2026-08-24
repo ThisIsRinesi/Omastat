@@ -3,6 +3,7 @@ use super::{
     theme::Theme,
 };
 use crate::{
+    clock,
     config::Config,
     insights::Insight,
     report::{Lens, UsageReport},
@@ -95,7 +96,7 @@ impl App {
         let mut steam = SteamResolver::default();
         let lens = Lens::Day;
         let data = data::load_dashboard_data(storage, &mut steam, &config, lens, 0)?;
-        let health = HealthSnapshot::load(storage);
+        let health = HealthSnapshot::load(storage, &config);
         let overview_selected_day = data.report.daily.len().saturating_sub(1);
         let mut app = Self {
             view: View::Overview,
@@ -107,7 +108,7 @@ impl App {
             show_trends: true,
             help_open: false,
             last_refresh: Instant::now(),
-            loaded_at: Local::now(),
+            loaded_at: clock::local_now(),
             config,
             theme: Theme::load(),
             steam,
@@ -344,7 +345,7 @@ impl App {
         )?;
         self.refresh_health_if_visible(storage);
         self.theme = Theme::load();
-        self.loaded_at = Local::now();
+        self.loaded_at = clock::local_now();
         self.last_refresh = Instant::now();
         self.clamp_selection();
         Ok(())
@@ -352,7 +353,7 @@ impl App {
 
     fn refresh_health_if_visible(&mut self, storage: &Storage) {
         if self.view == View::System {
-            self.health = HealthSnapshot::load(storage);
+            self.health = HealthSnapshot::load(storage, &self.config);
         }
     }
 
@@ -402,7 +403,7 @@ impl App {
             show_trends: true,
             help_open: false,
             last_refresh: Instant::now(),
-            loaded_at: Local::now(),
+            loaded_at: clock::local_now(),
             config: Config::default(),
             theme: parts.theme,
             steam: parts.steam,

@@ -18,7 +18,9 @@ BarWidget {
   property int selectedOffset: 0
   property string loadingLens: "day"
   property int loadingOffset: 0
+  property bool loadingFullReport: false
   property var reportsByKey: ({})
+  property var summariesByKey: ({})
   property var rows: []
   property var reportApps: []
   property var reportInsights: []
@@ -34,6 +36,12 @@ BarWidget {
   property int totalLocked: 0
   property int totalSleep: 0
   property int totalUnobserved: 0
+  property bool panelDataLoaded: false
+  property bool refreshQueuedFull: false
+  property bool injectQueued: false
+  readonly property int cacheMaxEntries: 12
+  readonly property int fullReportTtlMs: 5 * 60 * 1000
+  readonly property int summaryTtlMs: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 2000
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property real openPanelIndicatorWidth: button.labelWidth
@@ -47,38 +55,38 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: refresh(false)
 
-  onBarChanged: injectPanel()
-  onSettingsChanged: injectPanel()
-  onSelectedLensChanged: injectPanel()
-  onSelectedOffsetChanged: injectPanel()
-  onRowsChanged: injectPanel()
-  onReportAppsChanged: injectPanel()
-  onReportInsightsChanged: injectPanel()
-  onWidgetInsightChanged: injectPanel()
-  onDailyChanged: injectPanel()
-  onHeatmapChanged: injectPanel()
-  onTodayKeyChanged: injectPanel()
-  onLensLabelChanged: injectPanel()
-  onPeriodLabelChanged: injectPanel()
-  onTotalFocusedChanged: injectPanel()
-  onTotalOpenChanged: injectPanel()
-  onTotalIdleChanged: injectPanel()
-  onTotalLockedChanged: injectPanel()
-  onTotalSleepChanged: injectPanel()
-  onTotalUnobservedChanged: injectPanel()
-  onStatusTextChanged: injectPanel()
-  onErrorTextChanged: injectPanel()
-  onUpdatedTextChanged: injectPanel()
-  onRefreshRunningChanged: injectPanel()
+  onBarChanged: scheduleInjectPanel()
+  onSettingsChanged: scheduleInjectPanel()
+  onSelectedLensChanged: scheduleInjectPanel()
+  onSelectedOffsetChanged: scheduleInjectPanel()
+  onRowsChanged: scheduleInjectPanel()
+  onReportAppsChanged: scheduleInjectPanel()
+  onReportInsightsChanged: scheduleInjectPanel()
+  onWidgetInsightChanged: scheduleInjectPanel()
+  onDailyChanged: scheduleInjectPanel()
+  onHeatmapChanged: scheduleInjectPanel()
+  onTodayKeyChanged: scheduleInjectPanel()
+  onLensLabelChanged: scheduleInjectPanel()
+  onPeriodLabelChanged: scheduleInjectPanel()
+  onTotalFocusedChanged: scheduleInjectPanel()
+  onTotalOpenChanged: scheduleInjectPanel()
+  onTotalIdleChanged: scheduleInjectPanel()
+  onTotalLockedChanged: scheduleInjectPanel()
+  onTotalSleepChanged: scheduleInjectPanel()
+  onTotalUnobservedChanged: scheduleInjectPanel()
+  onStatusTextChanged: scheduleInjectPanel()
+  onErrorTextChanged: scheduleInjectPanel()
+  onUpdatedTextChanged: scheduleInjectPanel()
+  onRefreshRunningChanged: scheduleInjectPanel()
 
   Timer {
     interval: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 1000
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: root.refresh(false)
   }
 
   Process {
@@ -93,8 +101,10 @@ BarWidget {
         root.tooltip = "Omastat report failed"
       }
       if (root.refreshQueued) {
+        var queuedFull = root.refreshQueuedFull
         root.refreshQueued = false
-        root.refresh()
+        root.refreshQueuedFull = false
+        root.refresh(queuedFull)
       }
     }
 
@@ -115,7 +125,7 @@ BarWidget {
     source: Qt.resolvedUrl("Panel.qml")
     visible: false
     onLoaded: {
-      root.injectPanel()
+      root.scheduleInjectPanel()
       Qt.callLater(root.injectPanel)
     }
   }
@@ -132,21 +142,26 @@ BarWidget {
 
     onPressed: function(button) {
       if (button === Qt.RightButton) root.toggleIconOnly()
-      else if (button === Qt.MiddleButton) root.refresh()
+      else if (button === Qt.MiddleButton) root.refresh(root.opened)
       else root.togglePanel()
     }
   }
 
-  function refresh() {
+  function refresh(forceFull) {
+    var full = forceFull === true || (root.opened && !root.panelDataLoaded)
     if (reportProcess.running) {
       refreshQueued = true
+      refreshQueuedFull = refreshQueuedFull || full
       return
     }
     loadingLens = selectedLens
     loadingOffset = selectedOffset
+    loadingFullReport = full
     errorText = ""
-    statusText = "Refreshing"
-    reportProcess.command = shellCommand(summaryCommand(loadingLens, loadingOffset))
+    statusText = full ? "Loading analytics" : "Refreshing"
+    reportProcess.command = shellCommand(full
+      ? summaryCommand(loadingLens, loadingOffset)
+      : widgetSummaryCommand(loadingLens, loadingOffset))
     reportProcess.running = true
   }
 
@@ -158,9 +173,15 @@ BarWidget {
 
     selectedLens = nextLens
     selectedOffset = nextOffset
-    var cached = reportsByKey[reportKey(selectedLens, selectedOffset)]
-    if (cached) applyReport(cached, false)
-    else refresh()
+    var key = reportKey(selectedLens, selectedOffset)
+    var cached = cachedReport(key)
+    if (cached) {
+      applyReport(cached, false)
+      return
+    }
+    var summary = cachedSummary(key)
+    if (summary) applyWidgetSummary(summary, false)
+    refresh(true)
   }
 
   function shiftPeriod(delta) {
@@ -179,12 +200,16 @@ BarWidget {
       return
     }
 
-    var report = normalizeReport(parsed)
     var key = reportKey(loadingLens, loadingOffset)
-    var cache = reportsByKey || {}
-    cache[key] = report
-    reportsByKey = cache
-    if (key === currentKey) applyReport(report, true)
+    if (loadingFullReport) {
+      var report = normalizeReport(parsed)
+      cacheReport(key, report)
+      if (key === currentKey) applyReport(report, true)
+    } else {
+      var summary = normalizeWidgetSummary(parsed)
+      cacheSummary(key, summary)
+      if (key === currentKey) applyWidgetSummary(summary, true)
+    }
   }
 
   function applyReport(report, markUpdated) {
@@ -204,8 +229,27 @@ BarWidget {
     totalSleep = report.totalSleep
     totalUnobserved = report.totalUnobserved
     if (markUpdated) updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
+    panelDataLoaded = true
     updateDisplay(report)
-    injectPanel()
+    scheduleInjectPanel()
+  }
+
+  function applyWidgetSummary(summary, markUpdated) {
+    todayKey = summary.todayKey
+    lensLabel = summary.lensLabel
+    periodLabel = summary.periodLabel
+    totalFocused = summary.totalFocused
+    totalOpen = summary.totalOpen
+    totalIdle = summary.totalIdle
+    totalLocked = summary.totalLocked
+    totalSleep = summary.totalSleep
+    totalUnobserved = summary.totalUnobserved
+    if (markUpdated) updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
+    displayText = root.glyph + " " + summary.displayValue
+    tooltip = summary.tooltip
+    statusText = summary.statusText
+    errorText = ""
+    scheduleInjectPanel()
   }
 
   function clearReport(error, status) {
@@ -224,6 +268,7 @@ BarWidget {
     totalLocked = 0
     totalSleep = 0
     totalUnobserved = 0
+    panelDataLoaded = false
     errorText = error
     statusText = status
   }
@@ -249,6 +294,15 @@ BarWidget {
       ? String(report.widgetInsight.text)
       : Math.max(report.rows.length, report.apps.length) + " apps with focus"
     errorText = ""
+  }
+
+  function scheduleInjectPanel() {
+    if (injectQueued) return
+    injectQueued = true
+    Qt.callLater(function() {
+      injectQueued = false
+      injectPanel()
+    })
   }
 
   function injectPanel() {
@@ -282,7 +336,10 @@ BarWidget {
   }
 
   function open() {
-    if (panelLoader.item) panelLoader.item.open()
+    if (panelLoader.item) {
+      panelLoader.item.open()
+      refresh(true)
+    }
   }
 
   function close() {
@@ -290,7 +347,10 @@ BarWidget {
   }
 
   function togglePanel() {
-    if (panelLoader.item) panelLoader.item.toggle()
+    if (!panelLoader.item) return
+    var wasOpen = opened
+    panelLoader.item.toggle()
+    if (!wasOpen) refresh(true)
   }
 
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
@@ -316,6 +376,13 @@ BarWidget {
     return "omastat summary --lens " + safeLens
       + " --offset " + safeOffset
       + " --days 31"
+  }
+
+  function widgetSummaryCommand(lens, offset) {
+    var safeLens = normalizedLens(lens)
+    var safeOffset = safeLens === "life" ? 0 : Math.min(0, Math.floor(Number(offset) || 0))
+    return "omastat widget-summary --lens " + safeLens
+      + " --offset " + safeOffset
   }
 
   function shellCommand(command) {
@@ -375,6 +442,72 @@ BarWidget {
       totalSleep: numericField(object, "total_sleep_seconds", 0),
       totalUnobserved: numericField(object, "total_unobserved_seconds", 0)
     }
+  }
+
+  function normalizeWidgetSummary(parsed) {
+    var object = parsed && typeof parsed === "object" ? parsed : {}
+    return {
+      todayKey: String(object.today_key || ""),
+      lensLabel: String(object.lens_label || object.lens || "DAY").toUpperCase(),
+      periodLabel: object.period && typeof object.period === "object" ? String(object.period.label || "Today") : "Today",
+      totalFocused: numericField(object, "total_focused_seconds", 0),
+      totalOpen: numericField(object, "total_open_seconds", 0),
+      totalIdle: numericField(object, "total_idle_seconds", 0),
+      totalLocked: numericField(object, "total_locked_seconds", 0),
+      totalSleep: numericField(object, "total_sleep_seconds", 0),
+      totalUnobserved: numericField(object, "total_unobserved_seconds", 0),
+      displayValue: String(object.display_value || formatDuration(numericField(object, "total_focused_seconds", 0))),
+      tooltip: String(object.tooltip || "Omastat"),
+      statusText: String(object.status_text || "")
+    }
+  }
+
+  function cacheReport(key, report) {
+    var cache = reportsByKey || {}
+    cache[key] = {
+      report: report,
+      updatedAt: nowMs()
+    }
+    reportsByKey = pruneCache(cache)
+  }
+
+  function cacheSummary(key, summary) {
+    var cache = summariesByKey || {}
+    cache[key] = {
+      summary: summary,
+      updatedAt: nowMs()
+    }
+    summariesByKey = pruneCache(cache)
+  }
+
+  function cachedReport(key) {
+    var entry = reportsByKey ? reportsByKey[key] : null
+    if (!entry || !entry.report) return null
+    if (nowMs() - Number(entry.updatedAt || 0) > fullReportTtlMs) return null
+    return entry.report
+  }
+
+  function cachedSummary(key) {
+    var entry = summariesByKey ? summariesByKey[key] : null
+    if (!entry || !entry.summary) return null
+    if (nowMs() - Number(entry.updatedAt || 0) > summaryTtlMs) return null
+    return entry.summary
+  }
+
+  function nowMs() {
+    return Number(new Date().getTime())
+  }
+
+  function pruneCache(cache) {
+    var keys = Object.keys(cache || {})
+    if (keys.length <= cacheMaxEntries) return cache
+    keys.sort(function(left, right) {
+      return Number((cache[right] && cache[right].updatedAt) || 0)
+        - Number((cache[left] && cache[left].updatedAt) || 0)
+    })
+    var keep = {}
+    for (var i = 0; i < Math.min(keys.length, cacheMaxEntries); i++) keep[keys[i]] = cache[keys[i]]
+    return keep
   }
 
   function sumSeconds(list, key) {

@@ -1,4 +1,5 @@
 use crate::{
+    analytics, clock,
     config::Config,
     insights::{Insight, InsightCategory, InsightTone},
     report::{self, Lens, UsageReport},
@@ -79,7 +80,19 @@ pub fn render_html(
         options.offset.min(0)
     };
     let initial_key = period_key(requested_lens, requested_offset);
-    let storage_status = storage.usage_status().unwrap_or_default();
+    let (storage_status, mut health_warnings) = match storage.usage_status() {
+        Ok(status) => (status, Vec::new()),
+        Err(error) => (
+            StorageStatus::default(),
+            vec![format!("storage health unavailable: {error:#}")],
+        ),
+    };
+    health_warnings.extend(
+        config
+            .warnings()
+            .into_iter()
+            .map(|warning| format!("config {}: {}", warning.field, warning.message)),
+    );
     let mut periods = Vec::new();
     for lens in Lens::ALL {
         let seed_offset = if lens == requested_lens {
@@ -93,6 +106,7 @@ pub fn render_html(
                 steam,
                 config,
                 &storage_status,
+                &health_warnings,
                 lens,
                 offset,
             )?);
@@ -146,7 +160,7 @@ pub fn build_data_export(
     Ok(DataExport {
         schema_version: 1,
         generated_at: report.generated_at,
-        timezone: Local::now().offset().to_string(),
+        timezone: clock::local_now().offset().to_string(),
         query_start_ts: report.query_start_ts,
         query_end_ts: report.query_end_ts,
         period: report.period,
@@ -304,38 +318,13 @@ impl ExportStats {
         focus_intervals: &[TimelineInterval],
     ) -> Self {
         let total_days = report.daily.len();
-        let active_days = report
-            .daily
-            .iter()
-            .filter(|day| day.focused_seconds > 0)
-            .count();
-        let daily_average_seconds = average(report.total_focused_seconds, total_days);
-        let active_day_average_seconds = average(report.total_focused_seconds, active_days);
-        let longest_streak_days = longest_focus_streak(&report.daily);
-
-        let mut durations = focus_intervals
-            .iter()
-            .map(|interval| interval.ended_at.saturating_sub(interval.started_at))
-            .filter(|seconds| *seconds > 0)
-            .collect::<Vec<_>>();
-        let focus_block_count = durations.len();
-        let total_block_seconds = durations.iter().sum::<i64>();
-        durations.sort_unstable();
-        let average_block_seconds = average(total_block_seconds, focus_block_count);
-        let median_block_seconds = median(&durations);
-        let longest_block_seconds = durations.last().copied().unwrap_or_default();
-        let deep_block_count = durations
-            .iter()
-            .filter(|seconds| **seconds >= 25 * 60)
-            .count();
-        let deep_block_seconds = durations
-            .iter()
-            .filter(|seconds| **seconds >= 25 * 60)
-            .sum::<i64>();
-        let app_switch_count = focus_intervals
-            .windows(2)
-            .filter(|pair| pair[0].app_class != pair[1].app_class)
-            .count();
+        let active_days = analytics::active_day_count(&report.daily);
+        let daily_average_seconds = analytics::average(report.total_focused_seconds, total_days);
+        let active_day_average_seconds =
+            analytics::average(report.total_focused_seconds, active_days);
+        let longest_streak_days = analytics::longest_active_streak(&report.daily);
+        let block_stats = analytics::focus_block_stats(focus_intervals);
+        let app_switch_count = analytics::app_switch_count(focus_intervals);
         let peak_hour = hour_totals(heatmap).into_iter().next();
         let top_app_share = report
             .rows
@@ -343,7 +332,8 @@ impl ExportStats {
             .find(|row| row.focused_seconds > 0)
             .map(|row| ratio(row.focused_seconds, report.total_focused_seconds.max(1)))
             .unwrap_or_default();
-        let effective_apps = effective_app_count(&report.rows, report.total_focused_seconds);
+        let effective_apps =
+            analytics::effective_app_count(&report.rows, report.total_focused_seconds);
 
         Self {
             total_days,
@@ -351,13 +341,13 @@ impl ExportStats {
             daily_average_seconds,
             active_day_average_seconds,
             longest_streak_days,
-            focus_block_count,
+            focus_block_count: block_stats.count,
             app_switch_count,
-            average_block_seconds,
-            median_block_seconds,
-            longest_block_seconds,
-            deep_block_count,
-            deep_block_seconds,
+            average_block_seconds: block_stats.average_seconds,
+            median_block_seconds: block_stats.median_seconds,
+            longest_block_seconds: block_stats.longest_seconds,
+            deep_block_count: block_stats.deep_count,
+            deep_block_seconds: block_stats.deep_seconds,
             peak_hour,
             top_app_share,
             effective_apps,
@@ -409,16 +399,18 @@ fn build_dashboard_period(
     steam: &mut SteamResolver,
     config: &Config,
     storage_status: &StorageStatus,
+    health_warnings: &[String],
     lens: Lens,
     offset: i32,
 ) -> Result<DashboardPeriodPayload> {
-    let report = if lens == Lens::Day && offset == 0 {
-        report::usage_report(storage, steam, config, lens, lens.history_days())?
+    let report_with_rollups = if lens == Lens::Day && offset == 0 {
+        report::usage_report_with_rollups(storage, steam, config, lens, lens.history_days())?
     } else {
-        report::usage_report_for_period(storage, steam, config, lens, offset)?
+        report::usage_report_with_rollups_for_period(storage, steam, config, lens, offset)?
     };
+    let report = report_with_rollups.report;
     let (start_ts, end_ts) = (report.query_start_ts, report.query_end_ts);
-    let mut rollups = storage.focused_rollups_between(start_ts, end_ts, 8, 64)?;
+    let mut rollups = report_with_rollups.rollups;
     for row in &mut rollups.daily_apps {
         row.app_class = steam.resolve_class(&row.app_class);
     }
@@ -540,7 +532,7 @@ fn build_dashboard_period(
             end_ts,
         ),
         gap_summary: gap_summary(&system_intervals, &report),
-        system_health: system_health_panel(storage_status, &report),
+        system_health: system_health_panel(storage_status, &report, health_warnings),
         app_table: app_table(&report.rows, report.total_focused_seconds),
         stacked_days: stacked_day_chart(&report.daily, &rollups.daily_apps, &report.rows),
         heatmap_chart: heatmap_chart(&rollups.heatmap),
@@ -2452,7 +2444,11 @@ fn gap_summary(system_intervals: &[SystemTimelineInterval], report: &UsageReport
     ])
 }
 
-fn system_health_panel(status: &StorageStatus, report: &UsageReport) -> String {
+fn system_health_panel(
+    status: &StorageStatus,
+    report: &UsageReport,
+    warnings: &[String],
+) -> String {
     let active_total = status
         .focused_active
         .saturating_add(status.open_active)
@@ -2460,7 +2456,7 @@ fn system_health_panel(status: &StorageStatus, report: &UsageReport) -> String {
         .saturating_add(status.locked_active)
         .saturating_add(status.sleep_active)
         .saturating_add(status.daemon_active);
-    metric_rows(&[
+    let mut rows = vec![
         ("Rows", compact_count(status.interval_count)),
         ("Active intervals", active_total.to_string()),
         (
@@ -2485,7 +2481,9 @@ fn system_health_panel(status: &StorageStatus, report: &UsageReport) -> String {
                 report::format_duration(report.total_open_seconds)
             ),
         ),
-    ])
+    ];
+    rows.extend(warnings.iter().map(|warning| ("Warning", warning.clone())));
+    metric_rows(&rows)
 }
 
 fn metric_rows(rows: &[(&str, String)]) -> String {
@@ -2982,22 +2980,8 @@ fn insight_tone_label(tone: InsightTone) -> &'static str {
     }
 }
 
-fn longest_focus_streak(days: &[DayTotals]) -> usize {
-    let mut longest = 0;
-    let mut current = 0;
-    for day in days {
-        if day.focused_seconds > 0 {
-            current += 1;
-            longest = longest.max(current);
-        } else {
-            current = 0;
-        }
-    }
-    longest
-}
-
 fn visible_chart_days(days: &[DayTotals]) -> Vec<&DayTotals> {
-    let today = Local::now().format("%Y-%m-%d").to_string();
+    let today = clock::local_now().format("%Y-%m-%d").to_string();
     days.iter()
         .filter(|day| {
             day.date.as_str() <= today.as_str()
@@ -3145,7 +3129,10 @@ fn ago_label(timestamp: Option<i64>) -> String {
     let Some(timestamp) = timestamp else {
         return "never".to_string();
     };
-    let seconds = Local::now().timestamp().saturating_sub(timestamp).max(0);
+    let seconds = clock::local_now()
+        .timestamp()
+        .saturating_sub(timestamp)
+        .max(0);
     format!("{} ago", report::format_duration(seconds))
 }
 
@@ -3160,59 +3147,12 @@ fn widgets_fit(value: &str, width: usize) -> String {
         + "..."
 }
 
-fn average(total: i64, count: usize) -> i64 {
-    if count == 0 {
-        0
-    } else {
-        total.max(0) / count as i64
-    }
-}
-
-fn median(sorted: &[i64]) -> i64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let mid = sorted.len() / 2;
-    if sorted.len().is_multiple_of(2) {
-        (sorted[mid - 1] + sorted[mid]) / 2
-    } else {
-        sorted[mid]
-    }
-}
-
 fn hour_totals(cells: &[FocusHeatCell]) -> Vec<(u32, i64)> {
-    let mut totals = [0_i64; 24];
-    for cell in cells {
-        if let Some(total) = totals.get_mut(cell.hour as usize) {
-            *total += cell.focused_seconds.max(0);
-        }
-    }
-    let mut rows = totals
-        .into_iter()
-        .enumerate()
-        .map(|(hour, focused_seconds)| (hour as u32, focused_seconds))
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    rows
+    analytics::hour_totals(cells)
 }
 
 fn hour_label(hour: u32) -> String {
     format!("{:02}:00", hour.min(23))
-}
-
-fn effective_app_count(rows: &[AppTotals], total_focused_seconds: i64) -> f64 {
-    if total_focused_seconds <= 0 {
-        return 0.0;
-    }
-
-    let entropy = rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .map(|row| row.focused_seconds as f64 / total_focused_seconds as f64)
-        .filter(|share| *share > 0.0)
-        .map(|share| -share * share.ln())
-        .sum::<f64>();
-    entropy.exp()
 }
 
 fn excluded_seconds(day: &DayTotals) -> i64 {
@@ -3252,12 +3192,12 @@ mod tests {
         write_data_export_csv,
     };
     use crate::{
+        clock,
         config::Config,
         report::Lens,
         steam::SteamResolver,
         storage::{IntervalKind, Storage},
     };
-    use chrono::Local;
 
     #[test]
     fn renders_one_page_export_with_escaped_title_data() {
@@ -3265,7 +3205,7 @@ mod tests {
         let db = dir.path().join("test.db");
         let config = Config::default();
         let storage = Storage::open(Some(&db), &config).unwrap();
-        let end = Local::now().timestamp();
+        let end = clock::local_now().timestamp();
         let start = end - 1800;
         let focused = storage
             .start_interval(

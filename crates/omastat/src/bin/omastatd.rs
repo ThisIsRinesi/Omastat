@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let config = Config::load(args.config.as_deref())?;
+    config.log_warnings();
     let storage = Storage::open(args.database.as_deref(), &config)?;
     let mut tracker = Tracker::new(storage, config);
     tracker.run().await

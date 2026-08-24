@@ -1,4 +1,4 @@
-use crate::{config::Config, identity, steam::SteamResolver};
+use crate::{clock, config::Config, identity, steam::SteamResolver};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, TimeZone, Timelike};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
@@ -344,6 +344,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "add report rollup query indexes",
         up: migrate_0007_add_report_indexes,
     },
+    Migration {
+        version: 8,
+        description: "enforce one active interval per tracked state",
+        up: migrate_0008_add_active_interval_invariants,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,12 +495,13 @@ impl Storage {
     }
 
     pub fn close_interval(&self, id: i64, ended_at: i64) -> Result<()> {
-        self.conn.execute(
+        let updated = self.conn.execute(
             "UPDATE intervals
              SET ended_at = ?1
              WHERE id = ?2 AND ended_at IS NULL",
             params![ended_at, id],
         )?;
+        ensure_row_was_closeable(&self.conn, "intervals", id, updated)?;
         Ok(())
     }
 
@@ -522,12 +528,13 @@ impl Storage {
     }
 
     pub fn close_session_interval(&self, id: i64, ended_at: i64) -> Result<()> {
-        self.conn.execute(
+        let updated = self.conn.execute(
             "UPDATE session_intervals
              SET ended_at = ?1
              WHERE id = ?2 AND ended_at IS NULL",
             params![ended_at, id],
         )?;
+        ensure_row_was_closeable(&self.conn, "session_intervals", id, updated)?;
         Ok(())
     }
 
@@ -576,7 +583,7 @@ impl Storage {
     }
 
     pub fn close_system_interval(&self, id: i64, ended_at: i64) -> Result<()> {
-        self.conn.execute(
+        let updated = self.conn.execute(
             "
             UPDATE unobserved_intervals
             SET ended_at = MAX(started_at, ?1)
@@ -585,6 +592,7 @@ impl Storage {
             ",
             params![ended_at, id],
         )?;
+        ensure_row_was_closeable(&self.conn, "unobserved_intervals", id, updated)?;
         Ok(())
     }
 
@@ -707,7 +715,7 @@ impl Storage {
 
     pub fn finish_daemon_run(&mut self, run_id: i64, now: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute(
+        let updated = tx.execute(
             "
             UPDATE daemon_runs
             SET last_heartbeat_at = MAX(last_heartbeat_at, ?1),
@@ -718,6 +726,9 @@ impl Storage {
             ",
             params![now, run_id],
         )?;
+        if updated == 0 {
+            anyhow::bail!("daemon run {run_id} is not active");
+        }
         insert_daemon_event_tx(&tx, run_id, "clean-stop", now, None)?;
         tx.commit()?;
         Ok(())
@@ -783,7 +794,7 @@ impl Storage {
     }
 
     pub fn totals_for_today(&self) -> Result<Vec<AppTotals>> {
-        let now = Local::now();
+        let now = clock::local_now();
         let start = Local
             .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
             .single()
@@ -793,7 +804,7 @@ impl Storage {
     }
 
     pub fn totals_for_week(&self) -> Result<Vec<AppTotals>> {
-        let now = Local::now();
+        let now = clock::local_now();
         let days_from_monday = now.weekday().num_days_from_monday() as i64;
         let today_start = Local
             .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
@@ -806,7 +817,7 @@ impl Storage {
     }
 
     pub fn totals_for_month(&self) -> Result<Vec<AppTotals>> {
-        let now = Local::now();
+        let now = clock::local_now();
         let start = Local
             .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
             .single()
@@ -816,7 +827,7 @@ impl Storage {
     }
 
     pub fn totals_for_year(&self) -> Result<Vec<AppTotals>> {
-        let now = Local::now();
+        let now = clock::local_now();
         let start = Local
             .with_ymd_and_hms(now.year(), 1, 1, 0, 0, 0)
             .single()
@@ -826,7 +837,7 @@ impl Storage {
     }
 
     pub fn totals_all_time(&self) -> Result<Vec<AppTotals>> {
-        let now = Local::now().timestamp();
+        let now = clock::local_now().timestamp();
         let start: i64 = self
             .conn
             .query_row("SELECT MIN(started_at) FROM intervals", [], |row| {
@@ -839,7 +850,7 @@ impl Storage {
     }
 
     pub fn daily_totals(&self, days: u32) -> Result<Vec<DayTotals>> {
-        let now = Local::now();
+        let now = clock::local_now();
         let today_start = Local
             .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
             .single()
@@ -999,7 +1010,7 @@ impl Storage {
     }
 
     pub fn timeline_for_today(&self) -> Result<Vec<TimelineInterval>> {
-        let now = Local::now();
+        let now = clock::local_now();
         let start = Local
             .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
             .single()
@@ -1111,7 +1122,7 @@ impl Storage {
     }
 
     pub fn total_duration(&self) -> Result<i64> {
-        let now = Local::now().timestamp();
+        let now = clock::local_now().timestamp();
         let start: i64 = self
             .conn
             .query_row("SELECT MIN(started_at) FROM intervals", [], |row| {
@@ -1668,6 +1679,7 @@ impl Storage {
     pub fn repair_titles(
         &mut self,
         steam: &mut SteamResolver,
+        config: &Config,
         dry_run: bool,
     ) -> Result<TitleRepair> {
         let class_counts = self.app_class_counts()?;
@@ -1682,24 +1694,37 @@ impl Storage {
             }
         }
 
-        let mut title_counts = BTreeMap::<String, i64>::new();
-        for (app_class, rows) in self.missing_focused_title_counts()? {
-            let app_class = class_update_map
-                .get(&app_class)
-                .cloned()
-                .unwrap_or(app_class);
-            *title_counts.entry(app_class).or_default() += rows;
-        }
+        let title_updates = if config.capture_titles() {
+            let mut title_counts = BTreeMap::<String, i64>::new();
+            for (app_class, rows) in self.missing_focused_title_counts()? {
+                let app_class = class_update_map
+                    .get(&app_class)
+                    .cloned()
+                    .unwrap_or(app_class);
+                *title_counts.entry(app_class).or_default() += rows;
+            }
 
-        let title_updates = title_counts
-            .into_iter()
-            .map(|(app_class, rows)| TitleFill {
-                title: identity::display_name(&app_class),
-                app_class,
-                rows,
-            })
-            .collect::<Vec<_>>();
-        let title_normalizations = self.planned_title_normalizations(&class_update_map)?;
+            title_counts
+                .into_iter()
+                .filter_map(|(app_class, rows)| {
+                    let title = identity::display_name(&app_class);
+                    config
+                        .title_allowed(&app_class, &title)
+                        .then_some(TitleFill {
+                            title,
+                            app_class,
+                            rows,
+                        })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let title_normalizations = if config.capture_titles() {
+            self.planned_title_normalizations(&class_update_map, config)?
+        } else {
+            Vec::new()
+        };
         let planned_rewritten_rows = class_updates.iter().map(|update| update.rows).sum();
         let planned_filled_titles = title_updates.iter().map(|update| update.rows).sum();
         let planned_normalized_titles = title_normalizations.iter().map(|update| update.rows).sum();
@@ -2072,7 +2097,35 @@ fn validate_required_schema(conn: &Connection) -> rusqlite::Result<()> {
     ] {
         conn.prepare(statement)?;
     }
+    for index in [
+        "idx_intervals_one_active_focused",
+        "idx_intervals_one_active_open_per_app",
+        "idx_session_intervals_one_active_kind",
+        "idx_unobserved_intervals_one_active_kind",
+        "idx_daemon_runs_one_active",
+    ] {
+        if !index_exists(conn, index)? {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "missing required index {index}"
+            )));
+        }
+    }
     Ok(())
+}
+
+fn index_exists(conn: &Connection, index: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "
+        SELECT EXISTS(
+            SELECT 1
+            FROM sqlite_schema
+            WHERE type = 'index'
+              AND name = ?1
+        )
+        ",
+        params![index],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )
 }
 
 fn read_applied_migration_versions(conn: &Connection) -> Result<BTreeSet<i64>> {
@@ -2229,6 +2282,98 @@ fn migrate_0007_add_report_indexes(tx: &Transaction<'_>) -> rusqlite::Result<()>
             ON session_intervals(kind, started_at, ended_at);
         CREATE INDEX IF NOT EXISTS idx_unobserved_intervals_kind_time
             ON unobserved_intervals(kind, started_at, ended_at);
+        ",
+    )
+}
+
+fn migrate_0008_add_active_interval_invariants(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "
+        UPDATE intervals
+        SET ended_at = started_at
+        WHERE ended_at IS NULL
+          AND id IN (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            CASE
+                                WHEN kind = 'open' THEN 'open:' || app_class
+                                ELSE kind
+                            END
+                        ORDER BY started_at ASC, id ASC
+                    ) AS duplicate_rank
+                FROM intervals
+                WHERE ended_at IS NULL
+            )
+            WHERE duplicate_rank > 1
+          );
+
+        UPDATE session_intervals
+        SET ended_at = started_at
+        WHERE ended_at IS NULL
+          AND id IN (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kind
+                        ORDER BY started_at ASC, id ASC
+                    ) AS duplicate_rank
+                FROM session_intervals
+                WHERE ended_at IS NULL
+            )
+            WHERE duplicate_rank > 1
+          );
+
+        UPDATE unobserved_intervals
+        SET ended_at = started_at
+        WHERE ended_at IS NULL
+          AND id IN (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kind
+                        ORDER BY started_at ASC, id ASC
+                    ) AS duplicate_rank
+                FROM unobserved_intervals
+                WHERE ended_at IS NULL
+            )
+            WHERE duplicate_rank > 1
+          );
+
+        UPDATE daemon_runs
+        SET stopped_at = MAX(started_at, last_heartbeat_at),
+            stop_kind = 'recovered'
+        WHERE stopped_at IS NULL
+          AND id NOT IN (
+              SELECT id
+              FROM daemon_runs
+              WHERE stopped_at IS NULL
+              ORDER BY id DESC
+              LIMIT 1
+          );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_intervals_one_active_focused
+            ON intervals(kind)
+            WHERE kind = 'focused' AND ended_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_intervals_one_active_open_per_app
+            ON intervals(kind, app_class)
+            WHERE kind = 'open' AND ended_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_intervals_one_active_kind
+            ON session_intervals(kind)
+            WHERE ended_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unobserved_intervals_one_active_kind
+            ON unobserved_intervals(kind)
+            WHERE ended_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_runs_one_active
+            ON daemon_runs((1))
+            WHERE stopped_at IS NULL;
         ",
     )
 }
@@ -2512,6 +2657,7 @@ impl Storage {
     fn planned_title_normalizations(
         &self,
         class_update_map: &HashMap<String, String>,
+        config: &Config,
     ) -> Result<Vec<TitleNormalize>> {
         let mut planned = BTreeMap::<(String, String, String), i64>::new();
         for (app_class, title, rows) in self.focused_title_counts()? {
@@ -2523,6 +2669,9 @@ impl Storage {
                 continue;
             };
             if cleaned == title {
+                continue;
+            }
+            if !config.title_allowed(&canonical_app_class, &cleaned) {
                 continue;
             }
             *planned
@@ -2889,6 +3038,22 @@ fn latest_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     }
 }
 
+fn ensure_row_was_closeable(conn: &Connection, table: &str, id: i64, updated: usize) -> Result<()> {
+    if updated > 0 {
+        return Ok(());
+    }
+
+    let exists = conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+        params![id],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if exists {
+        anyhow::bail!("{table} row {id} is already closed");
+    }
+    anyhow::bail!("{table} row {id} does not exist")
+}
+
 fn local_timestamp(timestamp: i64) -> String {
     Local
         .timestamp_opt(timestamp, 0)
@@ -2998,9 +3163,9 @@ fn add_hourly_focus_rollup(totals: &mut BTreeMap<(u32, u32), i64>, started_at: i
 mod tests {
     use super::{
         DaemonRecovery, IntervalKind, IntervalMetadata, SessionIntervalKind, Storage,
-        StorageQuickCheck, StorageSchemaStatus, SystemIntervalKind,
+        StorageQuickCheck, StorageSchemaStatus, SystemIntervalKind, index_exists,
     };
-    use crate::config::Config;
+    use crate::config::{Config, TitleCapture};
     use crate::steam::SteamResolver;
     use chrono::{Datelike, Local, TimeZone};
     use rusqlite::{Connection, params};
@@ -3088,10 +3253,86 @@ mod tests {
         let config = Config::default();
         let storage = Storage::open(Some(&db), &config).unwrap();
 
-        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            migration_versions(&storage.conn),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
         assert!(interval_columns.iter().any(|column| column == "monitor"));
+        for index in [
+            "idx_intervals_one_active_focused",
+            "idx_intervals_one_active_open_per_app",
+            "idx_session_intervals_one_active_kind",
+            "idx_unobserved_intervals_one_active_kind",
+            "idx_daemon_runs_one_active",
+        ] {
+            assert!(index_exists(&storage.conn, index).unwrap(), "{index}");
+        }
+    }
+
+    #[test]
+    fn active_interval_constraints_reject_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        let focused = storage
+            .start_interval(IntervalKind::Focused, "firefox", None, None, 100)
+            .unwrap();
+        assert!(
+            storage
+                .start_interval(IntervalKind::Focused, "code", None, None, 110)
+                .is_err()
+        );
+        storage.close_interval(focused, 120).unwrap();
+        storage
+            .start_interval(IntervalKind::Focused, "code", None, None, 130)
+            .unwrap();
+
+        storage
+            .start_interval(IntervalKind::Open, "firefox", None, None, 100)
+            .unwrap();
+        assert!(
+            storage
+                .start_interval(IntervalKind::Open, "firefox", None, None, 110)
+                .is_err()
+        );
+        storage
+            .start_interval(IntervalKind::Open, "code", None, None, 120)
+            .unwrap();
+
+        storage
+            .start_session_interval(SessionIntervalKind::Idle, Some("test"), 100)
+            .unwrap();
+        assert!(
+            storage
+                .start_session_interval(SessionIntervalKind::Idle, Some("test"), 110)
+                .is_err()
+        );
+
+        storage
+            .start_system_interval(SystemIntervalKind::Sleep, Some("test"), 100)
+            .unwrap();
+        assert!(
+            storage
+                .start_system_interval(SystemIntervalKind::Sleep, Some("test"), 110)
+                .is_err()
+        );
+
+        let first = storage.start_daemon_run(100).unwrap();
+        let second = storage.start_daemon_run(200).unwrap();
+        assert_eq!(second.recovery.unwrap().previous_run_id, Some(first.run_id));
+        let active_runs: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM daemon_runs WHERE stopped_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_runs, 1);
     }
 
     #[test]
@@ -3114,7 +3355,10 @@ mod tests {
 
         let storage = Storage::open(Some(&db), &config).unwrap();
 
-        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            migration_versions(&storage.conn),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
         assert!(interval_columns.iter().any(|column| column == "monitor"));
@@ -3142,7 +3386,10 @@ mod tests {
 
         let storage = Storage::open(Some(&db), &config).unwrap();
 
-        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            migration_versions(&storage.conn),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
     }
 
     #[test]
@@ -3193,7 +3440,10 @@ mod tests {
 
         let storage = Storage::open(Some(&db), &config).unwrap();
 
-        assert_eq!(migration_versions(&storage.conn), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            migration_versions(&storage.conn),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
         let sleep = storage
             .start_system_interval(SystemIntervalKind::Sleep, Some("test"), 200)
             .unwrap();
@@ -3691,7 +3941,7 @@ mod tests {
         assert_eq!(
             diagnostic.schema_status,
             StorageSchemaStatus::Current {
-                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7]
+                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7, 8]
             }
         );
     }
@@ -4065,10 +4315,11 @@ mod tests {
     fn repairs_existing_classes_and_missing_titles() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("test.db");
-        let config = Config::default();
+        let mut config = Config::default();
+        config.privacy.title_capture = TitleCapture::All;
         let mut storage = Storage::open(Some(&db), &config).unwrap();
 
-        storage
+        let discord = storage
             .start_interval(
                 IntervalKind::Focused,
                 "chrome-discord.com__channels_@me-Default",
@@ -4077,18 +4328,20 @@ mod tests {
                 100,
             )
             .unwrap();
-        storage
+        storage.close_interval(discord, 120).unwrap();
+        let ghostty = storage
             .start_interval(
                 IntervalKind::Focused,
                 "com.mitchellh.ghostty",
                 None,
                 None,
-                100,
+                130,
             )
             .unwrap();
+        storage.close_interval(ghostty, 150).unwrap();
 
         let mut steam = SteamResolver::default();
-        let repair = storage.repair_titles(&mut steam, false).unwrap();
+        let repair = storage.repair_titles(&mut steam, &config, false).unwrap();
 
         assert_eq!(repair.rewritten_rows, 1);
         assert_eq!(repair.filled_titles, 2);
@@ -4118,5 +4371,41 @@ mod tests {
                 ("discord".to_string(), "Discord".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn repair_titles_does_not_fill_titles_when_capture_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        let interval = storage
+            .start_interval(
+                IntervalKind::Focused,
+                "chrome-discord.com__channels_@me-Default",
+                None,
+                None,
+                100,
+            )
+            .unwrap();
+        storage.close_interval(interval, 120).unwrap();
+
+        let mut steam = SteamResolver::default();
+        let repair = storage.repair_titles(&mut steam, &config, false).unwrap();
+
+        assert_eq!(repair.rewritten_rows, 1);
+        assert_eq!(repair.filled_titles, 0);
+        let (app_class, title) = storage
+            .conn
+            .query_row(
+                "SELECT app_class, title FROM intervals WHERE kind = 'focused'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(app_class, "discord");
+        assert_eq!(title, None);
     }
 }

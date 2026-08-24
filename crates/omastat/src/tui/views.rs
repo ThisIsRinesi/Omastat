@@ -4,6 +4,7 @@ use super::{
     widgets,
 };
 use crate::{
+    clock,
     insights::{
         Insight, InsightCategory, InsightConfidence, InsightKind, InsightSupport, InsightTone,
     },
@@ -66,9 +67,9 @@ pub(super) fn render_tiny(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
 pub(super) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     widgets::fill_area(frame, area, theme.bg);
     let clock = if area.width < 86 {
-        Local::now().format("%H:%M").to_string()
+        clock::local_now().format("%H:%M").to_string()
     } else {
-        Local::now().format("%H:%M:%S").to_string()
+        clock::local_now().format("%H:%M:%S").to_string()
     };
 
     let mut first = vec![
@@ -168,7 +169,7 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
         app.view().label(),
         app.lens().label()
     );
-    let right = format!("5s auto {status}");
+    let right = format!("30s auto {status}");
     let width = area.width as usize;
     let left_len = left.chars().count();
     let right_len = right.chars().count();

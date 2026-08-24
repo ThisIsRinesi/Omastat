@@ -53,6 +53,7 @@ Panel {
     { label: "Life", lens: "life" }
   ]
   readonly property bool compactPanel: panel.width > 0 && panel.width < Style.space(560)
+  readonly property bool narrowPanel: panel.width > 0 && panel.width < Style.space(430)
   readonly property int tileColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 4)
   readonly property bool appMixStacked: compactPanel
   readonly property bool usesCalendar: selectedLens === "month" || selectedLens === "year" || selectedLens === "life"
@@ -61,8 +62,7 @@ Panel {
   readonly property string displayTodayKey: selectedOffset === 0 ? todayKey : ""
   readonly property int totalExcluded: totalIdle + totalLocked + totalSleep + totalUnobserved
   readonly property string focusShareText: totalOpen > 0 ? Model.percent(totalFocused / totalOpen) : "--"
-  readonly property var apps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
-  readonly property var visibleApps: Model.groupedApps(apps, Model.DONUT_MAX_SLICES)
+  readonly property var visibleApps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
   readonly property var sliceColors: Model.sliceColors(visibleApps.length, Color.accent)
   readonly property var segments: Model.arcSegments(visibleApps)
   readonly property var trendDays: Model.trendDays(daily, displayTodayKey, selectedLens)
@@ -82,7 +82,7 @@ Panel {
   onHeatmapChanged: inspectedHeatIndex = -1
 
   function refresh() {
-    if (hostWidget && hostWidget.refresh) hostWidget.refresh()
+    if (hostWidget && hostWidget.refresh) hostWidget.refresh(true)
   }
 
   function setLens(lens) {
@@ -96,6 +96,10 @@ Panel {
 
   function formatDuration(seconds) {
     return Model.fmt(seconds)
+  }
+
+  function compactLensLabel(label) {
+    return root.narrowPanel ? String(label || "").substr(0, 1) : String(label || "")
   }
 
   function sliceColor(index, alpha) {
@@ -211,6 +215,7 @@ Panel {
           Rectangle {
             width: Style.space(42)
             height: width
+            visible: !root.narrowPanel
             radius: Style.space(8)
             color: root.fill
             border.color: root.line
@@ -227,7 +232,7 @@ Panel {
           }
 
           Column {
-            width: parent.width - Style.space(54)
+            width: Math.max(0, parent.width - (root.narrowPanel ? 0 : Style.space(54)))
             spacing: Style.space(2)
             anchors.verticalCenter: parent.verticalCenter
 
@@ -243,7 +248,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: root.periodLabel + "  -  " + root.lensLabel
+              text: root.narrowPanel ? root.periodLabel : root.periodLabel + "  -  " + root.lensLabel
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -359,7 +364,7 @@ Panel {
                 width: root.availableLenses.length > 0
                   ? (parent.width - parent.spacing * (root.availableLenses.length - 1)) / root.availableLenses.length
                   : 0
-                label: String(modelData.label || "")
+                label: root.compactLensLabel(modelData.label)
                 lens: String(modelData.lens || "day")
                 selected: root.selectedLens === lens
                 onSelectedLens: function(lens) { root.setLens(lens) }
@@ -489,7 +494,7 @@ Panel {
           }
 
           SectionHeader {
-            text: root.usesWeeklyCalendar ? "Weekly Activity" : (root.usesCalendar ? "Activity Calendar" : "Daily Focus")
+            text: root.selectedLens === "life" ? "Recent Weekly Activity" : (root.usesWeeklyCalendar ? "Weekly Activity" : (root.usesCalendar ? "Activity Calendar" : "Daily Focus"))
             visible: root.trendDays.length > 0
           }
 
@@ -1216,10 +1221,11 @@ Panel {
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
 
-    readonly property real gap: Style.space(4)
+    readonly property bool cramped: width > 0 && width < Style.space(360)
+    readonly property real gap: cramped ? Style.space(2) : Style.space(4)
     readonly property int columnCount: weekly ? 13 : 7
     readonly property var headerLabels: weekly ? Model.bucketLabels(columnCount) : Model.weekdayLabels()
-    readonly property real cellSize: Math.max(Style.space(16), Math.min(Style.space(38), (width - Style.space(24) - gap * (columnCount - 1)) / columnCount))
+    readonly property real cellSize: Math.max(Style.space(8), Math.min(Style.space(38), (width - Style.space(24) - gap * (columnCount - 1)) / columnCount))
     readonly property int rowCount: Math.ceil(cells.length / columnCount)
 
     implicitHeight: Style.space(48) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
@@ -1340,10 +1346,11 @@ Panel {
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
 
-    readonly property real labelWidth: Style.space(30)
-    readonly property real gap: Style.space(2)
-    readonly property real cellWidth: Math.max(Style.space(5), (width - Style.space(24) - labelWidth - gap * 23) / 24)
-    readonly property real cellHeight: Style.space(10)
+    readonly property bool cramped: width > 0 && width < Style.space(430)
+    readonly property real labelWidth: cramped ? Style.space(22) : Style.space(30)
+    readonly property real gap: cramped ? Style.space(1) : Style.space(2)
+    readonly property real cellWidth: Math.max(Style.space(2), (width - Style.space(24) - labelWidth - gap * 23) / 24)
+    readonly property real cellHeight: cramped ? Style.space(8) : Style.space(10)
 
     implicitHeight: Style.space(158)
     radius: Style.space(7)

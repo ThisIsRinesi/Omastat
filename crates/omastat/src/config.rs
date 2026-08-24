@@ -16,6 +16,12 @@ pub struct Config {
     pub goals: GoalsConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigWarning {
+    pub field: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrivacyConfig {
     #[serde(default)]
@@ -160,6 +166,160 @@ impl Config {
             .filter(|seconds| *seconds > 0)
     }
 
+    pub fn warnings(&self) -> Vec<ConfigWarning> {
+        let mut warnings = Vec::new();
+        warn_below_runtime_minimum(
+            &mut warnings,
+            "tracking.reconcile_seconds",
+            self.tracking.reconcile_seconds,
+            30,
+        );
+        warn_below_runtime_minimum(
+            &mut warnings,
+            "tracking.session_poll_seconds",
+            self.tracking.session_poll_seconds,
+            15,
+        );
+        warn_below_runtime_minimum(
+            &mut warnings,
+            "tracking.terminal_resolve_seconds",
+            self.tracking.terminal_resolve_seconds,
+            2,
+        );
+        warn_below_runtime_minimum(
+            &mut warnings,
+            "tracking.heartbeat_seconds",
+            self.tracking.heartbeat_seconds,
+            15,
+        );
+
+        if self.goals.daily_focus_seconds.is_some() && self.goals.daily_focus_minutes.is_some() {
+            warnings.push(ConfigWarning {
+                field: "goals.daily_focus_seconds".to_string(),
+                message: "daily_focus_seconds and daily_focus_minutes are both set; seconds takes precedence"
+                    .to_string(),
+            });
+        }
+        warn_non_positive_duration(
+            &mut warnings,
+            "goals.daily_focus_seconds",
+            self.goals.daily_focus_seconds,
+        );
+        warn_non_positive_duration(
+            &mut warnings,
+            "goals.daily_focus_minutes",
+            self.goals.daily_focus_minutes,
+        );
+
+        if !self.capture_titles()
+            && (!self.privacy.title_allowlist.is_empty()
+                || !self.privacy.title_blocklist.is_empty())
+        {
+            warnings.push(ConfigWarning {
+                field: "privacy.title_capture".to_string(),
+                message: "title allow/block lists are ignored while title_capture is off"
+                    .to_string(),
+            });
+        }
+
+        for (app_class, rule) in &self.apps {
+            if app_class.trim().is_empty() {
+                warnings.push(ConfigWarning {
+                    field: "apps".to_string(),
+                    message: "empty app class rule is ignored".to_string(),
+                });
+            }
+            if rule
+                .alias
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                warnings.push(ConfigWarning {
+                    field: format!("apps.{app_class}.alias"),
+                    message: "empty alias is ignored".to_string(),
+                });
+            }
+            if rule
+                .category
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                warnings.push(ConfigWarning {
+                    field: format!("apps.{app_class}.category"),
+                    message: "empty category falls back to neutral".to_string(),
+                });
+            }
+        }
+
+        for (index, budget) in self.goals.app_budgets.iter().enumerate() {
+            let field = format!("goals.app_budgets[{index}]");
+            let has_app = budget
+                .app
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_category = budget
+                .category
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            if has_app == has_category {
+                warnings.push(ConfigWarning {
+                    field: field.clone(),
+                    message: "budget must set exactly one of app or category".to_string(),
+                });
+            }
+            if budget.daily_limit_seconds().is_none() && budget.weekly_limit_seconds().is_none() {
+                warnings.push(ConfigWarning {
+                    field: field.clone(),
+                    message: "budget has no positive daily or weekly limit".to_string(),
+                });
+            }
+            if budget.daily_seconds.is_some() && budget.daily_minutes.is_some() {
+                warnings.push(ConfigWarning {
+                    field: format!("{field}.daily_seconds"),
+                    message:
+                        "daily_seconds and daily_minutes are both set; seconds takes precedence"
+                            .to_string(),
+                });
+            }
+            if budget.weekly_seconds.is_some() && budget.weekly_minutes.is_some() {
+                warnings.push(ConfigWarning {
+                    field: format!("{field}.weekly_seconds"),
+                    message:
+                        "weekly_seconds and weekly_minutes are both set; seconds takes precedence"
+                            .to_string(),
+                });
+            }
+            warn_non_positive_duration(
+                &mut warnings,
+                &format!("{field}.daily_seconds"),
+                budget.daily_seconds,
+            );
+            warn_non_positive_duration(
+                &mut warnings,
+                &format!("{field}.daily_minutes"),
+                budget.daily_minutes,
+            );
+            warn_non_positive_duration(
+                &mut warnings,
+                &format!("{field}.weekly_seconds"),
+                budget.weekly_seconds,
+            );
+            warn_non_positive_duration(
+                &mut warnings,
+                &format!("{field}.weekly_minutes"),
+                budget.weekly_minutes,
+            );
+        }
+
+        warnings
+    }
+
+    pub fn log_warnings(&self) {
+        for warning in self.warnings() {
+            tracing::warn!(config_field = warning.field.as_str(), "{}", warning.message);
+        }
+    }
+
     fn app_rule(&self, app_class: &str) -> Option<&AppConfig> {
         self.apps
             .get(app_class)
@@ -238,6 +398,31 @@ fn default_pause_on_session_idle() -> bool {
 
 fn default_pause_on_session_locked() -> bool {
     true
+}
+
+fn warn_below_runtime_minimum(
+    warnings: &mut Vec<ConfigWarning>,
+    field: &'static str,
+    value: u64,
+    minimum: u64,
+) {
+    if value < minimum {
+        warnings.push(ConfigWarning {
+            field: field.to_string(),
+            message: format!(
+                "value {value} is below runtime minimum {minimum}; daemon will clamp it"
+            ),
+        });
+    }
+}
+
+fn warn_non_positive_duration(warnings: &mut Vec<ConfigWarning>, field: &str, value: Option<i64>) {
+    if value.is_some_and(|seconds| seconds <= 0) {
+        warnings.push(ConfigWarning {
+            field: field.to_string(),
+            message: "non-positive duration is ignored".to_string(),
+        });
+    }
 }
 
 fn default_config_path() -> PathBuf {
@@ -328,5 +513,42 @@ mod tests {
         assert!(config.title_allowed("code", "Issue 123"));
         assert!(!config.title_allowed("code", "Calendar"));
         assert!(!config.title_allowed("code", "Issue secret"));
+    }
+
+    #[test]
+    fn warnings_explain_clamped_and_ambiguous_config() {
+        let mut config = Config::default();
+        config.tracking.reconcile_seconds = 1;
+        config.privacy.title_allowlist = vec!["issue".to_string()];
+        config.goals.daily_focus_seconds = Some(3600);
+        config.goals.daily_focus_minutes = Some(60);
+        config.goals.app_budgets = vec![AppBudgetConfig {
+            app: Some("code".to_string()),
+            category: Some("productive".to_string()),
+            daily_seconds: Some(-1),
+            ..AppBudgetConfig::default()
+        }];
+
+        let warnings = config
+            .warnings()
+            .into_iter()
+            .map(|warning| (warning.field, warning.message))
+            .collect::<Vec<_>>();
+
+        assert!(warnings.iter().any(|(field, message)| {
+            field == "tracking.reconcile_seconds" && message.contains("runtime minimum")
+        }));
+        assert!(warnings.iter().any(|(field, message)| {
+            field == "privacy.title_capture" && message.contains("ignored")
+        }));
+        assert!(warnings.iter().any(|(field, message)| {
+            field == "goals.daily_focus_seconds" && message.contains("takes precedence")
+        }));
+        assert!(warnings.iter().any(|(field, message)| {
+            field == "goals.app_budgets[0]" && message.contains("exactly one")
+        }));
+        assert!(warnings.iter().any(|(field, message)| {
+            field == "goals.app_budgets[0]" && message.contains("no positive")
+        }));
     }
 }

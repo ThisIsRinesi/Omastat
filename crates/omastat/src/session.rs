@@ -155,8 +155,14 @@ pub async fn status() -> Result<SessionStatus> {
 async fn omarchy_status() -> Result<SessionStatus> {
     let idle_output = command_output("omarchy-shell", &["idle", "status"]).await?;
     let idle = parse_omarchy_idle_status(&idle_output)?;
-    let locked = omarchy_locked().await.unwrap_or(false);
-    let audio_playing = audio_playing().await.unwrap_or(false);
+    let locked = match omarchy_locked().await {
+        Ok(locked) => locked,
+        Err(error) => {
+            tracing::debug!("omarchy lock status unavailable; assuming unlocked: {error:#}");
+            false
+        }
+    };
+    let audio_playing = audio_playing_with_fallback().await;
 
     Ok(SessionStatus {
         idle: idle.idle || idle.in_idle_cycle || idle.screensaver_started,
@@ -188,8 +194,18 @@ async fn loginctl_status() -> Result<SessionStatus> {
     .await?;
     let mut status = parse_loginctl_status(&output);
     status.stay_awake = stay_awake_state_path().is_file();
-    status.audio_playing = audio_playing().await.unwrap_or(false);
+    status.audio_playing = audio_playing_with_fallback().await;
     Ok(status)
+}
+
+async fn audio_playing_with_fallback() -> bool {
+    match audio_playing().await {
+        Ok(audio_playing) => audio_playing,
+        Err(error) => {
+            tracing::debug!("audio playback status unavailable; assuming silent: {error:#}");
+            false
+        }
+    }
 }
 
 async fn audio_playing() -> Result<bool> {

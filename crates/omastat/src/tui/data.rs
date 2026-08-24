@@ -1,4 +1,5 @@
 use crate::{
+    analytics, clock,
     config::Config,
     hyprland,
     report::{self, Lens, UsageReport},
@@ -9,7 +10,6 @@ use crate::{
     },
 };
 use anyhow::Result;
-use chrono::Local;
 use std::collections::BTreeMap;
 use std::process::Command;
 
@@ -70,43 +70,19 @@ impl DashboardStats {
         focus_intervals: &[TimelineInterval],
     ) -> Self {
         let total_days = report.daily.len();
-        let active_days = report
-            .daily
-            .iter()
-            .filter(|day| day.focused_seconds > 0)
-            .count();
-        let daily_average_seconds = average(report.total_focused_seconds, total_days);
-        let active_day_average_seconds = average(report.total_focused_seconds, active_days);
+        let active_days = analytics::active_day_count(&report.daily);
+        let daily_average_seconds = analytics::average(report.total_focused_seconds, total_days);
+        let active_day_average_seconds =
+            analytics::average(report.total_focused_seconds, active_days);
         let best_day = report
             .daily
             .iter()
             .max_by_key(|day| day.focused_seconds)
             .filter(|day| day.focused_seconds > 0);
-        let longest_streak_days = longest_active_streak(&report.daily);
+        let longest_streak_days = analytics::longest_active_streak(&report.daily);
 
-        let mut durations = focus_intervals
-            .iter()
-            .map(|interval| interval.ended_at.saturating_sub(interval.started_at))
-            .filter(|seconds| *seconds > 0)
-            .collect::<Vec<_>>();
-        let focus_block_count = durations.len();
-        let total_block_seconds = durations.iter().sum::<i64>();
-        durations.sort_unstable();
-        let average_block_seconds = average(total_block_seconds, focus_block_count);
-        let median_block_seconds = median(&durations);
-        let longest_block_seconds = durations.last().copied().unwrap_or_default();
-        let deep_block_count = durations
-            .iter()
-            .filter(|seconds| **seconds >= 25 * 60)
-            .count();
-        let deep_block_seconds = durations
-            .iter()
-            .filter(|seconds| **seconds >= 25 * 60)
-            .sum::<i64>();
-        let app_switch_count = focus_intervals
-            .windows(2)
-            .filter(|pair| pair[0].app_class != pair[1].app_class)
-            .count();
+        let block_stats = analytics::focus_block_stats(focus_intervals);
+        let app_switch_count = analytics::app_switch_count(focus_intervals);
 
         let peak_hour = peak_hour(heatmap);
         let peak_weekday = peak_weekday(heatmap);
@@ -117,7 +93,8 @@ impl DashboardStats {
             .map(|row| row.focused_seconds as f64 / report.total_focused_seconds.max(1) as f64)
             .unwrap_or_default()
             .clamp(0.0, 1.0);
-        let effective_apps = effective_app_count(&report.rows, report.total_focused_seconds);
+        let effective_apps =
+            analytics::effective_app_count(&report.rows, report.total_focused_seconds);
 
         Self {
             total_days,
@@ -127,13 +104,13 @@ impl DashboardStats {
             best_day_label: best_day.map(|day| day.label.clone()),
             best_day_seconds: best_day.map(|day| day.focused_seconds).unwrap_or_default(),
             longest_streak_days,
-            focus_block_count,
+            focus_block_count: block_stats.count,
             app_switch_count,
-            average_block_seconds,
-            median_block_seconds,
-            longest_block_seconds,
-            deep_block_count,
-            deep_block_seconds,
+            average_block_seconds: block_stats.average_seconds,
+            median_block_seconds: block_stats.median_seconds,
+            longest_block_seconds: block_stats.longest_seconds,
+            deep_block_count: block_stats.deep_count,
+            deep_block_seconds: block_stats.deep_seconds,
             peak_hour,
             peak_weekday,
             top_app_share,
@@ -149,11 +126,12 @@ pub(super) fn load_dashboard_data(
     lens: Lens,
     offset: i32,
 ) -> Result<DashboardData> {
-    let report = if lens == Lens::Day && offset == 0 {
-        report::usage_report(storage, steam, config, lens, lens.history_days())?
+    let report_with_rollups = if lens == Lens::Day && offset == 0 {
+        report::usage_report_with_rollups(storage, steam, config, lens, lens.history_days())?
     } else {
-        report::usage_report_for_period(storage, steam, config, lens, offset)?
+        report::usage_report_with_rollups_for_period(storage, steam, config, lens, offset)?
     };
+    let report = report_with_rollups.report;
     let lens_totals = load_lens_totals(storage, steam);
     let timeline_intervals = storage
         .timeline_between(report.query_start_ts, report.query_end_ts)?
@@ -165,8 +143,7 @@ pub(super) fn load_dashboard_data(
         .collect();
     let system_intervals =
         storage.system_timeline_between(report.query_start_ts, report.query_end_ts)?;
-    let rollups =
-        storage.focused_rollups_between(report.query_start_ts, report.query_end_ts, 8, 64)?;
+    let rollups = report_with_rollups.rollups;
     let focus_intervals = rollups
         .focus_intervals
         .into_iter()
@@ -279,14 +256,29 @@ pub(super) struct HealthSnapshot {
     pub(super) storage: StorageStatus,
     pub(super) service_state: String,
     pub(super) socket_state: String,
+    pub(super) warnings: Vec<String>,
 }
 
 impl HealthSnapshot {
-    pub(super) fn load(storage: &Storage) -> Self {
+    pub(super) fn load(storage: &Storage, config: &Config) -> Self {
+        let (storage, mut warnings) = match storage.usage_status() {
+            Ok(status) => (status, Vec::new()),
+            Err(error) => (
+                StorageStatus::default(),
+                vec![format!("storage health unavailable: {error:#}")],
+            ),
+        };
+        warnings.extend(
+            config
+                .warnings()
+                .into_iter()
+                .map(|warning| format!("config {}: {}", warning.field, warning.message)),
+        );
         Self {
-            storage: storage.usage_status().unwrap_or_default(),
+            storage,
             service_state: omastatd_state(),
             socket_state: hyprland_socket_state(),
+            warnings,
         }
     }
 
@@ -294,13 +286,16 @@ impl HealthSnapshot {
         match self.storage.last_event_at {
             Some(timestamp) => format!(
                 "{} ago",
-                super::widgets::compact_duration(Local::now().timestamp() - timestamp)
+                super::widgets::compact_duration(clock::local_now().timestamp() - timestamp)
             ),
             None => "never".to_string(),
         }
     }
 
     pub(super) fn live_label(&self) -> String {
+        if let Some(warning) = self.warnings.first() {
+            return format!("warning: {warning}");
+        }
         if self.storage.interval_count == 0 {
             return "empty db".to_string();
         }
@@ -319,7 +314,7 @@ impl HealthSnapshot {
         match self.storage.last_heartbeat_at {
             Some(timestamp) => format!(
                 "{} ago",
-                super::widgets::compact_duration(Local::now().timestamp() - timestamp)
+                super::widgets::compact_duration(clock::local_now().timestamp() - timestamp)
             ),
             None => "never".to_string(),
         }
@@ -331,6 +326,7 @@ impl HealthSnapshot {
             storage,
             service_state: "active".to_string(),
             socket_state: "ipc ok".to_string(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -359,87 +355,16 @@ fn hyprland_socket_state() -> String {
     }
 }
 
-fn average(total: i64, count: usize) -> i64 {
-    if count == 0 {
-        0
-    } else {
-        total.max(0) / count as i64
-    }
-}
-
-fn median(sorted: &[i64]) -> i64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let mid = sorted.len() / 2;
-    if sorted.len().is_multiple_of(2) {
-        (sorted[mid - 1] + sorted[mid]) / 2
-    } else {
-        sorted[mid]
-    }
-}
-
-fn longest_active_streak(days: &[crate::storage::DayTotals]) -> usize {
-    let mut current = 0;
-    let mut best = 0;
-    for day in days {
-        if day.focused_seconds > 0 {
-            current += 1;
-            best = best.max(current);
-        } else {
-            current = 0;
-        }
-    }
-    best
-}
-
 fn peak_hour(cells: &[FocusHeatCell]) -> Option<HourTotal> {
-    let mut hours = [0_i64; 24];
-    for cell in cells {
-        if let Some(total) = hours.get_mut(cell.hour as usize) {
-            *total += cell.focused_seconds.max(0);
-        }
-    }
-    hours
-        .into_iter()
-        .enumerate()
-        .max_by_key(|(_, seconds)| *seconds)
-        .filter(|(_, seconds)| *seconds > 0)
-        .map(|(hour, focused_seconds)| HourTotal {
-            hour: hour as u32,
-            focused_seconds,
-        })
+    analytics::peak_hour(cells).map(|peak| HourTotal {
+        hour: peak.hour,
+        focused_seconds: peak.focused_seconds,
+    })
 }
 
 fn peak_weekday(cells: &[FocusHeatCell]) -> Option<WeekdayTotal> {
-    let mut weekdays = [0_i64; 7];
-    for cell in cells {
-        if let Some(total) = weekdays.get_mut(cell.weekday as usize) {
-            *total += cell.focused_seconds.max(0);
-        }
-    }
-    weekdays
-        .into_iter()
-        .enumerate()
-        .max_by_key(|(_, seconds)| *seconds)
-        .filter(|(_, seconds)| *seconds > 0)
-        .map(|(weekday, focused_seconds)| WeekdayTotal {
-            weekday: weekday as u32,
-            focused_seconds,
-        })
-}
-
-fn effective_app_count(rows: &[crate::storage::AppTotals], total_focused_seconds: i64) -> f64 {
-    if total_focused_seconds <= 0 {
-        return 0.0;
-    }
-
-    let entropy = rows
-        .iter()
-        .filter(|row| row.focused_seconds > 0)
-        .map(|row| row.focused_seconds as f64 / total_focused_seconds as f64)
-        .filter(|share| *share > 0.0)
-        .map(|share| -share * share.ln())
-        .sum::<f64>();
-    entropy.exp()
+    analytics::peak_weekday(cells).map(|peak| WeekdayTotal {
+        weekday: peak.weekday,
+        focused_seconds: peak.focused_seconds,
+    })
 }

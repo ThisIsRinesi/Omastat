@@ -21,4 +21,5 @@ done
 
 if command -v node >/dev/null 2>&1; then
   node --check "$widget_dir/Model.js"
+  node "$repo_root/packaging/dev/test-model-js.mjs"
 fi
