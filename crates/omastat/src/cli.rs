@@ -239,7 +239,17 @@ pub fn summary_report(
     offset: i32,
     days: u32,
 ) -> Result<UsageReport> {
-    if lens == Lens::Day && offset == 0 {
+    if lens == Lens::Day {
+        return report::usage_report_for_period_with_days(
+            storage,
+            steam,
+            config,
+            lens,
+            offset,
+            Some(days.max(1)),
+        );
+    }
+    if offset == 0 {
         return report::usage_report(storage, steam, config, lens, days);
     }
 
@@ -911,6 +921,66 @@ mod tests {
             }
             other => panic!("expected summary command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn summary_report_honors_days_for_historical_day() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("omastat.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config)?;
+        let selected_date = Local::now().date_naive() - Duration::days(1);
+        let previous_date = selected_date - Duration::days(1);
+        let selected_start = Local
+            .from_local_datetime(
+                &selected_date
+                    .and_hms_opt(1, 0, 0)
+                    .expect("valid selected test time"),
+            )
+            .single()
+            .expect("selected test time should resolve")
+            .timestamp();
+        let previous_start = Local
+            .from_local_datetime(
+                &previous_date
+                    .and_hms_opt(1, 0, 0)
+                    .expect("valid previous test time"),
+            )
+            .single()
+            .expect("previous test time should resolve")
+            .timestamp();
+
+        let previous = storage.start_interval(
+            crate::storage::IntervalKind::Focused,
+            "code",
+            None,
+            None,
+            previous_start,
+        )?;
+        storage.close_interval(previous, previous_start + 30 * 60)?;
+        let selected = storage.start_interval(
+            crate::storage::IntervalKind::Focused,
+            "code",
+            None,
+            None,
+            selected_start,
+        )?;
+        storage.close_interval(selected, selected_start + 40 * 60)?;
+
+        let mut steam = SteamResolver::default();
+        let report = summary_report(&storage, &mut steam, &config, Lens::Day, -1, 2)?;
+
+        assert_eq!(report.daily.len(), 2);
+        assert_eq!(
+            report.daily[0].date,
+            previous_date.format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(
+            report.daily[1].date,
+            selected_date.format("%Y-%m-%d").to_string()
+        );
+
+        Ok(())
     }
 
     #[test]

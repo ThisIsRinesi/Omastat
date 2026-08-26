@@ -1,8 +1,12 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+const PLUGIN_ID: &str = "local.omastat";
 const ROOT_ENTRYPOINT: &str = "packaging/omarchy/omastat/BarWidget.qml";
 const PACKAGED_ENTRYPOINT: &str = "BarWidget.qml";
+const REQUIRED_PACKAGED_FILES: &[&str] =
+    &["manifest.json", "BarWidget.qml", "Panel.qml", "Model.js"];
 
 #[test]
 fn omarchy_manifests_stay_synchronized() {
@@ -37,6 +41,53 @@ fn omarchy_manifests_stay_synchronized() {
         root, packaged,
         "root manifest and packaged manifest must match except for entryPoints.barWidget"
     );
+}
+
+#[test]
+fn packaged_plugin_data_matches_omarchy_bar_widget_contract() {
+    let workspace = workspace_root();
+    let plugin_dir = workspace.join("packaging/omarchy/omastat");
+    let manifest_path = plugin_dir.join("manifest.json");
+    let manifest = read_manifest(&manifest_path);
+
+    assert_eq!(
+        number_at(&manifest, "/schemaVersion"),
+        1,
+        "Omarchy only accepts schemaVersion 1"
+    );
+    assert_eq!(
+        string_at(&manifest, "/id"),
+        PLUGIN_ID,
+        "plugin id must stay stable so existing bar layouts keep updating this widget"
+    );
+    assert_eq!(
+        string_at(&manifest, "/entryPoints/barWidget"),
+        PACKAGED_ENTRYPOINT,
+        "packaged plugin data must point at the local widget file"
+    );
+    assert!(
+        array_at(&manifest, "/kinds")
+            .iter()
+            .any(|kind| kind.as_str() == Some("bar-widget")),
+        "plugin kinds must include bar-widget so Omarchy registers it with the bar"
+    );
+    assert_eq!(
+        string_at(&manifest, "/barWidget/displayName"),
+        "Omastat",
+        "display name is what Omarchy shows in widget pickers"
+    );
+    assert_eq!(
+        string_at(&manifest, "/barWidget/defaultSection"),
+        "right",
+        "default section should keep the analytics widget near other status widgets"
+    );
+    assert!(
+        !bool_at(&manifest, "/barWidget/allowMultiple"),
+        "the widget owns fixed caches and settings, so multiple instances should remain disabled"
+    );
+
+    assert_schema_is_unique_and_matches_defaults(&manifest);
+    assert_required_packaged_files_exist(&plugin_dir);
 }
 
 fn workspace_root() -> PathBuf {
@@ -90,4 +141,153 @@ fn assert_entrypoint_exists(base_dir: &Path, manifest_path: &Path, manifest: &Va
         manifest_path.display(),
         resolved.display()
     );
+}
+
+fn value_at<'a>(manifest: &'a Value, pointer: &str) -> &'a Value {
+    manifest
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("manifest should define {pointer}"))
+}
+
+fn string_at<'a>(manifest: &'a Value, pointer: &str) -> &'a str {
+    value_at(manifest, pointer)
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest {pointer} should be a string"))
+}
+
+fn number_at(manifest: &Value, pointer: &str) -> i64 {
+    value_at(manifest, pointer)
+        .as_i64()
+        .unwrap_or_else(|| panic!("manifest {pointer} should be an integer"))
+}
+
+fn bool_at(manifest: &Value, pointer: &str) -> bool {
+    value_at(manifest, pointer)
+        .as_bool()
+        .unwrap_or_else(|| panic!("manifest {pointer} should be a boolean"))
+}
+
+fn array_at<'a>(manifest: &'a Value, pointer: &str) -> &'a Vec<Value> {
+    value_at(manifest, pointer)
+        .as_array()
+        .unwrap_or_else(|| panic!("manifest {pointer} should be an array"))
+}
+
+fn object_at<'a>(manifest: &'a Value, pointer: &str) -> &'a serde_json::Map<String, Value> {
+    value_at(manifest, pointer)
+        .as_object()
+        .unwrap_or_else(|| panic!("manifest {pointer} should be an object"))
+}
+
+fn assert_schema_is_unique_and_matches_defaults(manifest: &Value) {
+    let defaults = object_at(manifest, "/barWidget/defaults");
+    let schema = array_at(manifest, "/barWidget/schema");
+    let mut keys = HashSet::new();
+
+    assert!(
+        defaults.contains_key("refreshIntervalSec"),
+        "barWidget.defaults must include refreshIntervalSec"
+    );
+    assert!(
+        defaults.contains_key("iconOnly"),
+        "barWidget.defaults must include iconOnly"
+    );
+
+    for field in schema {
+        let key = field
+            .get("key")
+            .and_then(Value::as_str)
+            .expect("each barWidget.schema item should have a string key");
+        assert!(
+            keys.insert(key.to_string()),
+            "barWidget.schema contains duplicate key {key}"
+        );
+        let default_value = field
+            .get("defaultValue")
+            .unwrap_or_else(|| panic!("schema item {key} should define defaultValue"));
+        assert_eq!(
+            defaults.get(key),
+            Some(default_value),
+            "schema defaultValue for {key} should match barWidget.defaults"
+        );
+        assert_schema_field_is_well_formed(key, field);
+    }
+
+    for key in defaults.keys() {
+        assert!(
+            keys.contains(key),
+            "barWidget.defaults key {key} should have a matching schema entry"
+        );
+    }
+}
+
+fn assert_schema_field_is_well_formed(key: &str, field: &Value) {
+    let object = field
+        .as_object()
+        .expect("barWidget.schema entries should be objects");
+    let field_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("schema item {key} should define type"));
+    assert!(
+        object.get("label").and_then(Value::as_str).is_some(),
+        "schema item {key} should define a label"
+    );
+
+    match field_type {
+        "boolean" => {
+            assert!(
+                object
+                    .get("defaultValue")
+                    .and_then(Value::as_bool)
+                    .is_some(),
+                "boolean schema item {key} should have a boolean defaultValue"
+            );
+        }
+        "integer" => {
+            let default = object
+                .get("defaultValue")
+                .and_then(Value::as_i64)
+                .unwrap_or_else(|| {
+                    panic!("integer schema item {key} should have integer defaultValue")
+                });
+            let min = object
+                .get("min")
+                .and_then(Value::as_i64)
+                .unwrap_or_else(|| panic!("integer schema item {key} should define min"));
+            let max = object
+                .get("max")
+                .and_then(Value::as_i64)
+                .unwrap_or_else(|| panic!("integer schema item {key} should define max"));
+            let step = object
+                .get("step")
+                .and_then(Value::as_i64)
+                .unwrap_or_else(|| panic!("integer schema item {key} should define step"));
+            assert!(
+                min <= default && default <= max,
+                "integer schema item {key} defaultValue should be within min/max"
+            );
+            assert!(
+                step > 0,
+                "integer schema item {key} step should be positive"
+            );
+            assert_eq!(
+                (default - min) % step,
+                0,
+                "integer schema item {key} defaultValue should align with step"
+            );
+        }
+        other => panic!("unsupported barWidget.schema type {other} for {key}"),
+    }
+}
+
+fn assert_required_packaged_files_exist(plugin_dir: &Path) {
+    for file in REQUIRED_PACKAGED_FILES {
+        let path = plugin_dir.join(file);
+        assert!(
+            path.is_file(),
+            "packaged plugin is missing required runtime file {}",
+            path.display()
+        );
+    }
 }

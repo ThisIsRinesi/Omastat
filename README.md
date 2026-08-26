@@ -16,8 +16,9 @@ Omarchy Quattro bar widget.
 - Terminal windows can be attributed to the foreground process, such as `btop`
   or `opencode`, instead of only the terminal emulator.
 - Steam app IDs and common desktop classes are normalized to readable names.
-- Omarchy Quattro widget with a QML analytics panel for day, week, and month
-  totals, app mix, activity trends, heatmaps, consistency stats, and insights.
+- Omarchy Quattro widget with a QML analytics panel for day, week, month, year,
+  and lifetime totals, app mix, activity trends, heatmaps, consistency stats,
+  and insights.
 - Rich terminal dashboard with app composition pies, focus-flow charts, hourly
   peaks, heatmaps, workspace focus, focus block stats, and idle, locked, sleep,
   and unobserved signal gauges.

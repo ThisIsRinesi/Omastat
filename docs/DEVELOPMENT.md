@@ -69,3 +69,12 @@ Check that the manifests remain synchronized with:
 ```bash
 cargo test -p omastat --test manifest_sync
 ```
+
+`packaging/dev/check-widget-qml.sh` also runs `omarchy plugin validate` when
+Omarchy is installed, so invalid plugin data is caught with the QML checks.
+
+`packaging/dev/reinstall-and-restart.sh` validates the source plugin, copies it
+to `~/.config/omarchy/plugins/local.omastat/`, validates the installed copy,
+then asks the running shell to rescan plugin data and confirm discovery. If the
+IPC reload is unavailable or Omarchy still cannot see the plugin, it falls back
+to `omarchy restart shell`.

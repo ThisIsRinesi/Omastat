@@ -1,6 +1,6 @@
 use crate::{clock, config::Config, identity, steam::SteamResolver};
 use anyhow::{Context, Result};
-use chrono::{Datelike, Local, TimeZone, Timelike};
+use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use std::{
@@ -883,12 +883,13 @@ impl Storage {
         days: usize,
         query_end: i64,
     ) -> Result<Vec<DayTotals>> {
+        let range_start_date = range_start.date_naive();
         let mut output = (0..days)
             .map(|offset| {
-                let start = range_start + chrono::Duration::days(offset as i64);
+                let start = range_start_date + chrono::Duration::days(offset as i64);
                 DayTotals {
                     date: start.format("%Y-%m-%d").to_string(),
-                    label: start.format("%a").to_string(),
+                    label: start.format("%b %-d").to_string(),
                     focused_seconds: 0,
                     open_seconds: 0,
                     idle_seconds: 0,
@@ -898,9 +899,7 @@ impl Storage {
                 }
             })
             .collect::<Vec<_>>();
-        let boundaries = (0..=days)
-            .map(|offset| (range_start + chrono::Duration::days(offset as i64)).timestamp())
-            .collect::<Vec<_>>();
+        let boundaries = local_midnight_boundaries(range_start_date, days)?;
 
         let mut stmt = self.conn.prepare(
             "
@@ -1276,13 +1275,11 @@ impl Storage {
             return Ok(Vec::new());
         }
 
-        let (range_start, days) = local_day_range(start, end)?;
-        let boundaries = (0..=days)
-            .map(|offset| (range_start + chrono::Duration::days(offset as i64)).timestamp())
-            .collect::<Vec<_>>();
+        let (range_start_date, days) = local_day_range(start, end)?;
+        let boundaries = local_midnight_boundaries(range_start_date, days)?;
         let labels = (0..days)
             .map(|offset| {
-                let day = range_start + chrono::Duration::days(offset as i64);
+                let day = range_start_date + chrono::Duration::days(offset as i64);
                 (
                     day.format("%Y-%m-%d").to_string(),
                     day.format("%b %-d").to_string(),
@@ -1359,13 +1356,11 @@ impl Storage {
             });
         }
 
-        let (range_start, days) = local_day_range(start, end)?;
-        let boundaries = (0..=days)
-            .map(|offset| (range_start + chrono::Duration::days(offset as i64)).timestamp())
-            .collect::<Vec<_>>();
+        let (range_start_date, days) = local_day_range(start, end)?;
+        let boundaries = local_midnight_boundaries(range_start_date, days)?;
         let labels = (0..days)
             .map(|offset| {
-                let day = range_start + chrono::Duration::days(offset as i64);
+                let day = range_start_date + chrono::Duration::days(offset as i64);
                 (
                     day.format("%Y-%m-%d").to_string(),
                     day.format("%b %-d").to_string(),
@@ -1498,26 +1493,8 @@ impl Storage {
                 .collect());
         }
 
-        for (_, mut cursor, interval_end) in self.focused_intervals_between(start, end)? {
-            while cursor < interval_end {
-                let Some(local) = Local.timestamp_opt(cursor, 0).single() else {
-                    break;
-                };
-                let Some(hour_start) = Local
-                    .with_ymd_and_hms(local.year(), local.month(), local.day(), local.hour(), 0, 0)
-                    .single()
-                else {
-                    break;
-                };
-                let next_hour = (hour_start + chrono::Duration::hours(1)).timestamp();
-                let segment_end = next_hour.min(interval_end);
-                let overlap = segment_end - cursor;
-                if overlap > 0 {
-                    let key = (local.weekday().num_days_from_monday(), local.hour());
-                    *totals.entry(key).or_default() += overlap;
-                }
-                cursor = segment_end.max(cursor + 1);
-            }
+        for (_, cursor, interval_end) in self.focused_intervals_between(start, end)? {
+            add_hourly_focus_rollup(&mut totals, cursor, interval_end);
         }
 
         Ok(totals
@@ -3096,7 +3073,7 @@ fn trim_table_start(tx: &Transaction<'_>, table: &str, cutoff: i64) -> rusqlite:
     tx.execute(&sql, params![cutoff]).map(|rows| rows as i64)
 }
 
-fn local_day_range(start: i64, end: i64) -> Result<(chrono::DateTime<Local>, usize)> {
+fn local_day_range(start: i64, end: i64) -> Result<(NaiveDate, usize)> {
     let start_local = Local
         .timestamp_opt(start, 0)
         .single()
@@ -3107,16 +3084,8 @@ fn local_day_range(start: i64, end: i64) -> Result<(chrono::DateTime<Local>, usi
         .context("failed to compute local end timestamp")?;
     let start_date = start_local.date_naive();
     let end_date = end_local.date_naive();
-    let range_start = Local
-        .from_local_datetime(
-            &start_date
-                .and_hms_opt(0, 0, 0)
-                .context("invalid local range start")?,
-        )
-        .single()
-        .context("failed to compute local range start")?;
     let days = (end_date - start_date).num_days().max(0) as usize + 1;
-    Ok((range_start, days))
+    Ok((start_date, days))
 }
 
 fn add_daily_app_rollup(
@@ -3139,24 +3108,71 @@ fn add_daily_app_rollup(
 fn add_hourly_focus_rollup(totals: &mut BTreeMap<(u32, u32), i64>, started_at: i64, ended_at: i64) {
     let mut cursor = started_at;
     while cursor < ended_at {
-        let Some(local) = Local.timestamp_opt(cursor, 0).single() else {
+        let Some(key) = local_weekday_hour(cursor) else {
             break;
         };
-        let Some(hour_start) = Local
-            .with_ymd_and_hms(local.year(), local.month(), local.day(), local.hour(), 0, 0)
-            .single()
-        else {
-            break;
-        };
-        let next_hour = (hour_start + chrono::Duration::hours(1)).timestamp();
-        let segment_end = next_hour.min(ended_at);
+        let segment_end = next_local_hour_change(cursor, ended_at, key);
         let overlap = segment_end - cursor;
         if overlap > 0 {
-            let key = (local.weekday().num_days_from_monday(), local.hour());
             *totals.entry(key).or_default() += overlap;
         }
         cursor = segment_end.max(cursor + 1);
     }
+}
+
+fn local_midnight_boundaries(start_date: NaiveDate, days: usize) -> Result<Vec<i64>> {
+    (0..=days)
+        .map(|offset| local_midnight_timestamp(start_date + chrono::Duration::days(offset as i64)))
+        .collect()
+}
+
+fn local_midnight_timestamp(date: NaiveDate) -> Result<i64> {
+    let naive = date
+        .and_hms_opt(0, 0, 0)
+        .context("invalid local midnight")?;
+    match Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(time) => Ok(time.timestamp()),
+        chrono::LocalResult::Ambiguous(earliest, _) => Ok(earliest.timestamp()),
+        chrono::LocalResult::None => {
+            let mut candidate = naive;
+            for _ in 0..180 {
+                candidate += chrono::Duration::minutes(1);
+                match Local.from_local_datetime(&candidate) {
+                    chrono::LocalResult::Single(time) => return Ok(time.timestamp()),
+                    chrono::LocalResult::Ambiguous(earliest, _) => return Ok(earliest.timestamp()),
+                    chrono::LocalResult::None => {}
+                }
+            }
+            anyhow::bail!("failed to compute local midnight")
+        }
+    }
+}
+
+fn local_weekday_hour(timestamp: i64) -> Option<(u32, u32)> {
+    let local = Local.timestamp_opt(timestamp, 0).single()?;
+    Some((local.weekday().num_days_from_monday(), local.hour()))
+}
+
+fn next_local_hour_change(cursor: i64, ended_at: i64, key: (u32, u32)) -> i64 {
+    let search_end = ended_at.min(cursor.saturating_add(3 * 60 * 60 + 1));
+    if search_end <= cursor + 1 {
+        return search_end;
+    }
+    if local_weekday_hour(search_end.saturating_sub(1)) == Some(key) {
+        return search_end;
+    }
+
+    let mut low = cursor + 1;
+    let mut high = search_end;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if local_weekday_hour(mid) == Some(key) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
 }
 
 #[cfg(test)]

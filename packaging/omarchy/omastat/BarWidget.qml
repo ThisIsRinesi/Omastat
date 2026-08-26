@@ -23,6 +23,7 @@ BarWidget {
   property var summariesByKey: ({})
   property var rows: []
   property var reportApps: []
+  property var summaryTopApp: null
   property var reportInsights: []
   property var widgetInsight: null
   property var daily: []
@@ -63,6 +64,7 @@ BarWidget {
   onSelectedOffsetChanged: scheduleInjectPanel()
   onRowsChanged: scheduleInjectPanel()
   onReportAppsChanged: scheduleInjectPanel()
+  onSummaryTopAppChanged: scheduleInjectPanel()
   onReportInsightsChanged: scheduleInjectPanel()
   onWidgetInsightChanged: scheduleInjectPanel()
   onDailyChanged: scheduleInjectPanel()
@@ -148,7 +150,7 @@ BarWidget {
   }
 
   function refresh(forceFull) {
-    var full = forceFull === true || (root.opened && !root.panelDataLoaded)
+    var full = forceFull === true || root.opened
     if (reportProcess.running) {
       refreshQueued = true
       refreshQueuedFull = refreshQueuedFull || full
@@ -174,11 +176,14 @@ BarWidget {
     selectedLens = nextLens
     selectedOffset = nextOffset
     var key = reportKey(selectedLens, selectedOffset)
+    var livePeriod = selectedOffset === 0
     var cached = cachedReport(key)
     if (cached) {
       applyReport(cached, false)
+      if (livePeriod) refresh(true)
       return
     }
+    beginPeriodLoad(selectedLens, selectedOffset)
     var summary = cachedSummary(key)
     if (summary) applyWidgetSummary(summary, false)
     refresh(true)
@@ -191,12 +196,25 @@ BarWidget {
 
   function parseReport(text) {
     var parsed = null
+    var raw = String(text || "").trim()
+    if (raw.length === 0) {
+      clearReport("Report command returned no data", "No report data")
+      displayText = root.glyph + " !"
+      tooltip = "Omastat report returned no data"
+      return
+    }
     try {
-      parsed = JSON.parse(String(text || "{}"))
+      parsed = JSON.parse(raw)
     } catch (error) {
       clearReport("Report JSON parse failed", "Parse failed")
       displayText = root.glyph + " !"
       tooltip = "Omastat report parse failed"
+      return
+    }
+    if (!Array.isArray(parsed) && (!parsed || typeof parsed !== "object")) {
+      clearReport("Report JSON had an unexpected shape", "Invalid report")
+      displayText = root.glyph + " !"
+      tooltip = "Omastat report had an unexpected shape"
       return
     }
 
@@ -215,6 +233,7 @@ BarWidget {
   function applyReport(report, markUpdated) {
     rows = report.rows
     reportApps = report.apps
+    summaryTopApp = null
     reportInsights = report.insights
     widgetInsight = report.widgetInsight
     daily = report.daily
@@ -235,6 +254,16 @@ BarWidget {
   }
 
   function applyWidgetSummary(summary, markUpdated) {
+    if (!root.opened) {
+      rows = []
+      reportApps = []
+      summaryTopApp = null
+      reportInsights = []
+      widgetInsight = null
+      daily = []
+      heatmap = []
+      panelDataLoaded = false
+    }
     todayKey = summary.todayKey
     lensLabel = summary.lensLabel
     periodLabel = summary.periodLabel
@@ -244,6 +273,7 @@ BarWidget {
     totalLocked = summary.totalLocked
     totalSleep = summary.totalSleep
     totalUnobserved = summary.totalUnobserved
+    summaryTopApp = summary.topApp
     if (markUpdated) updatedText = Qt.formatTime(new Date(), "HH:mm:ss")
     displayText = root.glyph + " " + summary.displayValue
     tooltip = summary.tooltip
@@ -252,9 +282,33 @@ BarWidget {
     scheduleInjectPanel()
   }
 
+  function beginPeriodLoad(lens, offset) {
+    rows = []
+    reportApps = []
+    summaryTopApp = null
+    reportInsights = []
+    widgetInsight = null
+    daily = []
+    heatmap = []
+    todayKey = offset === 0 ? todayKey : ""
+    lensLabel = String(lens || "day").toUpperCase()
+    periodLabel = provisionalPeriodLabel(lens, offset)
+    totalFocused = 0
+    totalOpen = 0
+    totalIdle = 0
+    totalLocked = 0
+    totalSleep = 0
+    totalUnobserved = 0
+    panelDataLoaded = false
+    errorText = ""
+    statusText = "Loading analytics"
+    scheduleInjectPanel()
+  }
+
   function clearReport(error, status) {
     rows = []
     reportApps = []
+    summaryTopApp = null
     reportInsights = []
     widgetInsight = null
     daily = []
@@ -317,6 +371,7 @@ BarWidget {
     if ("refreshRunning" in target) target.refreshRunning = root.refreshRunning
     if ("rows" in target) target.rows = root.rows
     if ("reportApps" in target) target.reportApps = root.reportApps
+    if ("summaryTopApp" in target) target.summaryTopApp = root.summaryTopApp
     if ("reportInsights" in target) target.reportInsights = root.reportInsights
     if ("widgetInsight" in target) target.widgetInsight = root.widgetInsight
     if ("daily" in target) target.daily = root.daily
@@ -401,6 +456,16 @@ BarWidget {
     return "day"
   }
 
+  function provisionalPeriodLabel(lens, offset) {
+    var value = normalizedLens(lens)
+    if (value === "life") return "Lifetime"
+    if (Math.floor(Number(offset) || 0) < 0) return "Loading period"
+    if (value === "week") return "This Week"
+    if (value === "month") return "This Month"
+    if (value === "year") return "This Year"
+    return "Today"
+  }
+
   function normalizeReport(parsed) {
     if (Array.isArray(parsed)) {
       var legacyRows = parsed
@@ -456,6 +521,7 @@ BarWidget {
       totalLocked: numericField(object, "total_locked_seconds", 0),
       totalSleep: numericField(object, "total_sleep_seconds", 0),
       totalUnobserved: numericField(object, "total_unobserved_seconds", 0),
+      topApp: object.top_app && typeof object.top_app === "object" ? normalizeApps([object.top_app])[0] || null : null,
       displayValue: String(object.display_value || formatDuration(numericField(object, "total_focused_seconds", 0))),
       tooltip: String(object.tooltip || "Omastat"),
       statusText: String(object.status_text || "")
@@ -602,16 +668,21 @@ BarWidget {
         detail: friendlyInsightDetail(item),
         category: String(item.category || ""),
         confidence: String(item.confidence || ""),
-        tone: String(item.tone || "")
+        tone: String(item.tone || ""),
+        supporting: item.supporting && typeof item.supporting === "object" ? item.supporting : {}
       })
     }
+    output.sort(function(left, right) {
+      return insightPriority(left) - insightPriority(right)
+    })
     return output
   }
 
   function normalizeWidgetInsight(item) {
     var label = friendlyInsightLabel(item, String(item.title || item.label || "Insight"))
     var value = String(item.value || "")
-    var text = value.length > 0 ? label + ": " + value : label
+    var text = String(item.text || "")
+    if (text.length === 0) text = value.length > 0 ? label + ": " + value : label
     return {
       title: label,
       value: value,
@@ -624,7 +695,12 @@ BarWidget {
     var kind = String(item && item.kind || "")
     switch (kind) {
       case "top-app": return "Top app"
-      case "day-comparison": return root.loadingOffset < 0 ? "Compared with previous day" : "Compared with yesterday"
+      case "day-comparison": {
+        var title = String(item && item.title || "")
+        var support = item && item.supporting && typeof item.supporting === "object" ? item.supporting : {}
+        var comparison = String(support.comparison_label || "")
+        return title.indexOf("previous") >= 0 || comparison.indexOf("Previous") >= 0 ? "Compared with previous day" : "Compared with yesterday"
+      }
       case "period-comparison": return "Compared with last period"
       case "best-day": return "Best day"
       case "worst-active-day": return "Lightest day"
@@ -666,18 +742,41 @@ BarWidget {
     var kind = String(item && item.kind || "")
     switch (kind) {
       case "deep-work-blocks":
-        return "Counts long focus sessions at or above your long session threshold."
+        return detailWithConfidence("Counts long focus sessions at or above your long session threshold.", item)
       case "app-switch-rate":
-        return "Counts how often focus moved from one app to another."
+        return detailWithConfidence("Counts how often focus moved from one app to another.", item)
       case "focus-density":
-        return "Shows how much open app time was focused."
+        return detailWithConfidence("Shows how much app-open time was focused.", item)
       case "unobserved-excluded":
-        return "Tracker off time was not counted as focus."
+        return detailWithConfidence("Tracker off time was not counted as focus.", item)
       case "excluded-impact":
-        return "Shows how much time was left out because it was away, locked, sleep, or tracker off time."
+        return detailWithConfidence("Shows how much time was left out because it was away, locked, sleep, or tracker off time.", item)
     }
-    var detail = String(item && (item.explanation || item.detail) || "")
+    return detailWithConfidence(String(item && (item.explanation || item.detail) || ""), item)
+  }
+
+  function detailWithConfidence(detail, item) {
+    detail = rewrittenDetail(detail)
+    var confidence = String(item && item.confidence || "")
+    if (confidence === "low" || confidence === "medium") {
+      var confidenceText = confidence.charAt(0).toUpperCase() + confidence.slice(1) + " confidence"
+      detail = detail.length > 0 ? detail + "  " + confidenceText : confidenceText
+    }
     return detail
+  }
+
+  function insightPriority(item) {
+    var tone = String(item && item.tone || "")
+    var category = String(item && item.category || "")
+    if (tone === "caution" || tone === "negative") return 0
+    if (category === "system-signals") return 1
+    if (tone === "positive") return 2
+    if (tone === "info") return 3
+    return 4
+  }
+
+  function rewrittenDetail(detail) {
+    return String(detail || "")
       .replace(/focus density/gi, "focus share")
       .replace(/density/gi, "focus share")
       .replace(/unobserved/gi, "tracker off")
@@ -700,7 +799,8 @@ BarWidget {
     if (seconds < 60) return seconds + "s"
     var minutes = Math.floor(seconds / 60)
     var hours = Math.floor(minutes / 60)
-    if (hours > 0) return hours + "h " + String(minutes % 60).padStart(2, "0") + "m"
+    var rest = minutes % 60
+    if (hours > 0) return rest === 0 ? hours + "h" : hours + "h " + rest + "m"
     return minutes + "m"
   }
 }

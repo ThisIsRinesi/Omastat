@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 widget_dir="$repo_root/packaging/omarchy/omastat"
 
+if command -v omarchy >/dev/null 2>&1; then
+  omarchy plugin validate "$widget_dir"
+fi
+
 for tool in qmllint qmlformat; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing required tool: $tool" >&2

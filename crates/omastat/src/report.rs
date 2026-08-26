@@ -212,6 +212,25 @@ pub fn usage_report_for_period(
     )
 }
 
+pub fn usage_report_for_period_with_days(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    offset: i32,
+    trailing_days_override: Option<u32>,
+) -> Result<UsageReport> {
+    Ok(usage_report_with_rollups_for_period_with_days(
+        storage,
+        steam,
+        config,
+        lens,
+        offset,
+        trailing_days_override,
+    )?
+    .report)
+}
+
 pub fn usage_report_with_rollups(
     storage: &Storage,
     steam: &mut SteamResolver,
@@ -316,26 +335,6 @@ pub fn widget_summary_for_period(
     })
 }
 
-#[cfg(test)]
-fn usage_report_for_period_with_days(
-    storage: &Storage,
-    steam: &mut SteamResolver,
-    config: &Config,
-    lens: Lens,
-    offset: i32,
-    trailing_days_override: Option<u32>,
-) -> Result<UsageReport> {
-    Ok(usage_report_with_rollups_for_period_with_days(
-        storage,
-        steam,
-        config,
-        lens,
-        offset,
-        trailing_days_override,
-    )?
-    .report)
-}
-
 fn usage_report_with_rollups_for_period_with_days(
     storage: &Storage,
     steam: &mut SteamResolver,
@@ -366,8 +365,8 @@ fn usage_report_with_rollups_for_period_with_days(
         .collect::<Vec<_>>();
     let workspaces = rollups.workspaces.clone();
     let app_workspaces = resolve_app_workspace_totals(rollups.app_workspaces.clone(), steam);
-    let previous_period = previous_period_comparison(storage, steam, lens, offset)?;
-    let insights = insights::analyze(AnalysisInput {
+    let previous_period = previous_period_comparison(storage, steam, lens, &period)?;
+    let mut insights = insights::analyze(AnalysisInput {
         rows: &rows,
         daily: &daily,
         heatmap: &heatmap,
@@ -390,6 +389,7 @@ fn usage_report_with_rollups_for_period_with_days(
         total_sleep_seconds: session_totals.sleep_seconds,
         total_unobserved_seconds: session_totals.unobserved_seconds,
     });
+    apply_configured_insight_labels(&mut insights, config);
 
     let generated_at = clock::unix_now();
     let widget_insight = widget_insight_for(&insights, generated_at);
@@ -497,7 +497,13 @@ where
     let max_items = max_items.max(1);
     let mut apps = Vec::new();
 
-    for row in rows.iter().take(max_items) {
+    let head_count = if rows.len() > max_items {
+        max_items.saturating_sub(1)
+    } else {
+        max_items
+    };
+
+    for row in rows.iter().take(head_count) {
         if row.focused_seconds <= 0 {
             continue;
         }
@@ -514,12 +520,12 @@ where
 
     let other_focused = rows
         .iter()
-        .skip(max_items)
+        .skip(head_count)
         .map(|row| row.focused_seconds.max(0))
         .sum::<i64>();
     let other_open = rows
         .iter()
-        .skip(max_items)
+        .skip(head_count)
         .map(|row| row.open_seconds.max(0))
         .sum::<i64>();
     if other_focused > 0 {
@@ -707,7 +713,17 @@ fn daily_for_period(
         return storage.daily_totals_for_local_dates(start_date, days, period.query_end_ts);
     }
 
-    storage.daily_totals_for_local_dates(start_date, period.day_count, period.query_end_ts)
+    let day_count = if period.meta.offset == 0 {
+        elapsed_day_count(
+            start_date,
+            period.start_ts,
+            period.query_end_ts,
+            period.day_count,
+        )?
+    } else {
+        period.day_count
+    };
+    storage.daily_totals_for_local_dates(start_date, day_count, period.query_end_ts)
 }
 
 fn selected_day_key(
@@ -732,21 +748,53 @@ fn previous_period_comparison(
     storage: &Storage,
     steam: &mut SteamResolver,
     lens: Lens,
-    offset: i32,
+    period: &PeriodBounds,
 ) -> Result<Option<AnalysisComparisonPeriod>> {
     if !matches!(lens, Lens::Week | Lens::Month | Lens::Year) {
         return Ok(None);
     }
 
-    let previous = period_for_lens(lens, offset.saturating_sub(1))?;
-    let rows = steam.resolve_totals(rows_for_period(storage, lens, &previous)?);
+    let previous = period_for_lens(lens, period.meta.offset.saturating_sub(1))?;
+    let matched_elapsed = period.meta.offset == 0;
+    let previous_query_end_ts = if matched_elapsed {
+        let elapsed = period.query_end_ts.saturating_sub(period.start_ts);
+        previous
+            .query_end_ts
+            .min(previous.start_ts.saturating_add(elapsed))
+    } else {
+        previous.query_end_ts
+    };
+    let rows =
+        steam.resolve_totals(storage.totals_between(previous.start_ts, previous_query_end_ts)?);
 
     Ok(Some(AnalysisComparisonPeriod {
         label: previous.meta.label,
         start_date: previous.meta.start_date,
         end_date: previous.meta.end_date,
         focused_seconds: focused_total(&rows),
+        matched_elapsed,
     }))
+}
+
+fn apply_configured_insight_labels(insights: &mut [Insight], config: &Config) {
+    for insight in insights {
+        let Some(app_class) = insight.supporting.app_class.clone() else {
+            continue;
+        };
+        let fallback = insight
+            .supporting
+            .app_label
+            .clone()
+            .unwrap_or_else(|| app_label(&app_class));
+        let configured = config.app_label(&app_class, || fallback.clone());
+        if configured == fallback {
+            continue;
+        }
+        if !fallback.is_empty() {
+            insight.value = insight.value.replacen(&fallback, &configured, 1);
+        }
+        insight.supporting.app_label = Some(configured);
+    }
 }
 
 fn resolve_app_workspace_totals(
@@ -780,10 +828,23 @@ fn resolve_app_workspace_totals(
 }
 
 fn local_midnight(date: NaiveDate) -> Result<chrono::DateTime<Local>> {
-    Local
-        .from_local_datetime(&date.and_hms_opt(0, 0, 0).context("invalid date")?)
-        .single()
-        .context("failed to compute local midnight")
+    let naive = date.and_hms_opt(0, 0, 0).context("invalid date")?;
+    match Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(time) => Ok(time),
+        chrono::LocalResult::Ambiguous(earliest, _) => Ok(earliest),
+        chrono::LocalResult::None => {
+            let mut candidate = naive;
+            for _ in 0..180 {
+                candidate += Duration::minutes(1);
+                match Local.from_local_datetime(&candidate) {
+                    chrono::LocalResult::Single(time) => return Ok(time),
+                    chrono::LocalResult::Ambiguous(earliest, _) => return Ok(earliest),
+                    chrono::LocalResult::None => {}
+                }
+            }
+            anyhow::bail!("failed to compute local midnight")
+        }
+    }
 }
 
 fn add_months(date: NaiveDate, months: i32) -> Result<NaiveDate> {
@@ -791,6 +852,25 @@ fn add_months(date: NaiveDate, months: i32) -> Result<NaiveDate> {
     let year = month_index.div_euclid(12);
     let month0 = month_index.rem_euclid(12);
     NaiveDate::from_ymd_opt(year, month0 as u32 + 1, 1).context("failed to compute month offset")
+}
+
+fn elapsed_day_count(
+    start_date: NaiveDate,
+    start_ts: i64,
+    query_end_ts: i64,
+    max_days: usize,
+) -> Result<usize> {
+    if query_end_ts <= start_ts {
+        return Ok(1);
+    }
+    let end_ts = query_end_ts.saturating_sub(1).max(start_ts);
+    let end_date = Local
+        .timestamp_opt(end_ts, 0)
+        .single()
+        .context("failed to compute elapsed report day")?
+        .date_naive();
+    let days = (end_date - start_date).num_days().max(0) as usize + 1;
+    Ok(days.clamp(1, max_days.max(1)))
 }
 
 pub fn format_duration(seconds: i64) -> String {
@@ -817,9 +897,9 @@ mod tests {
 
         let grouped = app_breakdown(&rows, 6);
 
-        assert_eq!(grouped.len(), 7);
+        assert_eq!(grouped.len(), 6);
         assert_eq!(grouped.last().unwrap().label, "Other");
-        assert_eq!(grouped.last().unwrap().focused_seconds, 20);
+        assert_eq!(grouped.last().unwrap().focused_seconds, 30);
     }
 
     #[test]
@@ -875,6 +955,30 @@ mod tests {
         let period = period_for_lens(Lens::Week, -1).unwrap();
 
         assert!(period.start_ts < period.query_end_ts);
+    }
+
+    #[test]
+    fn current_month_daily_stops_at_today_instead_of_future_dates() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("omastat.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config)?;
+        let mut steam = SteamResolver::default();
+
+        let report = usage_report_for_period(&storage, &mut steam, &config, Lens::Month, 0)?;
+
+        assert_eq!(
+            report.daily.last().map(|day| day.date.as_str()),
+            Some(report.today_key.as_str())
+        );
+        assert!(
+            report
+                .daily
+                .iter()
+                .all(|day| day.date.as_str() <= report.today_key.as_str())
+        );
+
+        Ok(())
     }
 
     #[test]

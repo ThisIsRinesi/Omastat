@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Window
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -16,6 +17,7 @@ Panel {
   property bool refreshRunning: false
   property var rows: []
   property var reportApps: []
+  property var summaryTopApp: null
   property var reportInsights: []
   property var widgetInsight: null
   property var daily: []
@@ -43,6 +45,7 @@ Panel {
   readonly property color track: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.10)
   readonly property color fill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.06)
   readonly property color line: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.18)
+  readonly property color excludedColor: totalUnobserved > 0 ? Color.urgent : root.sliceColor(3, 1.0)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var availableLenses: [
@@ -55,7 +58,7 @@ Panel {
   readonly property bool compactPanel: panel.width > 0 && panel.width < Style.space(560)
   readonly property bool narrowPanel: panel.width > 0 && panel.width < Style.space(430)
   readonly property int tileColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 4)
-  readonly property bool appMixStacked: compactPanel
+  readonly property bool appMixStacked: panel.width > 0 && panel.width < Style.space(680)
   readonly property bool usesCalendar: selectedLens === "month" || selectedLens === "year" || selectedLens === "life"
   readonly property bool usesWeeklyCalendar: selectedLens === "year" || selectedLens === "life"
   readonly property bool periodCanShift: selectedLens !== "life"
@@ -65,6 +68,7 @@ Panel {
   readonly property var visibleApps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
   readonly property var sliceColors: Model.sliceColors(visibleApps.length, Color.accent)
   readonly property var segments: Model.arcSegments(visibleApps)
+  readonly property int appLegendSplitIndex: Math.ceil(visibleApps.length / 2)
   readonly property var trendDays: Model.trendDays(daily, displayTodayKey, selectedLens)
   readonly property real trendMax: Model.maxDailySeconds(trendDays)
   readonly property string trendSummaryText: Model.weekTrendSummary(daily, displayTodayKey)
@@ -75,6 +79,15 @@ Panel {
   readonly property var consistency: Model.consistencyStats(daily)
   readonly property var insightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
   readonly property bool hasFocusedData: totalFocused > 0 || visibleApps.length > 0
+  readonly property bool showBreakdown: totalFocused + totalOpen + totalExcluded > 0
+  readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.75, Style.space(1180)) : Style.space(1080)
+  readonly property real targetPanelHeight: Screen.height > 0 ? Math.min(Screen.height * 0.88, Style.space(980)) : Style.space(820)
+  readonly property bool widePanel: panel.width >= Style.space(900)
+  readonly property bool showActivityChart: usesCalendar ? monthCells.length > 0 : trendDays.length > 0
+  readonly property bool showHeatmapChart: heatMax > 0
+  readonly property int analyticsColumns: widePanel && showActivityChart && showHeatmapChart ? 2 : 1
+  readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days" : "Across period")
+  readonly property string loadingAppMixText: summaryTopApp && summaryTopApp.app ? "Loading app mix; top " + String(summaryTopApp.app) + " " + root.formatDuration(Number(summaryTopApp.seconds || 0)) : "Loading app mix..."
 
   onSelectedLensChanged: clearInspection()
   onSelectedOffsetChanged: clearInspection()
@@ -113,6 +126,14 @@ Panel {
     var b = parseInt(clean.substr(4, 2), 16) / 255
     if (isNaN(r) || isNaN(g) || isNaN(b)) return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, alpha)
     return Qt.rgba(r, g, b, alpha)
+  }
+
+  function clamp01(value) {
+    return Math.max(0, Math.min(1, Number(value || 0)))
+  }
+
+  function withAlpha(colorValue, alpha) {
+    return Qt.rgba(colorValue.r, colorValue.g, colorValue.b, root.clamp01(alpha))
   }
 
   function toneColor(tone) {
@@ -171,8 +192,8 @@ Panel {
     margin: Math.max(Style.gapsOut, Style.space(12))
     gap: Math.max(Style.gapsOut, Style.space(8))
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(720))
-    contentHeight: panel.fittedContentHeight(headerRow.implicitHeight + Style.space(12) + contentColumn.implicitHeight, Style.space(690))
+    contentWidth: panel.fittedContentWidth(root.targetPanelWidth)
+    contentHeight: panel.fittedContentHeight(headerRow.implicitHeight + Style.space(12) + contentColumn.implicitHeight, root.targetPanelHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -350,6 +371,17 @@ Panel {
           id: contentColumn
           width: scroll.width
           spacing: Style.space(12)
+          opacity: root.opened ? 1 : 0
+          scale: root.opened ? 1.0 : 0.985
+          transformOrigin: Item.Top
+
+          Behavior on opacity {
+            NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+          }
+
+          Behavior on scale {
+            NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+          }
 
           Row {
             width: parent.width
@@ -390,7 +422,7 @@ Panel {
               Layout.fillWidth: true
               label: "Open"
               value: root.formatDuration(root.totalOpen)
-              detail: root.totalOpen > 0 ? "Tracked app time" : "--"
+              detail: root.totalOpen > 0 ? "App-open total" : "--"
               accentColor: root.sliceColor(1, 1.0)
             }
 
@@ -398,7 +430,7 @@ Panel {
               Layout.fillWidth: true
               label: "Focus Share"
               value: root.focusShareText
-              detail: root.totalOpen > 0 ? "Focused / open" : "--"
+              detail: root.totalOpen > 0 ? "Focused / app-open" : "--"
               accentColor: root.sliceColor(2, 1.0)
             }
 
@@ -407,21 +439,54 @@ Panel {
               label: "Not Counted"
               value: root.formatDuration(root.totalExcluded)
               detail: "Away, lock, sleep, off"
-              accentColor: Color.urgent
+              accentColor: root.excludedColor
             }
           }
 
-          SectionHeader {
-            text: "Time Breakdown"
-            visible: root.totalFocused + root.totalOpen + root.totalExcluded > 0
-          }
+          GridLayout {
+            id: summaryGrid
 
-          TimeBreakdownStrip {
             width: parent.width
-            visible: root.totalFocused + root.totalOpen + root.totalExcluded > 0
-            focusedSeconds: root.totalFocused
-            openRemainderSeconds: Math.max(0, root.totalOpen - root.totalFocused)
-            excludedSeconds: root.totalExcluded
+            visible: root.showBreakdown || (root.widePanel && root.daily.length > 0)
+            columns: root.widePanel && root.showBreakdown && root.daily.length > 0 ? 2 : 1
+            rowSpacing: Style.space(12)
+            columnSpacing: Style.space(12)
+
+            Column {
+              Layout.fillWidth: true
+              Layout.preferredWidth: summaryGrid.columns > 1 ? Math.max(0, (summaryGrid.width - summaryGrid.columnSpacing) * 0.48) : summaryGrid.width
+              Layout.alignment: Qt.AlignTop
+              visible: root.showBreakdown
+              spacing: Style.space(8)
+
+              SectionHeader {
+                text: "Tracked Signals"
+              }
+
+              TimeBreakdownStrip {
+                width: parent.width
+                focusedSeconds: root.totalFocused
+                openSeconds: root.totalOpen
+                excludedSeconds: root.totalExcluded
+              }
+            }
+
+            Column {
+              Layout.fillWidth: true
+              Layout.preferredWidth: summaryGrid.columns > 1 ? Math.max(0, (summaryGrid.width - summaryGrid.columnSpacing) * 0.52) : summaryGrid.width
+              Layout.alignment: Qt.AlignTop
+              visible: root.widePanel && root.daily.length > 0
+              spacing: Style.space(8)
+
+              SectionHeader {
+                text: root.selectedLens === "life" ? "Recent Consistency" : "Consistency"
+              }
+
+              ConsistencyMetrics {
+                width: parent.width
+                columnsValue: 4
+              }
+            }
           }
 
           SectionHeader {
@@ -435,24 +500,36 @@ Panel {
             implicitHeight: appMixGrid.implicitHeight + Style.space(24)
             radius: Style.space(7)
             color: root.fill
-            border.color: root.line
+            border.color: root.widePanel ? root.sliceColor(0, 0.32) : root.line
             border.width: 1
             visible: root.visibleApps.length > 0
+            clip: true
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              height: Style.space(2)
+              color: root.sliceColor(0, 0.72)
+              opacity: root.widePanel ? 1 : 0.72
+            }
 
             GridLayout {
               id: appMixGrid
+
+              readonly property bool splitLegend: root.widePanel && root.visibleApps.length >= 4
 
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
               anchors.margins: Style.space(12)
-              columns: root.appMixStacked ? 1 : 2
+              columns: root.appMixStacked ? 1 : (splitLegend ? 3 : 2)
               rowSpacing: Style.space(12)
               columnSpacing: Style.space(18)
 
               DonutChart {
                 id: appDonut
-                Layout.preferredWidth: root.appMixStacked ? Style.space(150) : Style.space(168)
+                Layout.preferredWidth: root.appMixStacked ? Style.space(150) : (appMixGrid.splitLegend ? Style.space(184) : (root.widePanel ? Style.space(220) : Style.space(168)))
                 Layout.preferredHeight: Layout.preferredWidth
                 Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
                 segments: root.segments
@@ -466,6 +543,7 @@ Panel {
 
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
+                visible: !appMixGrid.splitLegend
                 spacing: Style.space(7)
 
                 Repeater {
@@ -484,103 +562,140 @@ Panel {
                   }
                 }
               }
+
+              Column {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                visible: appMixGrid.splitLegend
+                spacing: Style.space(7)
+
+                Repeater {
+                  model: root.visibleApps.slice(0, root.appLegendSplitIndex)
+
+                  AppLegendRow {
+                    required property int index
+                    required property var modelData
+
+                    width: parent.width
+                    colorIndex: index
+                    app: String(modelData.app || "")
+                    category: String(modelData.category || "")
+                    seconds: Number(modelData.seconds || 0)
+                    pct: Number(modelData.pct || 0)
+                  }
+                }
+              }
+
+              Column {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                visible: appMixGrid.splitLegend
+                spacing: Style.space(7)
+
+                Repeater {
+                  model: root.visibleApps.slice(root.appLegendSplitIndex)
+
+                  AppLegendRow {
+                    required property int index
+                    required property var modelData
+
+                    width: parent.width
+                    colorIndex: root.appLegendSplitIndex + index
+                    app: String(modelData.app || "")
+                    category: String(modelData.category || "")
+                    seconds: Number(modelData.seconds || 0)
+                    pct: Number(modelData.pct || 0)
+                  }
+                }
+              }
             }
           }
 
           EmptyState {
             visible: root.visibleApps.length === 0
-            text: root.errorText !== "" ? root.errorText : "No focused app time for this period"
+            text: root.errorText !== "" ? root.errorText : (root.refreshRunning && root.totalFocused > 0 ? root.loadingAppMixText : "No focused app time for this period")
             urgent: root.errorText !== ""
           }
 
-          SectionHeader {
-            text: root.selectedLens === "life" ? "Recent Weekly Activity" : (root.usesWeeklyCalendar ? "Weekly Activity" : (root.usesCalendar ? "Activity Calendar" : "Daily Focus"))
-            visible: root.trendDays.length > 0
-          }
-
-          TrendBars {
-            width: parent.width
-            visible: !root.usesCalendar && root.trendDays.length > 0
-            days: root.trendDays
-            maxSeconds: root.trendMax
-            selectedIndex: root.inspectedActivityIndex
-          }
-
-          MonthHeatmap {
-            width: parent.width
-            visible: root.usesCalendar && root.monthCells.length > 0
-            cells: root.monthCells
-            maxSeconds: root.monthMax
-            selectedIndex: root.inspectedActivityIndex
-            weekly: root.usesWeeklyCalendar
-          }
-
-          Text {
-            visible: root.trendSummaryText !== ""
-            width: parent.width
-            text: root.trendSummaryText
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            elide: Text.ElideRight
-          }
-
-          SectionHeader {
-            text: "Focus Heatmap"
-            visible: root.heatmap.length > 0
-          }
-
-          HeatmapGrid {
-            width: parent.width
-            visible: root.heatmap.length > 0
-            cells: root.heatCells
-            maxSeconds: root.heatMax
-            selectedIndex: root.inspectedHeatIndex
-          }
-
-          SectionHeader {
-            text: "Consistency"
-            visible: root.daily.length > 0
-          }
-
           GridLayout {
+            id: analyticsGrid
+
             width: parent.width
-            visible: root.daily.length > 0
-            columns: root.tileColumns
-            rowSpacing: Style.space(8)
-            columnSpacing: Style.space(8)
+            visible: root.showActivityChart || root.showHeatmapChart
+            columns: root.analyticsColumns
+            rowSpacing: Style.space(12)
+            columnSpacing: Style.space(12)
 
-            MetricTile {
+            Column {
               Layout.fillWidth: true
-              label: "Active Days"
-              value: root.consistency.activeDays + " / " + root.consistency.totalDays
-              detail: "Days with focus"
-              accentColor: root.sliceColor(0, 1.0)
+              Layout.preferredWidth: root.analyticsColumns > 1 ? Math.max(0, (analyticsGrid.width - analyticsGrid.columnSpacing) / 2) : analyticsGrid.width
+              Layout.alignment: Qt.AlignTop
+              visible: root.showActivityChart
+              spacing: Style.space(8)
+
+              SectionHeader {
+                text: root.selectedLens === "life" ? "Recent Weekly Activity" : (root.usesWeeklyCalendar ? "Weekly Activity" : (root.usesCalendar ? "Activity Calendar" : "Daily Focus"))
+              }
+
+              TrendBars {
+                width: parent.width
+                expanded: root.widePanel
+                visible: !root.usesCalendar && root.trendDays.length > 0
+                days: root.trendDays
+                maxSeconds: root.trendMax
+                selectedIndex: root.inspectedActivityIndex
+              }
+
+              MonthHeatmap {
+                width: parent.width
+                visible: root.usesCalendar && root.monthCells.length > 0
+                cells: root.monthCells
+                maxSeconds: root.monthMax
+                selectedIndex: root.inspectedActivityIndex
+                weekly: root.usesWeeklyCalendar
+              }
+
+              Text {
+                visible: root.trendSummaryText !== ""
+                width: parent.width
+                text: root.trendSummaryText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
             }
 
-            MetricTile {
+            Column {
               Layout.fillWidth: true
-              label: "Best Streak"
-              value: root.consistency.longestStreak + "d"
-              detail: "Consecutive days"
-              accentColor: root.sliceColor(1, 1.0)
-            }
+              Layout.preferredWidth: root.analyticsColumns > 1 ? Math.max(0, (analyticsGrid.width - analyticsGrid.columnSpacing) / 2) : analyticsGrid.width
+              Layout.alignment: Qt.AlignTop
+              visible: root.showHeatmapChart
+              spacing: Style.space(8)
 
-            MetricTile {
-              Layout.fillWidth: true
-              label: "Daily Avg"
-              value: root.formatDuration(root.consistency.dailyAverageSeconds)
-              detail: "Across period"
-              accentColor: root.sliceColor(2, 1.0)
-            }
+              SectionHeader {
+                text: root.selectedLens === "day" || root.selectedLens === "week" ? "Focus Heatmap" : "Cumulative Focus Heatmap"
+              }
 
-            MetricTile {
-              Layout.fillWidth: true
-              label: "Best Day"
-              value: root.consistency.bestDaySeconds > 0 ? root.formatDuration(root.consistency.bestDaySeconds) : "--"
-              detail: root.consistency.bestDayLabel
-              accentColor: root.sliceColor(3, 1.0)
+              HeatmapGrid {
+                width: parent.width
+                expanded: root.widePanel
+                cells: root.heatCells
+                maxSeconds: root.heatMax
+                selectedIndex: root.inspectedHeatIndex
+              }
             }
+          }
+
+          SectionHeader {
+            text: root.selectedLens === "life" ? "Recent Consistency" : "Consistency"
+            visible: !root.widePanel && root.daily.length > 0
+          }
+
+          ConsistencyMetrics {
+            width: parent.width
+            visible: !root.widePanel && root.daily.length > 0
+            columnsValue: root.tileColumns
           }
 
           SectionHeader {
@@ -772,151 +887,186 @@ Panel {
     }
   }
 
+  component ConsistencyMetrics: GridLayout {
+    property int columnsValue: root.tileColumns
+
+    columns: columnsValue
+    rowSpacing: Style.space(8)
+    columnSpacing: Style.space(8)
+
+    MetricTile {
+      Layout.fillWidth: true
+      label: "Active Days"
+      value: root.consistency.activeDays + " / " + root.consistency.totalDays
+      detail: root.selectedLens === "life" ? "Recent days with focus" : "Days with focus"
+      accentColor: root.sliceColor(0, 1.0)
+    }
+
+    MetricTile {
+      Layout.fillWidth: true
+      label: "Best Streak"
+      value: root.consistency.longestStreak + "d"
+      detail: "Consecutive days"
+      accentColor: root.sliceColor(1, 1.0)
+    }
+
+    MetricTile {
+      Layout.fillWidth: true
+      label: "Daily Avg"
+      value: root.formatDuration(root.consistency.dailyAverageSeconds)
+      detail: root.consistencyScopeText
+      accentColor: root.sliceColor(2, 1.0)
+    }
+
+    MetricTile {
+      Layout.fillWidth: true
+      label: "Best Day"
+      value: root.consistency.bestDaySeconds > 0 ? root.formatDuration(root.consistency.bestDaySeconds) : "--"
+      detail: root.consistency.bestDayLabel
+      accentColor: root.sliceColor(3, 1.0)
+    }
+  }
+
   component TimeBreakdownStrip: Rectangle {
+    id: breakdownRoot
+
     property int focusedSeconds: 0
-    property int openRemainderSeconds: 0
+    property int openSeconds: 0
     property int excludedSeconds: 0
+    property real revealProgress: 0
 
-    readonly property int totalSeconds: focusedSeconds + openRemainderSeconds + excludedSeconds
-    readonly property real focusedRatio: totalSeconds > 0 ? focusedSeconds / totalSeconds : 0
-    readonly property real openRemainderRatio: totalSeconds > 0 ? openRemainderSeconds / totalSeconds : 0
-    readonly property real excludedRatio: totalSeconds > 0 ? excludedSeconds / totalSeconds : 0
+    readonly property int maxSeconds: Math.max(1, focusedSeconds, openSeconds, excludedSeconds)
 
-    implicitHeight: Style.space(76)
+    function restartReveal() {
+      revealProgress = 0
+      breakdownReveal.restart()
+    }
+
+    onFocusedSecondsChanged: restartReveal()
+    onOpenSecondsChanged: restartReveal()
+    onExcludedSecondsChanged: restartReveal()
+    Component.onCompleted: restartReveal()
+
+    implicitHeight: Style.space(116)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
     border.width: 1
 
+    NumberAnimation {
+      id: breakdownReveal
+
+      target: breakdownRoot
+      property: "revealProgress"
+      from: 0
+      to: 1
+      duration: 520
+      easing.type: Easing.OutCubic
+    }
+
     Column {
       anchors.fill: parent
       anchors.margins: Style.space(12)
-      spacing: Style.space(9)
+      spacing: Style.space(8)
 
-      Item {
-        id: breakdownTrack
-
+      BreakdownBar {
         width: parent.width
-        height: Style.space(18)
-
-        Rectangle {
-          anchors.fill: parent
-          radius: Style.space(4)
-          color: root.track
-        }
-
-        Rectangle {
-          id: focusedSegment
-          x: 0
-          width: breakdownTrack.width * focusedRatio
-          height: parent.height
-          radius: Style.space(4)
-          color: root.sliceColor(0, 0.95)
-
-          Behavior on width {
-            NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
-          }
-        }
-
-        Rectangle {
-          id: openRemainderSegment
-          x: focusedSegment.width
-          width: breakdownTrack.width * openRemainderRatio
-          height: parent.height
-          radius: Style.space(4)
-          color: root.sliceColor(1, 0.78)
-
-          Behavior on x {
-            NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
-          }
-
-          Behavior on width {
-            NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
-          }
-        }
-
-        Rectangle {
-          x: focusedSegment.width + openRemainderSegment.width
-          width: breakdownTrack.width * excludedRatio
-          height: parent.height
-          radius: Style.space(4)
-          color: Color.urgent
-          opacity: 0.78
-
-          Behavior on x {
-            NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
-          }
-
-          Behavior on width {
-            NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
-          }
-        }
+        label: "Focused"
+        value: root.formatDuration(focusedSeconds)
+        ratio: focusedSeconds / breakdownRoot.maxSeconds
+        revealProgress: breakdownRoot.revealProgress
+        colorValue: root.sliceColor(0, 0.95)
       }
 
-      Row {
+      BreakdownBar {
         width: parent.width
-        spacing: Style.space(12)
+        label: "App Open"
+        value: root.formatDuration(openSeconds)
+        ratio: openSeconds / breakdownRoot.maxSeconds
+        revealProgress: breakdownRoot.revealProgress
+        colorValue: root.sliceColor(1, 0.78)
+      }
 
-        BreakdownLegend {
-          width: (parent.width - parent.spacing * 2) / 3
-          label: "Focused"
-          value: root.formatDuration(focusedSeconds)
-          colorValue: root.sliceColor(0, 0.95)
-        }
-
-        BreakdownLegend {
-          width: (parent.width - parent.spacing * 2) / 3
-          label: "Open Other"
-          value: root.formatDuration(openRemainderSeconds)
-          colorValue: root.sliceColor(1, 0.78)
-        }
-
-        BreakdownLegend {
-          width: (parent.width - parent.spacing * 2) / 3
-          label: "Not Counted"
-          value: root.formatDuration(excludedSeconds)
-          colorValue: Color.urgent
-        }
+      BreakdownBar {
+        width: parent.width
+        label: "Not Counted"
+        value: root.formatDuration(excludedSeconds)
+        ratio: excludedSeconds / breakdownRoot.maxSeconds
+        revealProgress: breakdownRoot.revealProgress
+        colorValue: root.excludedColor
       }
     }
   }
 
-  component BreakdownLegend: Item {
+  component BreakdownBar: Item {
     property string label: ""
     property string value: ""
+    property real ratio: 0
+    property real revealProgress: 1
     property color colorValue: root.accent
 
-    implicitHeight: legendLabel.implicitHeight
+    implicitHeight: Style.space(26)
 
     Rectangle {
-      id: legendDot
-      width: Style.space(7)
-      height: width
-      radius: width / 2
-      color: colorValue
+      id: signalTrack
+
       anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
+      anchors.right: valueLabel.left
+      anchors.rightMargin: Style.space(10)
+      anchors.bottom: parent.bottom
+      height: Style.space(6)
+      radius: height / 2
+      color: root.track
+
+      Rectangle {
+        width: signalTrack.width * root.clamp01(ratio) * root.clamp01(revealProgress)
+        height: parent.height
+        radius: parent.radius
+        color: colorValue
+
+        Behavior on width {
+          NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
+        }
+      }
     }
 
     Text {
       id: legendLabel
-      anchors.left: legendDot.right
-      anchors.leftMargin: Style.space(6)
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      text: label + " " + value
+      anchors.left: parent.left
+      anchors.right: valueLabel.left
+      anchors.rightMargin: Style.space(10)
+      anchors.top: parent.top
+      text: label
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
+      font.bold: true
+      elide: Text.ElideRight
+    }
+
+    Text {
+      id: valueLabel
+      width: Math.min(implicitWidth, Style.space(96))
+      anchors.right: parent.right
+      anchors.top: parent.top
+      text: value
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+      horizontalAlignment: Text.AlignRight
       elide: Text.ElideRight
     }
   }
 
   component DonutChart: Item {
+    id: donutRoot
+
     property var segments: []
     property var colors: []
     property string centerLabel: ""
     property string centerValue: ""
+    property real revealProgress: 0
 
     implicitWidth: width
     implicitHeight: height
@@ -926,10 +1076,31 @@ Panel {
       NumberAnimation { duration: 180 }
     }
 
-    onSegmentsChanged: donutCanvas.requestPaint()
+    function restartReveal() {
+      revealProgress = 0
+      donutReveal.restart()
+    }
+
+    onSegmentsChanged: {
+      restartReveal()
+      donutCanvas.requestPaint()
+    }
     onColorsChanged: donutCanvas.requestPaint()
+    onRevealProgressChanged: donutCanvas.requestPaint()
     onWidthChanged: donutCanvas.requestPaint()
     onHeightChanged: donutCanvas.requestPaint()
+    Component.onCompleted: restartReveal()
+
+    NumberAnimation {
+      id: donutReveal
+
+      target: donutRoot
+      property: "revealProgress"
+      from: 0
+      to: 1
+      duration: 680
+      easing.type: Easing.OutCubic
+    }
 
     Canvas {
       id: donutCanvas
@@ -942,19 +1113,42 @@ Panel {
         var size = Math.min(width, height)
         var line = Math.max(Style.space(10), Math.round(size * 0.12))
         var radius = size / 2 - line / 2
+        var cx = width / 2
+        var cy = height / 2
+        var progress = root.clamp01(donutRoot.revealProgress)
+        var remainingSweep = 360 * progress
+
         ctx.lineCap = "round"
+        ctx.lineWidth = line + Style.space(2)
+        ctx.strokeStyle = root.withAlpha(root.foreground, 0.07)
+        ctx.beginPath()
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2, false)
+        ctx.stroke()
+
         ctx.lineWidth = line
         ctx.strokeStyle = root.track
         ctx.beginPath()
-        ctx.arc(width / 2, height / 2, radius, 0, Math.PI * 2, false)
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2, false)
         ctx.stroke()
+
         for (var i = 0; i < segs.length; i++) {
           var seg = segs[i]
-          ctx.strokeStyle = root.sliceColor(i, 1.0)
+          var drawSweep = Math.min(Number(seg.sweepAngle || 0), Math.max(0, remainingSweep))
+          remainingSweep -= Number(seg.sweepAngle || 0)
+          if (drawSweep <= 0) continue
+
+          ctx.strokeStyle = root.colorFromHex(String(donutRoot.colors[i] || Color.accent), 1.0)
           ctx.beginPath()
-          ctx.arc(width / 2, height / 2, radius, seg.startAngle * Math.PI / 180, (seg.startAngle + seg.sweepAngle) * Math.PI / 180, false)
+          ctx.arc(cx, cy, radius, seg.startAngle * Math.PI / 180, (seg.startAngle + drawSweep) * Math.PI / 180, false)
           ctx.stroke()
         }
+
+        ctx.lineCap = "butt"
+        ctx.lineWidth = Math.max(1, Style.space(1))
+        ctx.strokeStyle = root.withAlpha(root.foreground, 0.12)
+        ctx.beginPath()
+        ctx.arc(cx, cy, Math.max(1, radius - line / 2 - Style.space(5)), 0, Math.PI * 2, false)
+        ctx.stroke()
       }
     }
 
@@ -994,7 +1188,7 @@ Panel {
     property int seconds: 0
     property int pct: 0
 
-    implicitHeight: Math.max(appName.implicitHeight, appTime.implicitHeight)
+    implicitHeight: Math.max(Style.space(26), Math.max(appName.implicitHeight, appTime.implicitHeight) + Style.space(8))
 
     Rectangle {
       id: swatch
@@ -1048,6 +1242,31 @@ Panel {
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
     }
+
+    Rectangle {
+      id: pctTrack
+
+      anchors.left: swatch.right
+      anchors.leftMargin: Style.space(7)
+      anchors.right: appTime.left
+      anchors.rightMargin: Style.space(10)
+      anchors.bottom: parent.bottom
+      height: Style.space(2)
+      radius: height / 2
+      color: root.track
+      visible: width > Style.space(18)
+
+      Rectangle {
+        width: pctTrack.width * root.clamp01(pct / 100)
+        height: parent.height
+        radius: parent.radius
+        color: root.sliceColor(colorIndex, 0.72)
+
+        Behavior on width {
+          NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
+        }
+      }
+    }
   }
 
   component EmptyState: Rectangle {
@@ -1081,21 +1300,43 @@ Panel {
     property int selectedIndex: -1
     property string hoveredKey: ""
     property string hoveredText: ""
+    property real revealProgress: 0
+    property bool expanded: false
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < days.length
       ? Model.trendDetailText(days[selectedIndex])
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
 
-    implicitHeight: Style.space(164)
+    function restartReveal() {
+      revealProgress = 0
+      trendReveal.restart()
+    }
+
+    onDaysChanged: restartReveal()
+    onMaxSecondsChanged: restartReveal()
+    Component.onCompleted: restartReveal()
+
+    implicitHeight: expanded ? Style.space(198) : Style.space(164)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
     border.width: 1
 
+    NumberAnimation {
+      id: trendReveal
+
+      target: trendRoot
+      property: "revealProgress"
+      from: 0
+      to: 1
+      duration: 560
+      easing.type: Easing.OutCubic
+    }
+
     Row {
       anchors.fill: parent
       anchors.margins: Style.space(12)
-      anchors.bottomMargin: Style.space(30)
+      anchors.bottomMargin: Style.space(38)
       spacing: Style.space(7)
 
       Repeater {
@@ -1128,7 +1369,21 @@ Panel {
             Item {
               id: barSlot
               width: parent.width
-              height: Style.space(62)
+              height: Math.max(Style.space(62), trendRoot.height - Style.space(102))
+
+              Repeater {
+                model: 3
+
+                Rectangle {
+                  required property int index
+
+                  width: parent.width
+                  height: 1
+                  y: Math.round((index + 1) * barSlot.height / 4)
+                  color: root.line
+                  opacity: 0.36
+                }
+              }
 
               Rectangle {
                 width: Math.max(Style.space(7), parent.width * 0.48)
@@ -1144,15 +1399,21 @@ Panel {
                 width: Math.max(Style.space(7), parent.width * 0.48)
                 radius: Style.space(3)
                 color: active || modelData.isToday ? root.sliceColor(0, 1.0) : root.sliceColor(0, 0.48)
+                border.color: active ? root.withAlpha(root.foreground, 0.42) : "transparent"
+                border.width: active ? 1 : 0
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottom: parent.bottom
-                height: Math.max(Style.space(4), barSlot.height * Number(modelData.seconds || 0) / maxSeconds)
+                height: Math.max(Style.space(4), barSlot.height * Number(modelData.seconds || 0) / maxSeconds * trendRoot.revealProgress)
 
                 Behavior on height {
                   NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
                 }
 
                 Behavior on color {
+                  ColorAnimation { duration: 140 }
+                }
+
+                Behavior on border.color {
                   ColorAnimation { duration: 140 }
                 }
               }
@@ -1216,6 +1477,7 @@ Panel {
     property bool weekly: false
     property int hoveredIndex: -1
     property string hoveredText: ""
+    property real revealProgress: 0
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < cells.length
       ? Model.monthCellDetailText(cells[selectedIndex])
       : ""
@@ -1225,22 +1487,42 @@ Panel {
     readonly property real gap: cramped ? Style.space(2) : Style.space(4)
     readonly property int columnCount: weekly ? 13 : 7
     readonly property var headerLabels: weekly ? Model.bucketLabels(columnCount) : Model.weekdayLabels()
-    readonly property real cellSize: Math.max(Style.space(8), Math.min(Style.space(38), (width - Style.space(24) - gap * (columnCount - 1)) / columnCount))
+    readonly property real maxCellSize: weekly ? (root.widePanel ? Style.space(44) : Style.space(38)) : (root.widePanel ? Style.space(54) : Style.space(38))
+    readonly property real cellSize: Math.max(Style.space(8), Math.min(maxCellSize, (width - Style.space(24) - gap * (columnCount - 1)) / columnCount))
     readonly property int rowCount: Math.ceil(cells.length / columnCount)
+    readonly property real gridWidth: columnCount * cellSize + Math.max(0, columnCount - 1) * gap
 
-    implicitHeight: Style.space(48) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
+    function restartReveal() {
+      revealProgress = 0
+      monthReveal.restart()
+    }
+
+    onCellsChanged: restartReveal()
+    onMaxSecondsChanged: restartReveal()
+    Component.onCompleted: restartReveal()
+
+    implicitHeight: Style.space(80) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
     border.width: 1
 
+    NumberAnimation {
+      id: monthReveal
+
+      target: monthRoot
+      property: "revealProgress"
+      from: 0
+      to: 1
+      duration: 620
+      easing.type: Easing.OutCubic
+    }
+
     Row {
       id: weekdayHeader
-      anchors.left: parent.left
-      anchors.right: parent.right
+      width: monthRoot.gridWidth
+      anchors.horizontalCenter: parent.horizontalCenter
       anchors.top: parent.top
-      anchors.leftMargin: Style.space(12)
-      anchors.rightMargin: Style.space(12)
       anchors.topMargin: Style.space(8)
       spacing: monthRoot.gap
 
@@ -1250,7 +1532,7 @@ Panel {
         Text {
           required property string modelData
           width: monthRoot.cellSize
-          text: modelData.substr(0, 1)
+          text: monthRoot.weekly ? modelData : modelData.substr(0, 1)
           color: root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1260,9 +1542,8 @@ Panel {
     }
 
     Grid {
-      anchors.left: parent.left
+      anchors.horizontalCenter: parent.horizontalCenter
       anchors.top: weekdayHeader.bottom
-      anchors.leftMargin: Style.space(12)
       anchors.topMargin: Style.space(4)
       columns: monthRoot.columnCount
       rowSpacing: monthRoot.gap
@@ -1274,14 +1555,17 @@ Panel {
         Rectangle {
           required property int index
           required property var modelData
+          readonly property real cellSeconds: Number(modelData.seconds || 0)
+          readonly property real cellIntensity: Model.heatIntensity(cellSeconds, monthRoot.maxSeconds)
+          readonly property color heatBase: root.sliceColor(0, 1.0)
 
           width: monthRoot.cellSize
           height: width
           radius: Style.space(4)
           color: modelData.blank
             ? "transparent"
-            : (Number(modelData.seconds || 0) > 0
-              ? Qt.rgba(root.sliceColor(0, 1.0).r, root.sliceColor(0, 1.0).g, root.sliceColor(0, 1.0).b, 0.22 + 0.72 * Model.heatIntensity(modelData.seconds, maxSeconds))
+            : (cellSeconds > 0
+              ? root.withAlpha(heatBase, 0.10 + monthRoot.revealProgress * (0.12 + 0.70 * cellIntensity))
               : root.track)
           border.color: modelData.blank ? "transparent" : root.line
           border.width: modelData.blank ? 0 : 1
@@ -1298,10 +1582,10 @@ Panel {
           Text {
             anchors.centerIn: parent
             text: modelData.blank ? "" : String(modelData.day || "")
-            color: Number(modelData.seconds || 0) > 0 ? root.foreground : root.faint
+            color: cellSeconds > 0 ? root.foreground : root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
-            font.bold: Number(modelData.seconds || 0) > 0
+            font.bold: cellSeconds > 0
           }
 
           MouseArea {
@@ -1341,6 +1625,8 @@ Panel {
     property int selectedIndex: -1
     property int hoveredIndex: -1
     property string hoveredText: ""
+    property real revealProgress: 0
+    property bool expanded: false
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < cells.length
       ? Model.heatCellDetailText(cells[selectedIndex])
       : ""
@@ -1350,13 +1636,34 @@ Panel {
     readonly property real labelWidth: cramped ? Style.space(22) : Style.space(30)
     readonly property real gap: cramped ? Style.space(1) : Style.space(2)
     readonly property real cellWidth: Math.max(Style.space(2), (width - Style.space(24) - labelWidth - gap * 23) / 24)
-    readonly property real cellHeight: cramped ? Style.space(8) : Style.space(10)
+    readonly property real cellHeight: cramped ? Style.space(8) : Math.min(Style.space(16), Math.max(Style.space(10), cellWidth * 0.52))
+    readonly property real gridHeight: 7 * cellHeight + 6 * gap
 
-    implicitHeight: Style.space(158)
+    function restartReveal() {
+      revealProgress = 0
+      heatReveal.restart()
+    }
+
+    onCellsChanged: restartReveal()
+    onMaxSecondsChanged: restartReveal()
+    Component.onCompleted: restartReveal()
+
+    implicitHeight: Math.max(expanded ? Style.space(198) : Style.space(166), Style.space(92) + gridHeight)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
     border.width: 1
+
+    NumberAnimation {
+      id: heatReveal
+
+      target: heatRoot
+      property: "revealProgress"
+      from: 0
+      to: 1
+      duration: 700
+      easing.type: Easing.OutCubic
+    }
 
     Item {
       anchors.fill: parent
@@ -1433,18 +1740,25 @@ Panel {
             Rectangle {
               required property int index
               required property var modelData
+              readonly property real cellSeconds: Number(modelData.seconds || 0)
+              readonly property real cellIntensity: Model.heatIntensity(cellSeconds, heatRoot.maxSeconds)
+              readonly property color heatBase: root.sliceColor(2, 1.0)
 
               width: heatRoot.cellWidth
               height: heatRoot.cellHeight
               radius: Style.space(2)
-              color: Number(modelData.seconds || 0) > 0
-                ? Qt.rgba(root.sliceColor(2, 1.0).r, root.sliceColor(2, 1.0).g, root.sliceColor(2, 1.0).b, 0.18 + 0.78 * Model.heatIntensity(modelData.seconds, maxSeconds))
+              color: cellSeconds > 0
+                ? root.withAlpha(heatBase, 0.08 + heatRoot.revealProgress * (0.12 + 0.76 * cellIntensity))
                 : root.track
               border.color: heatRoot.hoveredIndex === index || heatRoot.selectedIndex === index ? root.foreground : "transparent"
               border.width: heatRoot.hoveredIndex === index || heatRoot.selectedIndex === index ? 1 : 0
 
               Behavior on color {
                 ColorAnimation { duration: 140 }
+              }
+
+              Behavior on border.color {
+                ColorAnimation { duration: 120 }
               }
 
               MouseArea {
@@ -1520,25 +1834,35 @@ Panel {
   }
 
   component ChartReadout: Rectangle {
+    id: readoutRoot
+
     property string text: ""
 
     visible: text.length > 0
-    height: visible ? Style.space(20) : 0
+    implicitHeight: visible ? readoutLabel.implicitHeight + Style.space(6) : 0
+    height: implicitHeight
     radius: Style.space(5)
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
     border.color: root.line
     border.width: 1
     opacity: visible ? 1 : 0
+    scale: visible ? 1 : 0.98
 
     Behavior on opacity {
       NumberAnimation { duration: 120 }
     }
 
+    Behavior on scale {
+      NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+    }
+
     Text {
+      id: readoutLabel
+
       anchors.fill: parent
       anchors.leftMargin: Style.space(8)
       anchors.rightMargin: Style.space(8)
-      text: parent.text
+      text: readoutRoot.text
       color: root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption

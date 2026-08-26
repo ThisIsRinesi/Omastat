@@ -31,6 +31,7 @@ pub struct AnalysisComparisonPeriod {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub focused_seconds: i64,
+    pub matched_elapsed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -345,21 +346,24 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
 }
 
 fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
-    let (label, minimum_days, explanation) = match input.period.lens {
+    let (label, minimum_days, full_explanation, elapsed_explanation) = match input.period.lens {
         AnalysisLens::Week => (
             "week",
             7,
             "Compares this week with the previous local Monday-through-Sunday week.",
+            "Compares this week so far with the same elapsed span in the previous local Monday-through-Sunday week.",
         ),
         AnalysisLens::Month => (
             "month",
             14,
             "Compares this month with the previous local calendar month.",
+            "Compares this month so far with the same elapsed span in the previous local calendar month.",
         ),
         AnalysisLens::Year => (
             "year",
             30,
             "Compares this year with the previous local calendar year.",
+            "Compares this year so far with the same elapsed span in the previous local calendar year.",
         ),
         AnalysisLens::Day | AnalysisLens::Life => {
             return;
@@ -389,7 +393,12 @@ fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         tone: comparison_tone(delta),
         title: format!("vs previous {label}"),
         value: signed_duration(delta),
-        explanation: explanation.to_string(),
+        explanation: if previous.matched_elapsed {
+            elapsed_explanation
+        } else {
+            full_explanation
+        }
+        .to_string(),
         confidence: confidence(input.daily.len(), minimum_days),
         evidence: evidence(input, minimum_days),
         supporting: support,
@@ -1795,6 +1804,7 @@ mod tests {
             start_date: Some("2026-01-05".to_string()),
             end_date: Some("2026-01-11".to_string()),
             focused_seconds: 3600,
+            matched_elapsed: false,
         });
 
         let insights = analyze(analysis);
@@ -1807,6 +1817,42 @@ mod tests {
         assert_eq!(trend.value, "+1h");
         assert_eq!(trend.tone, InsightTone::Positive);
         assert_eq!(trend.supporting.comparison_seconds, Some(3600));
+    }
+
+    #[test]
+    fn elapsed_current_period_comparison_says_so_far() {
+        let rows = vec![AppTotals {
+            app_class: "ghostty".to_string(),
+            focused_seconds: 7200,
+            open_seconds: 9000,
+        }];
+        let daily = vec![
+            day("2026-01-12", "Jan 12", 1800),
+            day("2026-01-13", "Jan 13", 2400),
+            day("2026-01-14", "Jan 14", 3000),
+        ];
+        let mut analysis = input(&rows, &daily, 7200, 9000, 0, 0);
+        analysis.period = AnalysisPeriod {
+            lens: AnalysisLens::Week,
+            label: "Week of Jan 12, 2026",
+            start_date: Some("2026-01-12"),
+            end_date: Some("2026-01-18"),
+        };
+        analysis.previous_period = Some(AnalysisComparisonPeriod {
+            label: "Week of Jan 5, 2026".to_string(),
+            start_date: Some("2026-01-05".to_string()),
+            end_date: Some("2026-01-11".to_string()),
+            focused_seconds: 3600,
+            matched_elapsed: true,
+        });
+
+        let insights = analyze(analysis);
+        let trend = insights
+            .iter()
+            .find(|insight| insight.kind == InsightKind::PeriodComparison)
+            .unwrap();
+
+        assert!(trend.explanation.contains("so far"));
     }
 
     #[test]
@@ -1833,6 +1879,7 @@ mod tests {
             start_date: Some("2025-12-01".to_string()),
             end_date: Some("2025-12-31".to_string()),
             focused_seconds: 7200,
+            matched_elapsed: false,
         });
 
         let insights = analyze(analysis);
