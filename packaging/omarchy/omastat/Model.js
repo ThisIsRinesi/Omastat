@@ -17,6 +17,23 @@ function fmtDelta(seconds) {
   return (seconds < 0 ? "-" : "+") + fmt(Math.abs(seconds))
 }
 
+function excludedDetail(idleSeconds, lockedSeconds, sleepSeconds, unobservedSeconds) {
+  var parts = []
+  if (Number(idleSeconds || 0) > 0) parts.push("away " + fmt(idleSeconds))
+  if (Number(lockedSeconds || 0) > 0) parts.push("locked " + fmt(lockedSeconds))
+  if (Number(sleepSeconds || 0) > 0) parts.push("sleep " + fmt(sleepSeconds))
+  if (Number(unobservedSeconds || 0) > 0) parts.push("tracker off " + fmt(unobservedSeconds))
+  return parts.join("  ")
+}
+
+function pausedDetail(idleSeconds, lockedSeconds, sleepSeconds) {
+  var parts = []
+  if (Number(idleSeconds || 0) > 0) parts.push("away " + fmt(idleSeconds))
+  if (Number(lockedSeconds || 0) > 0) parts.push("locked " + fmt(lockedSeconds))
+  if (Number(sleepSeconds || 0) > 0) parts.push("sleep " + fmt(sleepSeconds))
+  return parts.join("  ")
+}
+
 function optionalNumber(object, key) {
   if (!object || object[key] === undefined || object[key] === null) return null
   var value = Number(object[key])
@@ -153,16 +170,17 @@ function trendDays(daily, todayKey, lens) {
     var focused = dayFocusedSeconds(list[i])
     var open = dayOpenSeconds(list[i])
     var excluded = dayExcludedSeconds(list[i])
+    var observed = focused + excluded
     out.push({
       key: String(list[i].date || ""),
       seconds: focused,
       focused_seconds: focused,
       open_seconds: open,
       excluded_seconds: excluded,
+      observed_seconds: observed,
       valueText: fmt(focused),
-      openText: open > 0 ? fmt(open) : "--",
       excludedText: excluded > 0 ? fmt(excluded) : "0s",
-      densityText: open > 0 ? percent(focused / open) : "--",
+      densityText: observed > 0 ? percent(focused / observed) : "--",
       label: compactDayLabel(list[i], todayKey),
       fullLabel: relativeDayLabel(list[i], todayKey),
       isToday: String(list[i].date || "") === todayKey
@@ -195,6 +213,25 @@ function weekTrendSummary(daily, todayKey) {
   if (stats.bestDaySeconds > 0) parts.push("Best " + stats.bestDayLabel + " " + fmt(stats.bestDaySeconds))
   parts.push("Average " + fmt(stats.dailyAverageSeconds))
   parts.push(stats.activeDays + "/" + stats.totalDays + " active")
+  return parts.join("  ")
+}
+
+function trendDefaultText(days) {
+  var list = days || []
+  if (list.length === 0) return ""
+  var best = null
+  var total = 0
+  var active = 0
+  for (var i = 0; i < list.length; i++) {
+    var seconds = Number(list[i].seconds || 0)
+    total += seconds
+    if (seconds > 0) active += 1
+    if (!best || seconds > Number(best.seconds || 0)) best = list[i]
+  }
+  var parts = []
+  if (best && Number(best.seconds || 0) > 0) parts.push("Best " + String(best.fullLabel || best.label || "day") + ": " + fmt(best.seconds))
+  parts.push("Average " + fmt(list.length > 0 ? Math.round(total / list.length) : 0))
+  parts.push(active + "/" + list.length + " active")
   return parts.join("  ")
 }
 
@@ -253,7 +290,8 @@ function monthCells(daily, lens) {
       label: String(list[i].label || list[i].date || ""),
       seconds: dayFocusedSeconds(list[i]),
       open_seconds: dayOpenSeconds(list[i]),
-      excluded_seconds: dayExcludedSeconds(list[i])
+      excluded_seconds: dayExcludedSeconds(list[i]),
+      observed_seconds: dayFocusedSeconds(list[i]) + dayExcludedSeconds(list[i])
     })
   }
   return out
@@ -283,7 +321,8 @@ function weekCells(daily) {
       label: compactRangeLabel(first, last),
       seconds: focused,
       open_seconds: open,
-      excluded_seconds: excluded
+      excluded_seconds: excluded,
+      observed_seconds: focused + excluded
     })
   }
   return out
@@ -300,6 +339,17 @@ function maxMonthSeconds(cells) {
   var max = 0
   for (var i = 0; i < (cells || []).length; i++) if (!cells[i].blank) max = Math.max(max, Number(cells[i].seconds || 0))
   return max
+}
+
+function monthDefaultText(cells, weekly) {
+  var list = cells || []
+  var best = null
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].blank) continue
+    if (!best || Number(list[i].seconds || 0) > Number(best.seconds || 0)) best = list[i]
+  }
+  if (!best || Number(best.seconds || 0) <= 0) return weekly ? "No focused weekly buckets" : "No focused days"
+  return (weekly ? "Best week " : "Best day ") + String(best.label || best.date || "") + ": " + fmt(best.seconds)
 }
 
 var WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -342,6 +392,21 @@ function maxHeatSeconds(cells) {
   return max
 }
 
+function heatDefaultText(cells) {
+  var list = cells || []
+  var best = null
+  for (var i = 0; i < list.length; i++) {
+    if (!best || Number(list[i].seconds || 0) > Number(best.seconds || 0)) best = list[i]
+  }
+  if (!best || Number(best.seconds || 0) <= 0) return ""
+  return "Peak " + heatCellDetailText(best)
+}
+
+function heatLegendHigh(maxSeconds) {
+  maxSeconds = Number(maxSeconds || 0)
+  return maxSeconds > 0 ? "High " + fmt(maxSeconds) : "High"
+}
+
 function heatIntensity(seconds, maxSeconds) {
   seconds = Number(seconds || 0)
   maxSeconds = Number(maxSeconds || 0)
@@ -362,8 +427,7 @@ function trendDetailText(day) {
   var parts = []
   var label = String(day.fullLabel || day.label || day.key || "Day")
   parts.push(label + ": " + fmt(Number(day.seconds || 0)) + " focused")
-  parts.push(String(day.openText || "--") + " open")
-  parts.push(String(day.densityText || "--") + " share")
+  if (Number(day.observed_seconds || 0) > 0) parts.push(String(day.densityText || "--") + " of observed")
   if (Number(day.excluded_seconds || 0) > 0) parts.push(fmt(day.excluded_seconds) + " not counted")
   return parts.join("  ")
 }
@@ -372,7 +436,7 @@ function monthCellDetailText(cell) {
   if (!cell || cell.blank) return ""
   var parts = []
   parts.push(String(cell.label || cell.date || "Day") + ": " + fmt(Number(cell.seconds || 0)) + " focused")
-  if (Number(cell.open_seconds || 0) > 0) parts.push(fmt(cell.open_seconds) + " open")
+  if (Number(cell.observed_seconds || 0) > 0) parts.push(percent(Number(cell.seconds || 0) / Number(cell.observed_seconds || 1)) + " of observed")
   if (Number(cell.excluded_seconds || 0) > 0) parts.push(fmt(cell.excluded_seconds) + " not counted")
   return parts.join("  ")
 }

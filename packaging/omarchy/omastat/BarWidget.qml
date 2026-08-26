@@ -33,6 +33,8 @@ BarWidget {
   property string periodLabel: "Today"
   property int totalFocused: 0
   property int totalOpen: 0
+  property int totalElapsed: 0
+  property int totalObserved: 0
   property int totalIdle: 0
   property int totalLocked: 0
   property int totalSleep: 0
@@ -74,6 +76,8 @@ BarWidget {
   onPeriodLabelChanged: scheduleInjectPanel()
   onTotalFocusedChanged: scheduleInjectPanel()
   onTotalOpenChanged: scheduleInjectPanel()
+  onTotalElapsedChanged: scheduleInjectPanel()
+  onTotalObservedChanged: scheduleInjectPanel()
   onTotalIdleChanged: scheduleInjectPanel()
   onTotalLockedChanged: scheduleInjectPanel()
   onTotalSleepChanged: scheduleInjectPanel()
@@ -243,6 +247,8 @@ BarWidget {
     periodLabel = report.periodLabel
     totalFocused = report.totalFocused
     totalOpen = report.totalOpen
+    totalElapsed = report.totalElapsed
+    totalObserved = report.totalObserved
     totalIdle = report.totalIdle
     totalLocked = report.totalLocked
     totalSleep = report.totalSleep
@@ -269,6 +275,8 @@ BarWidget {
     periodLabel = summary.periodLabel
     totalFocused = summary.totalFocused
     totalOpen = summary.totalOpen
+    totalElapsed = summary.totalElapsed
+    totalObserved = summary.totalObserved
     totalIdle = summary.totalIdle
     totalLocked = summary.totalLocked
     totalSleep = summary.totalSleep
@@ -295,6 +303,8 @@ BarWidget {
     periodLabel = provisionalPeriodLabel(lens, offset)
     totalFocused = 0
     totalOpen = 0
+    totalElapsed = 0
+    totalObserved = 0
     totalIdle = 0
     totalLocked = 0
     totalSleep = 0
@@ -318,6 +328,8 @@ BarWidget {
     periodLabel = "Today"
     totalFocused = 0
     totalOpen = 0
+    totalElapsed = 0
+    totalObserved = 0
     totalIdle = 0
     totalLocked = 0
     totalSleep = 0
@@ -339,7 +351,7 @@ BarWidget {
     var top = report.apps.length > 0 ? report.apps[0] : report.rows[0]
     displayText = root.glyph + " " + formatDuration(report.totalFocused)
     tooltip = String(report.periodLabel || "Today") + ": " + formatDuration(report.totalFocused) + " focused"
-      + "\nOpen: " + formatDuration(report.totalOpen)
+      + (report.totalObserved > 0 ? "\nObserved: " + formatDuration(report.totalObserved) : "")
       + "\nTop: " + topAppLabel(top)
       + " (" + formatDuration(topAppSeconds(top)) + ")"
     if (report.widgetInsight && report.widgetInsight.text)
@@ -381,6 +393,8 @@ BarWidget {
     if ("periodLabel" in target) target.periodLabel = root.periodLabel
     if ("totalFocused" in target) target.totalFocused = root.totalFocused
     if ("totalOpen" in target) target.totalOpen = root.totalOpen
+    if ("totalElapsed" in target) target.totalElapsed = root.totalElapsed
+    if ("totalObserved" in target) target.totalObserved = root.totalObserved
     if ("totalIdle" in target) target.totalIdle = root.totalIdle
     if ("totalLocked" in target) target.totalLocked = root.totalLocked
     if ("totalSleep" in target) target.totalSleep = root.totalSleep
@@ -430,7 +444,7 @@ BarWidget {
     var safeOffset = safeLens === "life" ? 0 : Math.min(0, Math.floor(Number(offset) || 0))
     return "omastat summary --lens " + safeLens
       + " --offset " + safeOffset
-      + " --days 31"
+      + " --days " + reportDaysForLens(safeLens)
   }
 
   function widgetSummaryCommand(lens, offset) {
@@ -454,6 +468,13 @@ BarWidget {
     var value = String(lens || "day").toLowerCase()
     if (value === "week" || value === "month" || value === "year" || value === "life") return value
     return "day"
+  }
+
+  function reportDaysForLens(lens) {
+    var value = normalizedLens(lens)
+    if (value === "week") return 14
+    if (value === "year" || value === "life") return 90
+    return 31
   }
 
   function provisionalPeriodLabel(lens, offset) {
@@ -481,6 +502,8 @@ BarWidget {
         periodLabel: "Today",
         totalFocused: sumSeconds(legacyRows, "focused_seconds"),
         totalOpen: sumSeconds(legacyRows, "open_seconds"),
+        totalElapsed: 0,
+        totalObserved: 0,
         totalIdle: 0,
         totalLocked: 0,
         totalSleep: 0,
@@ -490,6 +513,8 @@ BarWidget {
 
     var object = parsed && typeof parsed === "object" ? parsed : {}
     var rows = Array.isArray(object.rows) ? object.rows : []
+    var elapsed = numericField(object, "total_elapsed_seconds", Math.max(0, numericField(object, "query_end_ts", 0) - numericField(object, "query_start_ts", 0)))
+    var unobserved = numericField(object, "total_unobserved_seconds", 0)
     return {
       rows: rows,
       apps: Array.isArray(object.apps) ? normalizeApps(object.apps) : [],
@@ -502,25 +527,31 @@ BarWidget {
       periodLabel: object.period && typeof object.period === "object" ? String(object.period.label || "Today") : "Today",
       totalFocused: numericField(object, "total_focused_seconds", sumSeconds(rows, "focused_seconds")),
       totalOpen: numericField(object, "total_open_seconds", sumSeconds(rows, "open_seconds")),
+      totalElapsed: elapsed,
+      totalObserved: numericField(object, "total_observed_seconds", Math.max(0, elapsed - unobserved)),
       totalIdle: numericField(object, "total_idle_seconds", 0),
       totalLocked: numericField(object, "total_locked_seconds", 0),
       totalSleep: numericField(object, "total_sleep_seconds", 0),
-      totalUnobserved: numericField(object, "total_unobserved_seconds", 0)
+      totalUnobserved: unobserved
     }
   }
 
   function normalizeWidgetSummary(parsed) {
     var object = parsed && typeof parsed === "object" ? parsed : {}
+    var elapsed = numericField(object, "total_elapsed_seconds", Math.max(0, numericField(object, "query_end_ts", 0) - numericField(object, "query_start_ts", 0)))
+    var unobserved = numericField(object, "total_unobserved_seconds", 0)
     return {
       todayKey: String(object.today_key || ""),
       lensLabel: String(object.lens_label || object.lens || "DAY").toUpperCase(),
       periodLabel: object.period && typeof object.period === "object" ? String(object.period.label || "Today") : "Today",
       totalFocused: numericField(object, "total_focused_seconds", 0),
       totalOpen: numericField(object, "total_open_seconds", 0),
+      totalElapsed: elapsed,
+      totalObserved: numericField(object, "total_observed_seconds", Math.max(0, elapsed - unobserved)),
       totalIdle: numericField(object, "total_idle_seconds", 0),
       totalLocked: numericField(object, "total_locked_seconds", 0),
       totalSleep: numericField(object, "total_sleep_seconds", 0),
-      totalUnobserved: numericField(object, "total_unobserved_seconds", 0),
+      totalUnobserved: unobserved,
       topApp: object.top_app && typeof object.top_app === "object" ? normalizeApps([object.top_app])[0] || null : null,
       displayValue: String(object.display_value || formatDuration(numericField(object, "total_focused_seconds", 0))),
       tooltip: String(object.tooltip || "Omastat"),
@@ -659,6 +690,8 @@ BarWidget {
     var output = []
     for (var i = 0; i < list.length; i++) {
       var item = list[i] || {}
+      var kind = String(item.kind || "")
+      if (kind === "focus-density" || kind === "app-focus-density") continue
       var label = String(item.title || item.label || item.kind || "")
       var value = String(item.value || "")
       if (label.length === 0 && value.length === 0) continue
@@ -746,7 +779,7 @@ BarWidget {
       case "app-switch-rate":
         return detailWithConfidence("Counts how often focus moved from one app to another.", item)
       case "focus-density":
-        return detailWithConfidence("Shows how much app-open time was focused.", item)
+        return detailWithConfidence("Shows how much observed time was focused.", item)
       case "unobserved-excluded":
         return detailWithConfidence("Tracker off time was not counted as focus.", item)
       case "excluded-impact":

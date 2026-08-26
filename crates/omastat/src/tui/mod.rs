@@ -414,10 +414,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let apps = report::app_breakdown(&rows, 6);
+        let query_start_ts = Local::now().timestamp() - 7 * 86400;
+        let query_end_ts = Local::now().timestamp();
+        let total_unobserved_seconds = daily.iter().map(|day| day.unobserved_seconds).sum();
         let report = UsageReport {
             generated_at: 0,
-            query_start_ts: Local::now().timestamp() - 7 * 86400,
-            query_end_ts: Local::now().timestamp(),
+            query_start_ts,
+            query_end_ts,
             today_key: "2026-01-14".to_string(),
             lens: Lens::Week,
             lens_label: Lens::Week.label(),
@@ -429,10 +432,14 @@ mod tests {
             },
             total_focused_seconds: report::focused_total(&rows),
             total_open_seconds: report::open_total(&rows),
+            total_elapsed_seconds: query_end_ts.saturating_sub(query_start_ts),
+            total_observed_seconds: query_end_ts
+                .saturating_sub(query_start_ts)
+                .saturating_sub(total_unobserved_seconds),
             total_idle_seconds: daily.iter().map(|day| day.idle_seconds).sum(),
             total_locked_seconds: 0,
             total_sleep_seconds: daily.iter().map(|day| day.sleep_seconds).sum(),
-            total_unobserved_seconds: daily.iter().map(|day| day.unobserved_seconds).sum(),
+            total_unobserved_seconds,
             rows,
             apps,
             daily,

@@ -51,6 +51,8 @@ pub struct UsageReport {
     pub period: Period,
     pub total_focused_seconds: i64,
     pub total_open_seconds: i64,
+    pub total_elapsed_seconds: i64,
+    pub total_observed_seconds: i64,
     pub total_idle_seconds: i64,
     pub total_locked_seconds: i64,
     pub total_sleep_seconds: i64,
@@ -112,6 +114,8 @@ pub struct WidgetSummaryReport {
     pub period: Period,
     pub total_focused_seconds: i64,
     pub total_open_seconds: i64,
+    pub total_elapsed_seconds: i64,
+    pub total_observed_seconds: i64,
     pub total_idle_seconds: i64,
     pub total_locked_seconds: i64,
     pub total_sleep_seconds: i64,
@@ -280,6 +284,9 @@ pub fn widget_summary_for_period(
     let total_focused_seconds = focused_total(&rows);
     let total_open_seconds = open_total(&rows);
     let session_totals = storage.session_totals_between(period.start_ts, period.query_end_ts)?;
+    let total_elapsed_seconds = period.query_end_ts.saturating_sub(period.start_ts).max(0);
+    let total_observed_seconds =
+        total_elapsed_seconds.saturating_sub(session_totals.unobserved_seconds.max(0));
     let top_app = rows.iter().find(|row| row.focused_seconds > 0).map(|row| {
         let label = config.app_label(&row.app_class, || app_label(&row.app_class));
         let category = config.app_category(&row.app_class);
@@ -296,9 +303,9 @@ pub fn widget_summary_for_period(
     let period_label = period.meta.label.clone();
     let tooltip = match top_app.as_ref() {
         Some(app) if total_focused_seconds > 0 => format!(
-            "{period_label}: {} focused\nOpen: {}\nTop: {} ({})",
+            "{period_label}: {} focused\nObserved: {}\nTop: {} ({})",
             format_duration(total_focused_seconds),
-            format_duration(total_open_seconds),
+            format_duration(total_observed_seconds),
             app.label,
             format_duration(app.focused_seconds)
         ),
@@ -324,6 +331,8 @@ pub fn widget_summary_for_period(
         period: period.meta,
         total_focused_seconds,
         total_open_seconds,
+        total_elapsed_seconds,
+        total_observed_seconds,
         total_idle_seconds: session_totals.idle_seconds,
         total_locked_seconds: session_totals.locked_seconds,
         total_sleep_seconds: session_totals.sleep_seconds,
@@ -349,6 +358,9 @@ fn usage_report_with_rollups_for_period_with_days(
     let total_focused_seconds = focused_total(&rows);
     let total_open_seconds = open_total(&rows);
     let session_totals = storage.session_totals_between(period.start_ts, period.query_end_ts)?;
+    let total_elapsed_seconds = period.query_end_ts.saturating_sub(period.start_ts).max(0);
+    let total_observed_seconds =
+        total_elapsed_seconds.saturating_sub(session_totals.unobserved_seconds.max(0));
     let today_key = clock::local_now().format("%Y-%m-%d").to_string();
     let selected_day_key = selected_day_key(lens, &period, &daily, &today_key);
     let apps = app_breakdown_with_config(&rows, 6, config);
@@ -404,6 +416,8 @@ fn usage_report_with_rollups_for_period_with_days(
         period: period.meta,
         total_focused_seconds,
         total_open_seconds,
+        total_elapsed_seconds,
+        total_observed_seconds,
         total_idle_seconds: session_totals.idle_seconds,
         total_locked_seconds: session_totals.locked_seconds,
         total_sleep_seconds: session_totals.sleep_seconds,
@@ -1062,6 +1076,8 @@ mod tests {
             },
             total_focused_seconds: 3600,
             total_open_seconds: 5400,
+            total_elapsed_seconds: 1000,
+            total_observed_seconds: 1000,
             total_idle_seconds: 300,
             total_locked_seconds: 0,
             total_sleep_seconds: 0,

@@ -27,6 +27,8 @@ Panel {
   property string periodLabel: "Today"
   property int totalFocused: 0
   property int totalOpen: 0
+  property int totalElapsed: 0
+  property int totalObserved: 0
   property int totalIdle: 0
   property int totalLocked: 0
   property int totalSleep: 0
@@ -45,7 +47,6 @@ Panel {
   readonly property color track: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.10)
   readonly property color fill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.06)
   readonly property color line: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.18)
-  readonly property color excludedColor: totalUnobserved > 0 ? Color.urgent : root.sliceColor(3, 1.0)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var availableLenses: [
@@ -58,13 +59,19 @@ Panel {
   readonly property bool compactPanel: panel.width > 0 && panel.width < Style.space(560)
   readonly property bool narrowPanel: panel.width > 0 && panel.width < Style.space(430)
   readonly property int tileColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 4)
+  readonly property int metricColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 5)
   readonly property bool appMixStacked: panel.width > 0 && panel.width < Style.space(680)
   readonly property bool usesCalendar: selectedLens === "month" || selectedLens === "year" || selectedLens === "life"
   readonly property bool usesWeeklyCalendar: selectedLens === "year" || selectedLens === "life"
   readonly property bool periodCanShift: selectedLens !== "life"
   readonly property string displayTodayKey: selectedOffset === 0 ? todayKey : ""
-  readonly property int totalExcluded: totalIdle + totalLocked + totalSleep + totalUnobserved
-  readonly property string focusShareText: totalOpen > 0 ? Model.percent(totalFocused / totalOpen) : "--"
+  readonly property int totalPaused: totalIdle + totalLocked + totalSleep
+  readonly property int totalExcluded: totalPaused + totalUnobserved
+  readonly property int focusDenominator: totalObserved > 0 ? totalObserved : Math.max(0, totalFocused + totalPaused)
+  readonly property string focusShareText: focusDenominator > 0 ? Model.percent(totalFocused / focusDenominator) : "--"
+  readonly property string observedDetailText: totalElapsed > 0 ? "Of " + root.formatDuration(totalElapsed) + " elapsed" : "Tracker-visible time"
+  readonly property string pausedDetailText: Model.pausedDetail(totalIdle, totalLocked, totalSleep)
+  readonly property string excludedDetailText: Model.excludedDetail(totalIdle, totalLocked, totalSleep, totalUnobserved)
   readonly property var visibleApps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
   readonly property var sliceColors: Model.sliceColors(visibleApps.length, Color.accent)
   readonly property var segments: Model.arcSegments(visibleApps)
@@ -79,14 +86,15 @@ Panel {
   readonly property var consistency: Model.consistencyStats(daily)
   readonly property var insightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
   readonly property bool hasFocusedData: totalFocused > 0 || visibleApps.length > 0
-  readonly property bool showBreakdown: totalFocused + totalOpen + totalExcluded > 0
+  readonly property bool showBreakdown: totalFocused + totalObserved + totalExcluded > 0
   readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.75, Style.space(1180)) : Style.space(1080)
   readonly property real targetPanelHeight: Screen.height > 0 ? Math.min(Screen.height * 0.88, Style.space(980)) : Style.space(820)
   readonly property bool widePanel: panel.width >= Style.space(900)
   readonly property bool showActivityChart: usesCalendar ? monthCells.length > 0 : trendDays.length > 0
   readonly property bool showHeatmapChart: heatMax > 0
   readonly property int analyticsColumns: widePanel && showActivityChart && showHeatmapChart ? 2 : 1
-  readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days" : "Across period")
+  readonly property string periodScopeLabel: selectedOffset === 0 && selectedLens !== "day" && selectedLens !== "life" ? periodLabel + " to date" : periodLabel
+  readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days only" : "Across period")
   readonly property string loadingAppMixText: summaryTopApp && summaryTopApp.app ? "Loading app mix; top " + String(summaryTopApp.app) + " " + root.formatDuration(Number(summaryTopApp.seconds || 0)) : "Loading app mix..."
 
   onSelectedLensChanged: clearInspection()
@@ -269,7 +277,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: root.narrowPanel ? root.periodLabel : root.periodLabel + "  -  " + root.lensLabel
+              text: root.narrowPanel ? root.periodScopeLabel : root.periodScopeLabel + "  -  " + root.lensLabel
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -406,7 +414,7 @@ Panel {
 
           GridLayout {
             width: parent.width
-            columns: root.tileColumns
+            columns: root.metricColumns
             rowSpacing: Style.space(8)
             columnSpacing: Style.space(8)
 
@@ -414,32 +422,40 @@ Panel {
               Layout.fillWidth: true
               label: "Focused"
               value: root.formatDuration(root.totalFocused)
-              detail: root.hasFocusedData ? "Focused app time" : "No focus yet"
+              detail: root.hasFocusedData ? "Focused time" : "No focus yet"
               accentColor: root.sliceColor(0, 1.0)
-            }
-
-            MetricTile {
-              Layout.fillWidth: true
-              label: "Open"
-              value: root.formatDuration(root.totalOpen)
-              detail: root.totalOpen > 0 ? "App-open total" : "--"
-              accentColor: root.sliceColor(1, 1.0)
             }
 
             MetricTile {
               Layout.fillWidth: true
               label: "Focus Share"
               value: root.focusShareText
-              detail: root.totalOpen > 0 ? "Focused / app-open" : "--"
+              detail: root.focusDenominator > 0 ? "Focused / observed" : "--"
+              accentColor: root.sliceColor(1, 1.0)
+            }
+
+            MetricTile {
+              Layout.fillWidth: true
+              label: "Observed"
+              value: root.totalObserved > 0 ? root.formatDuration(root.totalObserved) : "--"
+              detail: root.observedDetailText
               accentColor: root.sliceColor(2, 1.0)
             }
 
             MetricTile {
               Layout.fillWidth: true
-              label: "Not Counted"
-              value: root.formatDuration(root.totalExcluded)
-              detail: "Away, lock, sleep, off"
-              accentColor: root.excludedColor
+              label: "Paused"
+              value: root.formatDuration(root.totalPaused)
+              detail: "Away, lock, sleep"
+              accentColor: root.sliceColor(3, 1.0)
+            }
+
+            MetricTile {
+              Layout.fillWidth: true
+              label: "Tracker Off"
+              value: root.formatDuration(root.totalUnobserved)
+              detail: root.totalUnobserved > 0 ? "Unobserved gap" : "No tracker gaps"
+              accentColor: root.totalUnobserved > 0 ? Color.urgent : root.faint
             }
           }
 
@@ -466,8 +482,11 @@ Panel {
               TimeBreakdownStrip {
                 width: parent.width
                 focusedSeconds: root.totalFocused
-                openSeconds: root.totalOpen
-                excludedSeconds: root.totalExcluded
+                observedSeconds: root.totalObserved
+                pausedSeconds: root.totalPaused
+                trackerOffSeconds: root.totalUnobserved
+                focusedShare: root.focusDenominator > 0 ? root.totalFocused / root.focusDenominator : 0
+                excludedDetail: root.excludedDetailText
               }
             }
 
@@ -490,7 +509,7 @@ Panel {
           }
 
           SectionHeader {
-            text: "App Mix"
+            text: "App Mix by Focused Time"
           }
 
           Rectangle {
@@ -674,7 +693,7 @@ Panel {
               spacing: Style.space(8)
 
               SectionHeader {
-                text: root.selectedLens === "day" || root.selectedLens === "week" ? "Focus Heatmap" : "Cumulative Focus Heatmap"
+                text: root.selectedLens === "day" || root.selectedLens === "week" ? "Focus by Time of Week" : "Cumulative Focus by Time of Week"
               }
 
               HeatmapGrid {
@@ -931,11 +950,14 @@ Panel {
     id: breakdownRoot
 
     property int focusedSeconds: 0
-    property int openSeconds: 0
-    property int excludedSeconds: 0
+    property int observedSeconds: 0
+    property int pausedSeconds: 0
+    property int trackerOffSeconds: 0
+    property real focusedShare: 0
+    property string excludedDetail: ""
     property real revealProgress: 0
 
-    readonly property int maxSeconds: Math.max(1, focusedSeconds, openSeconds, excludedSeconds)
+    readonly property int maxSeconds: Math.max(1, focusedSeconds, observedSeconds, pausedSeconds, trackerOffSeconds)
 
     function restartReveal() {
       revealProgress = 0
@@ -943,11 +965,12 @@ Panel {
     }
 
     onFocusedSecondsChanged: restartReveal()
-    onOpenSecondsChanged: restartReveal()
-    onExcludedSecondsChanged: restartReveal()
+    onObservedSecondsChanged: restartReveal()
+    onPausedSecondsChanged: restartReveal()
+    onTrackerOffSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: Style.space(116)
+    implicitHeight: Style.space(178)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -971,29 +994,42 @@ Panel {
 
       BreakdownBar {
         width: parent.width
-        label: "Focused"
-        value: root.formatDuration(focusedSeconds)
+        label: "Focused Time"
+        value: root.formatDuration(focusedSeconds) + (observedSeconds > 0 ? "  " + Model.percent(focusedShare) : "")
         ratio: focusedSeconds / breakdownRoot.maxSeconds
         revealProgress: breakdownRoot.revealProgress
         colorValue: root.sliceColor(0, 0.95)
+        detail: observedSeconds > 0 ? "Share of observed time" : ""
       }
 
       BreakdownBar {
         width: parent.width
-        label: "App Open"
-        value: root.formatDuration(openSeconds)
-        ratio: openSeconds / breakdownRoot.maxSeconds
+        label: "Observed Time"
+        value: observedSeconds > 0 ? root.formatDuration(observedSeconds) : "--"
+        ratio: observedSeconds / breakdownRoot.maxSeconds
         revealProgress: breakdownRoot.revealProgress
         colorValue: root.sliceColor(1, 0.78)
+        detail: root.observedDetailText
       }
 
       BreakdownBar {
         width: parent.width
-        label: "Not Counted"
-        value: root.formatDuration(excludedSeconds)
-        ratio: excludedSeconds / breakdownRoot.maxSeconds
+        label: "Paused"
+        value: root.formatDuration(pausedSeconds)
+        ratio: pausedSeconds / breakdownRoot.maxSeconds
         revealProgress: breakdownRoot.revealProgress
-        colorValue: root.excludedColor
+        colorValue: root.sliceColor(3, 1.0)
+        detail: root.pausedDetailText.length > 0 ? root.pausedDetailText : "Away, lock, sleep"
+      }
+
+      BreakdownBar {
+        width: parent.width
+        label: "Tracker Off"
+        value: root.formatDuration(trackerOffSeconds)
+        ratio: trackerOffSeconds / breakdownRoot.maxSeconds
+        revealProgress: breakdownRoot.revealProgress
+        colorValue: trackerOffSeconds > 0 ? Color.urgent : root.faint
+        detail: trackerOffSeconds > 0 ? "Unobserved time excluded from focus share" : "No tracker gaps"
       }
     }
   }
@@ -1004,8 +1040,9 @@ Panel {
     property real ratio: 0
     property real revealProgress: 1
     property color colorValue: root.accent
+    property string detail: ""
 
-    implicitHeight: Style.space(26)
+    implicitHeight: Style.space(detail.length > 0 ? 34 : 26)
 
     Rectangle {
       id: signalTrack
@@ -1055,6 +1092,19 @@ Panel {
       font.pixelSize: Style.font.caption
       font.bold: true
       horizontalAlignment: Text.AlignRight
+      elide: Text.ElideRight
+    }
+
+    Text {
+      anchors.left: parent.left
+      anchors.right: valueLabel.left
+      anchors.rightMargin: Style.space(10)
+      anchors.top: legendLabel.bottom
+      visible: detail.length > 0
+      text: detail
+      color: root.faint
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
       elide: Text.ElideRight
     }
   }
@@ -1306,6 +1356,7 @@ Panel {
       ? Model.trendDetailText(days[selectedIndex])
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property string defaultText: Model.trendDefaultText(days)
 
     function restartReveal() {
       revealProgress = 0
@@ -1464,7 +1515,7 @@ Panel {
       anchors.right: parent.right
       anchors.bottom: parent.bottom
       anchors.margins: Style.space(10)
-      text: trendRoot.readoutText
+      text: trendRoot.readoutText.length > 0 ? trendRoot.readoutText : trendRoot.defaultText
     }
   }
 
@@ -1482,6 +1533,7 @@ Panel {
       ? Model.monthCellDetailText(cells[selectedIndex])
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property string defaultText: Model.monthDefaultText(cells, weekly)
 
     readonly property bool cramped: width > 0 && width < Style.space(360)
     readonly property real gap: cramped ? Style.space(2) : Style.space(4)
@@ -1613,7 +1665,7 @@ Panel {
       anchors.right: parent.right
       anchors.bottom: parent.bottom
       anchors.margins: Style.space(10)
-      text: monthRoot.readoutText
+      text: monthRoot.readoutText.length > 0 ? monthRoot.readoutText : monthRoot.defaultText
     }
   }
 
@@ -1631,6 +1683,7 @@ Panel {
       ? Model.heatCellDetailText(cells[selectedIndex])
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property string defaultText: Model.heatDefaultText(cells)
 
     readonly property bool cramped: width > 0 && width < Style.space(430)
     readonly property real labelWidth: cramped ? Style.space(22) : Style.space(30)
@@ -1812,8 +1865,8 @@ Panel {
         }
 
         Text {
-          width: Style.space(42)
-          text: "High"
+          width: Style.space(92)
+          text: Model.heatLegendHigh(heatRoot.maxSeconds)
           color: root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1829,7 +1882,7 @@ Panel {
       anchors.leftMargin: Style.space(86)
       anchors.rightMargin: Style.space(10)
       anchors.bottomMargin: Style.space(26)
-      text: heatRoot.readoutText
+      text: heatRoot.readoutText.length > 0 ? heatRoot.readoutText : heatRoot.defaultText
     }
   }
 
