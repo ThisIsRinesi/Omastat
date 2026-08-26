@@ -2008,6 +2008,8 @@ mod tests {
             label: label.to_string(),
             focused_seconds,
             open_seconds: focused_seconds,
+            elapsed_seconds: focused_seconds,
+            observed_seconds: focused_seconds,
             idle_seconds: 0,
             locked_seconds: 0,
             sleep_seconds: 0,

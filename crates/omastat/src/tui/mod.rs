@@ -407,6 +407,8 @@ mod tests {
                 label: format!("D{index}"),
                 focused_seconds: (index as i64 + 1) * 300,
                 open_seconds: (index as i64 + 2) * 500,
+                elapsed_seconds: 86400,
+                observed_seconds: 86400 - if index == 2 { 900 } else { 0 },
                 idle_seconds: index as i64 * 120,
                 locked_seconds: 0,
                 sleep_seconds: if index == 4 { 1800 } else { 0 },

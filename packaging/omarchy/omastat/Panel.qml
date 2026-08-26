@@ -22,6 +22,7 @@ Panel {
   property var widgetInsight: null
   property var daily: []
   property var heatmap: []
+  property bool panelDataLoaded: false
   property string todayKey: ""
   property string lensLabel: "DAY"
   property string periodLabel: "Today"
@@ -59,10 +60,7 @@ Panel {
   readonly property bool compactPanel: panel.width > 0 && panel.width < Style.space(560)
   readonly property bool narrowPanel: panel.width > 0 && panel.width < Style.space(430)
   readonly property int tileColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 4)
-  readonly property int metricColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 5)
-  readonly property bool appMixStacked: panel.width > 0 && panel.width < Style.space(680)
-  readonly property bool usesCalendar: selectedLens === "month" || selectedLens === "year" || selectedLens === "life"
-  readonly property bool usesWeeklyCalendar: selectedLens === "year" || selectedLens === "life"
+  readonly property int metricColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 3)
   readonly property bool periodCanShift: selectedLens !== "life"
   readonly property string displayTodayKey: selectedOffset === 0 ? todayKey : ""
   readonly property int totalPaused: totalIdle + totalLocked + totalSleep
@@ -73,16 +71,20 @@ Panel {
   readonly property string pausedDetailText: Model.pausedDetail(totalIdle, totalLocked, totalSleep)
   readonly property string excludedDetailText: Model.excludedDetail(totalIdle, totalLocked, totalSleep, totalUnobserved)
   readonly property var visibleApps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
+  readonly property var topVisibleApp: visibleApps.length > 0 ? visibleApps[0] : null
+  readonly property string topAppName: topVisibleApp ? String(topVisibleApp.app || "App") : "--"
+  readonly property string topAppValue: topVisibleApp ? root.formatDuration(Number(topVisibleApp.seconds || 0)) + "  " + Number(topVisibleApp.pct || 0) + "%" : "--"
   readonly property var sliceColors: Model.sliceColors(visibleApps.length, Color.accent)
-  readonly property var segments: Model.arcSegments(visibleApps)
-  readonly property int appLegendSplitIndex: Math.ceil(visibleApps.length / 2)
-  readonly property var trendDays: Model.trendDays(daily, displayTodayKey, selectedLens)
-  readonly property real trendMax: Model.maxDailySeconds(trendDays)
+  readonly property var appColors: Model.stableAppColors(visibleApps, Color.accent)
   readonly property string trendSummaryText: Model.weekTrendSummary(daily, displayTodayKey)
   readonly property var monthCells: Model.monthCells(daily, selectedLens)
+  readonly property var activityCells: Model.activityCells(daily, selectedLens)
   readonly property real monthMax: Model.maxMonthSeconds(monthCells)
   readonly property var heatCells: Model.heatmapCells(heatmap)
+  readonly property var hourlyCells: Model.hourlyCells(heatmap)
+  readonly property var hourlyTrendCells: Model.hourlyTrendCells(heatmap)
   readonly property real heatMax: Model.maxHeatSeconds(heatCells)
+  readonly property real hourlyMax: Model.maxHourlySeconds(hourlyCells)
   readonly property var consistency: Model.consistencyStats(daily)
   readonly property var insightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
   readonly property bool hasFocusedData: totalFocused > 0 || visibleApps.length > 0
@@ -90,9 +92,9 @@ Panel {
   readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.75, Style.space(1180)) : Style.space(1080)
   readonly property real targetPanelHeight: Screen.height > 0 ? Math.min(Screen.height * 0.88, Style.space(980)) : Style.space(820)
   readonly property bool widePanel: panel.width >= Style.space(900)
-  readonly property bool showActivityChart: usesCalendar ? monthCells.length > 0 : trendDays.length > 0
-  readonly property bool showHeatmapChart: heatMax > 0
-  readonly property int analyticsColumns: widePanel && showActivityChart && showHeatmapChart ? 2 : 1
+  readonly property bool showActivityChart: selectedLens === "month" ? monthCells.length > 0 : activityCells.length > 0
+  readonly property bool showHeatmapChart: selectedLens !== "day" && heatMax > 0
+  readonly property bool showHourlyChart: selectedLens === "day" && hourlyMax > 0
   readonly property string periodScopeLabel: selectedOffset === 0 && selectedLens !== "day" && selectedLens !== "life" ? periodLabel + " to date" : periodLabel
   readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days only" : "Across period")
   readonly property string loadingAppMixText: summaryTopApp && summaryTopApp.app ? "Loading app mix; top " + String(summaryTopApp.app) + " " + root.formatDuration(Number(summaryTopApp.seconds || 0)) : "Loading app mix..."
@@ -163,7 +165,7 @@ Panel {
   }
 
   function inspectActivity(delta) {
-    var count = root.usesCalendar ? root.monthCells.length : root.trendDays.length
+    var count = root.selectedLens === "month" ? root.monthCells.length : root.activityCells.length
     if (count <= 0) return
 
     var direction = delta < 0 ? -1 : 1
@@ -172,7 +174,7 @@ Panel {
       : (direction > 0 ? 0 : count - 1)
     for (var i = 0; i < count; i++) {
       next = (next + count) % count
-      if (!root.usesCalendar || !(root.monthCells[next] && root.monthCells[next].blank)) {
+      if (root.selectedLens !== "month" || !(root.monthCells[next] && root.monthCells[next].blank)) {
         inspectedActivityIndex = next
         return
       }
@@ -267,7 +269,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: "Omastat"
+              text: root.periodScopeLabel
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -277,7 +279,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: root.narrowPanel ? root.periodScopeLabel : root.periodScopeLabel + "  -  " + root.lensLabel
+              text: root.formatDuration(root.totalFocused) + " focused" + (root.focusShareText !== "--" ? "  -  " + root.focusShareText + " of observed" : "")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -422,7 +424,7 @@ Panel {
               Layout.fillWidth: true
               label: "Focused"
               value: root.formatDuration(root.totalFocused)
-              detail: root.hasFocusedData ? "Focused time" : "No focus yet"
+              detail: root.periodScopeLabel
               accentColor: root.sliceColor(0, 1.0)
             }
 
@@ -436,74 +438,89 @@ Panel {
 
             MetricTile {
               Layout.fillWidth: true
-              label: "Observed"
-              value: root.totalObserved > 0 ? root.formatDuration(root.totalObserved) : "--"
-              detail: root.observedDetailText
+              label: root.topVisibleApp ? "Top App" : "Top App"
+              value: root.topAppName
+              detail: root.topAppValue
               accentColor: root.sliceColor(2, 1.0)
-            }
-
-            MetricTile {
-              Layout.fillWidth: true
-              label: "Paused"
-              value: root.formatDuration(root.totalPaused)
-              detail: "Away, lock, sleep"
-              accentColor: root.sliceColor(3, 1.0)
-            }
-
-            MetricTile {
-              Layout.fillWidth: true
-              label: "Tracker Off"
-              value: root.formatDuration(root.totalUnobserved)
-              detail: root.totalUnobserved > 0 ? "Unobserved gap" : "No tracker gaps"
-              accentColor: root.totalUnobserved > 0 ? Color.urgent : root.faint
             }
           }
 
           GridLayout {
-            id: summaryGrid
+            id: primaryAnalyticsGrid
 
             width: parent.width
-            visible: root.showBreakdown || (root.widePanel && root.daily.length > 0)
-            columns: root.widePanel && root.showBreakdown && root.daily.length > 0 ? 2 : 1
+            visible: root.showActivityChart || root.showHourlyChart || root.showHeatmapChart
+            columns: root.widePanel && (root.showActivityChart && (root.showHourlyChart || root.showHeatmapChart)) ? 2 : 1
             rowSpacing: Style.space(12)
             columnSpacing: Style.space(12)
 
             Column {
               Layout.fillWidth: true
-              Layout.preferredWidth: summaryGrid.columns > 1 ? Math.max(0, (summaryGrid.width - summaryGrid.columnSpacing) * 0.48) : summaryGrid.width
+              Layout.preferredWidth: primaryAnalyticsGrid.columns > 1 ? Math.max(0, (primaryAnalyticsGrid.width - primaryAnalyticsGrid.columnSpacing) / 2) : primaryAnalyticsGrid.width
               Layout.alignment: Qt.AlignTop
-              visible: root.showBreakdown
+              visible: root.showActivityChart
               spacing: Style.space(8)
 
               SectionHeader {
-                text: "Tracked Signals"
+                text: root.selectedLens === "day" ? "Last 7 Days" : (root.selectedLens === "week" ? "This Week" : (root.selectedLens === "month" ? "Month Calendar" : (root.selectedLens === "year" ? "Monthly Focus" : "Recent Weeks")))
               }
 
-              TimeBreakdownStrip {
+              TrendBars {
                 width: parent.width
-                focusedSeconds: root.totalFocused
-                observedSeconds: root.totalObserved
-                pausedSeconds: root.totalPaused
-                trackerOffSeconds: root.totalUnobserved
-                focusedShare: root.focusDenominator > 0 ? root.totalFocused / root.focusDenominator : 0
-                excludedDetail: root.excludedDetailText
+                expanded: root.widePanel
+                visible: root.selectedLens !== "month" && root.activityCells.length > 0
+                days: root.activityCells
+                maxSeconds: Model.maxDailySeconds(root.activityCells)
+                selectedIndex: root.inspectedActivityIndex
+              }
+
+              MonthHeatmap {
+                width: parent.width
+                visible: root.selectedLens === "month" && root.monthCells.length > 0
+                cells: root.monthCells
+                maxSeconds: root.monthMax
+                selectedIndex: root.inspectedActivityIndex
+                weekly: false
+              }
+
+              Text {
+                visible: root.trendSummaryText !== ""
+                width: parent.width
+                text: root.trendSummaryText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
               }
             }
 
             Column {
               Layout.fillWidth: true
-              Layout.preferredWidth: summaryGrid.columns > 1 ? Math.max(0, (summaryGrid.width - summaryGrid.columnSpacing) * 0.52) : summaryGrid.width
+              Layout.preferredWidth: primaryAnalyticsGrid.columns > 1 ? Math.max(0, (primaryAnalyticsGrid.width - primaryAnalyticsGrid.columnSpacing) / 2) : primaryAnalyticsGrid.width
               Layout.alignment: Qt.AlignTop
-              visible: root.widePanel && root.daily.length > 0
+              visible: root.showHourlyChart || root.showHeatmapChart
               spacing: Style.space(8)
 
               SectionHeader {
-                text: root.selectedLens === "life" ? "Recent Consistency" : "Consistency"
+                text: root.selectedLens === "day" ? "Today by Hour" : "Focus by Time of Week"
               }
 
-              ConsistencyMetrics {
+              TrendBars {
                 width: parent.width
-                columnsValue: 4
+                expanded: root.widePanel
+                visible: root.showHourlyChart
+                days: root.hourlyTrendCells
+                maxSeconds: root.hourlyMax
+                selectedIndex: -1
+              }
+
+              HeatmapGrid {
+                width: parent.width
+                expanded: root.widePanel
+                visible: root.showHeatmapChart
+                cells: root.heatCells
+                maxSeconds: root.heatMax
+                selectedIndex: root.inspectedHeatIndex
               }
             }
           }
@@ -516,7 +533,7 @@ Panel {
             id: appMixCard
 
             width: parent.width
-            implicitHeight: appMixGrid.implicitHeight + Style.space(24)
+            implicitHeight: appRankBars.implicitHeight + Style.space(24)
             radius: Style.space(7)
             color: root.fill
             border.color: root.widePanel ? root.sliceColor(0, 0.32) : root.line
@@ -533,188 +550,32 @@ Panel {
               opacity: root.widePanel ? 1 : 0.72
             }
 
-            GridLayout {
-              id: appMixGrid
-
-              readonly property bool splitLegend: root.widePanel && root.visibleApps.length >= 4
-
+            AppRankBars {
+              id: appRankBars
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
               anchors.margins: Style.space(12)
-              columns: root.appMixStacked ? 1 : (splitLegend ? 3 : 2)
-              rowSpacing: Style.space(12)
-              columnSpacing: Style.space(18)
-
-              DonutChart {
-                id: appDonut
-                Layout.preferredWidth: root.appMixStacked ? Style.space(150) : (appMixGrid.splitLegend ? Style.space(184) : (root.widePanel ? Style.space(220) : Style.space(168)))
-                Layout.preferredHeight: Layout.preferredWidth
-                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
-                segments: root.segments
-                colors: root.sliceColors
-                centerLabel: "FOCUS"
-                centerValue: root.formatDuration(root.totalFocused)
-              }
-
-              Column {
-                id: appLegend
-
-                Layout.fillWidth: true
-                Layout.alignment: Qt.AlignVCenter
-                visible: !appMixGrid.splitLegend
-                spacing: Style.space(7)
-
-                Repeater {
-                  model: root.visibleApps
-
-                  AppLegendRow {
-                    required property int index
-                    required property var modelData
-
-                    width: parent.width
-                    colorIndex: index
-                    app: String(modelData.app || "")
-                    category: String(modelData.category || "")
-                    seconds: Number(modelData.seconds || 0)
-                    pct: Number(modelData.pct || 0)
-                  }
-                }
-              }
-
-              Column {
-                Layout.fillWidth: true
-                Layout.alignment: Qt.AlignVCenter
-                visible: appMixGrid.splitLegend
-                spacing: Style.space(7)
-
-                Repeater {
-                  model: root.visibleApps.slice(0, root.appLegendSplitIndex)
-
-                  AppLegendRow {
-                    required property int index
-                    required property var modelData
-
-                    width: parent.width
-                    colorIndex: index
-                    app: String(modelData.app || "")
-                    category: String(modelData.category || "")
-                    seconds: Number(modelData.seconds || 0)
-                    pct: Number(modelData.pct || 0)
-                  }
-                }
-              }
-
-              Column {
-                Layout.fillWidth: true
-                Layout.alignment: Qt.AlignVCenter
-                visible: appMixGrid.splitLegend
-                spacing: Style.space(7)
-
-                Repeater {
-                  model: root.visibleApps.slice(root.appLegendSplitIndex)
-
-                  AppLegendRow {
-                    required property int index
-                    required property var modelData
-
-                    width: parent.width
-                    colorIndex: root.appLegendSplitIndex + index
-                    app: String(modelData.app || "")
-                    category: String(modelData.category || "")
-                    seconds: Number(modelData.seconds || 0)
-                    pct: Number(modelData.pct || 0)
-                  }
-                }
-              }
+              apps: root.visibleApps
+              colors: root.appColors
             }
           }
 
           EmptyState {
             visible: root.visibleApps.length === 0
-            text: root.errorText !== "" ? root.errorText : (root.refreshRunning && root.totalFocused > 0 ? root.loadingAppMixText : "No focused app time for this period")
+            text: root.errorText !== "" ? root.errorText : (!root.panelDataLoaded && root.refreshRunning ? "Loading analytics..." : "No focused app time for this period")
             urgent: root.errorText !== ""
-          }
-
-          GridLayout {
-            id: analyticsGrid
-
-            width: parent.width
-            visible: root.showActivityChart || root.showHeatmapChart
-            columns: root.analyticsColumns
-            rowSpacing: Style.space(12)
-            columnSpacing: Style.space(12)
-
-            Column {
-              Layout.fillWidth: true
-              Layout.preferredWidth: root.analyticsColumns > 1 ? Math.max(0, (analyticsGrid.width - analyticsGrid.columnSpacing) / 2) : analyticsGrid.width
-              Layout.alignment: Qt.AlignTop
-              visible: root.showActivityChart
-              spacing: Style.space(8)
-
-              SectionHeader {
-                text: root.selectedLens === "life" ? "Recent Weekly Activity" : (root.usesWeeklyCalendar ? "Weekly Activity" : (root.usesCalendar ? "Activity Calendar" : "Daily Focus"))
-              }
-
-              TrendBars {
-                width: parent.width
-                expanded: root.widePanel
-                visible: !root.usesCalendar && root.trendDays.length > 0
-                days: root.trendDays
-                maxSeconds: root.trendMax
-                selectedIndex: root.inspectedActivityIndex
-              }
-
-              MonthHeatmap {
-                width: parent.width
-                visible: root.usesCalendar && root.monthCells.length > 0
-                cells: root.monthCells
-                maxSeconds: root.monthMax
-                selectedIndex: root.inspectedActivityIndex
-                weekly: root.usesWeeklyCalendar
-              }
-
-              Text {
-                visible: root.trendSummaryText !== ""
-                width: parent.width
-                text: root.trendSummaryText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                elide: Text.ElideRight
-              }
-            }
-
-            Column {
-              Layout.fillWidth: true
-              Layout.preferredWidth: root.analyticsColumns > 1 ? Math.max(0, (analyticsGrid.width - analyticsGrid.columnSpacing) / 2) : analyticsGrid.width
-              Layout.alignment: Qt.AlignTop
-              visible: root.showHeatmapChart
-              spacing: Style.space(8)
-
-              SectionHeader {
-                text: root.selectedLens === "day" || root.selectedLens === "week" ? "Focus by Time of Week" : "Cumulative Focus by Time of Week"
-              }
-
-              HeatmapGrid {
-                width: parent.width
-                expanded: root.widePanel
-                cells: root.heatCells
-                maxSeconds: root.heatMax
-                selectedIndex: root.inspectedHeatIndex
-              }
-            }
           }
 
           SectionHeader {
             text: root.selectedLens === "life" ? "Recent Consistency" : "Consistency"
-            visible: !root.widePanel && root.daily.length > 0
+            visible: root.daily.length > 0
           }
 
           ConsistencyMetrics {
             width: parent.width
-            visible: !root.widePanel && root.daily.length > 0
-            columnsValue: root.tileColumns
+            visible: root.daily.length > 0
+            columnsValue: root.widePanel ? 4 : root.tileColumns
           }
 
           SectionHeader {
@@ -740,6 +601,22 @@ Panel {
                 tone: String(modelData.tone || "")
               }
             }
+          }
+
+          SectionHeader {
+            text: "Tracking Quality"
+            visible: root.showBreakdown
+          }
+
+          TimeBreakdownStrip {
+            width: parent.width
+            visible: root.showBreakdown
+            focusedSeconds: root.totalFocused
+            observedSeconds: root.totalObserved
+            pausedSeconds: root.totalPaused
+            trackerOffSeconds: root.totalUnobserved
+            focusedShare: root.focusDenominator > 0 ? root.totalFocused / root.focusDenominator : 0
+            excludedDetail: root.excludedDetailText
           }
 
           Text {
@@ -957,7 +834,8 @@ Panel {
     property string excludedDetail: ""
     property real revealProgress: 0
 
-    readonly property int maxSeconds: Math.max(1, focusedSeconds, observedSeconds, pausedSeconds, trackerOffSeconds)
+    readonly property int otherTrackedSeconds: Math.max(0, observedSeconds - focusedSeconds - pausedSeconds)
+    readonly property int elapsedSeconds: Math.max(1, observedSeconds + trackerOffSeconds)
 
     function restartReveal() {
       revealProgress = 0
@@ -970,7 +848,7 @@ Panel {
     onTrackerOffSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: Style.space(178)
+    implicitHeight: Style.space(128)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -992,44 +870,128 @@ Panel {
       anchors.margins: Style.space(12)
       spacing: Style.space(8)
 
-      BreakdownBar {
+      Row {
         width: parent.width
-        label: "Focused Time"
-        value: root.formatDuration(focusedSeconds) + (observedSeconds > 0 ? "  " + Model.percent(focusedShare) : "")
-        ratio: focusedSeconds / breakdownRoot.maxSeconds
-        revealProgress: breakdownRoot.revealProgress
-        colorValue: root.sliceColor(0, 0.95)
-        detail: observedSeconds > 0 ? "Share of observed time" : ""
+        height: Style.space(22)
+
+        Text {
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Elapsed breakdown"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Text {
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: observedSeconds > 0 ? root.formatDuration(observedSeconds) + " observed" : root.observedDetailText
+          color: root.faint
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
       }
 
-      BreakdownBar {
+      Row {
         width: parent.width
-        label: "Observed Time"
-        value: observedSeconds > 0 ? root.formatDuration(observedSeconds) : "--"
-        ratio: observedSeconds / breakdownRoot.maxSeconds
-        revealProgress: breakdownRoot.revealProgress
-        colorValue: root.sliceColor(1, 0.78)
-        detail: root.observedDetailText
+        height: Style.space(14)
+        spacing: 0
+        clip: true
+
+        Rectangle {
+          width: parent.width * root.clamp01(focusedSeconds / breakdownRoot.elapsedSeconds) * breakdownRoot.revealProgress
+          height: parent.height
+          radius: Style.space(4)
+          color: root.sliceColor(0, 0.95)
+        }
+
+        Rectangle {
+          width: parent.width * root.clamp01(pausedSeconds / breakdownRoot.elapsedSeconds) * breakdownRoot.revealProgress
+          height: parent.height
+          color: root.sliceColor(3, 0.95)
+        }
+
+        Rectangle {
+          width: parent.width * root.clamp01(breakdownRoot.otherTrackedSeconds / breakdownRoot.elapsedSeconds) * breakdownRoot.revealProgress
+          height: parent.height
+          color: root.sliceColor(1, 0.65)
+        }
+
+        Rectangle {
+          width: parent.width * root.clamp01(trackerOffSeconds / breakdownRoot.elapsedSeconds) * breakdownRoot.revealProgress
+          height: parent.height
+          radius: Style.space(4)
+          color: trackerOffSeconds > 0 ? Color.urgent : root.faint
+        }
       }
 
-      BreakdownBar {
+      GridLayout {
         width: parent.width
-        label: "Paused"
-        value: root.formatDuration(pausedSeconds)
-        ratio: pausedSeconds / breakdownRoot.maxSeconds
-        revealProgress: breakdownRoot.revealProgress
-        colorValue: root.sliceColor(3, 1.0)
-        detail: root.pausedDetailText.length > 0 ? root.pausedDetailText : "Away, lock, sleep"
+        columns: root.compactPanel ? 2 : 4
+        rowSpacing: Style.space(6)
+        columnSpacing: Style.space(8)
+
+        BreakdownLegend { label: "Focused"; value: root.formatDuration(focusedSeconds) + (observedSeconds > 0 ? "  " + Model.percent(focusedShare) : ""); colorValue: root.sliceColor(0, 0.95) }
+        BreakdownLegend { label: "Paused"; value: root.formatDuration(pausedSeconds); colorValue: root.sliceColor(3, 0.95) }
+        BreakdownLegend { label: "Other Tracked"; value: root.formatDuration(breakdownRoot.otherTrackedSeconds); colorValue: root.sliceColor(1, 0.65) }
+        BreakdownLegend { label: "Tracker Off"; value: root.formatDuration(trackerOffSeconds); colorValue: trackerOffSeconds > 0 ? Color.urgent : root.faint }
       }
 
-      BreakdownBar {
+      Text {
         width: parent.width
-        label: "Tracker Off"
-        value: root.formatDuration(trackerOffSeconds)
-        ratio: trackerOffSeconds / breakdownRoot.maxSeconds
-        revealProgress: breakdownRoot.revealProgress
-        colorValue: trackerOffSeconds > 0 ? Color.urgent : root.faint
-        detail: trackerOffSeconds > 0 ? "Unobserved time excluded from focus share" : "No tracker gaps"
+        text: root.excludedDetailText.length > 0 ? root.excludedDetailText : "No tracker gaps"
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+    }
+  }
+
+  component BreakdownLegend: Item {
+    property string label: ""
+    property string value: ""
+    property color colorValue: root.accent
+
+    Layout.fillWidth: true
+    implicitHeight: Style.space(24)
+
+    Rectangle {
+      width: Style.space(8)
+      height: width
+      radius: width / 2
+      color: colorValue
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    Column {
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(14)
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: 0
+
+      Text {
+        width: parent.width
+        text: label
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width
+        text: value
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        elide: Text.ElideRight
       }
     }
   }
@@ -1109,211 +1071,114 @@ Panel {
     }
   }
 
-  component DonutChart: Item {
-    id: donutRoot
+  component AppRankBars: Column {
+    id: rankRoot
 
-    property var segments: []
+    property var apps: []
     property var colors: []
-    property string centerLabel: ""
-    property string centerValue: ""
-    property real revealProgress: 0
 
-    implicitWidth: width
-    implicitHeight: height
-    opacity: segments.length > 0 ? 1 : 0.55
-
-    Behavior on opacity {
-      NumberAnimation { duration: 180 }
+    readonly property int maxSeconds: {
+      var value = 0
+      for (var i = 0; i < apps.length; i++) value = Math.max(value, Number(apps[i].seconds || 0))
+      return Math.max(1, value)
     }
 
-    function restartReveal() {
-      revealProgress = 0
-      donutReveal.restart()
-    }
+    spacing: Style.space(8)
+    implicitHeight: rankHeader.implicitHeight + Style.space(8) + rankRows.implicitHeight
 
-    onSegmentsChanged: {
-      restartReveal()
-      donutCanvas.requestPaint()
-    }
-    onColorsChanged: donutCanvas.requestPaint()
-    onRevealProgressChanged: donutCanvas.requestPaint()
-    onWidthChanged: donutCanvas.requestPaint()
-    onHeightChanged: donutCanvas.requestPaint()
-    Component.onCompleted: restartReveal()
-
-    NumberAnimation {
-      id: donutReveal
-
-      target: donutRoot
-      property: "revealProgress"
-      from: 0
-      to: 1
-      duration: 680
-      easing.type: Easing.OutCubic
-    }
-
-    Canvas {
-      id: donutCanvas
-      anchors.fill: parent
-
-      onPaint: {
-        var ctx = getContext("2d")
-        ctx.reset()
-        var segs = segments || []
-        var size = Math.min(width, height)
-        var line = Math.max(Style.space(10), Math.round(size * 0.12))
-        var radius = size / 2 - line / 2
-        var cx = width / 2
-        var cy = height / 2
-        var progress = root.clamp01(donutRoot.revealProgress)
-        var remainingSweep = 360 * progress
-
-        ctx.lineCap = "round"
-        ctx.lineWidth = line + Style.space(2)
-        ctx.strokeStyle = root.withAlpha(root.foreground, 0.07)
-        ctx.beginPath()
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2, false)
-        ctx.stroke()
-
-        ctx.lineWidth = line
-        ctx.strokeStyle = root.track
-        ctx.beginPath()
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2, false)
-        ctx.stroke()
-
-        for (var i = 0; i < segs.length; i++) {
-          var seg = segs[i]
-          var drawSweep = Math.min(Number(seg.sweepAngle || 0), Math.max(0, remainingSweep))
-          remainingSweep -= Number(seg.sweepAngle || 0)
-          if (drawSweep <= 0) continue
-
-          ctx.strokeStyle = root.colorFromHex(String(donutRoot.colors[i] || Color.accent), 1.0)
-          ctx.beginPath()
-          ctx.arc(cx, cy, radius, seg.startAngle * Math.PI / 180, (seg.startAngle + drawSweep) * Math.PI / 180, false)
-          ctx.stroke()
-        }
-
-        ctx.lineCap = "butt"
-        ctx.lineWidth = Math.max(1, Style.space(1))
-        ctx.strokeStyle = root.withAlpha(root.foreground, 0.12)
-        ctx.beginPath()
-        ctx.arc(cx, cy, Math.max(1, radius - line / 2 - Style.space(5)), 0, Math.PI * 2, false)
-        ctx.stroke()
-      }
-    }
-
-    Column {
-      anchors.centerIn: parent
-      width: parent.width * 0.62
-      spacing: Style.space(1)
+    Row {
+      id: rankHeader
+      width: parent.width
+      height: Style.space(18)
 
       Text {
-        width: parent.width
-        text: centerLabel
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        text: "Ranked apps"
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         font.bold: true
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
       }
 
       Text {
-        width: parent.width
-        text: centerValue
-        color: root.foreground
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.formatDuration(root.totalFocused)
+        color: root.faint
         font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-        horizontalAlignment: Text.AlignHCenter
+        font.pixelSize: Style.font.caption
         elide: Text.ElideRight
       }
     }
-  }
 
-  component AppLegendRow: Item {
-    property int colorIndex: 0
-    property string app: ""
-    property string category: ""
-    property int seconds: 0
-    property int pct: 0
+    Column {
+      id: rankRows
+      width: parent.width
+      spacing: Style.space(7)
 
-    implicitHeight: Math.max(Style.space(26), Math.max(appName.implicitHeight, appTime.implicitHeight) + Style.space(8))
+      Repeater {
+        model: apps
 
-    Rectangle {
-      id: swatch
-      width: Style.space(8)
-      height: width
-      radius: width / 2
-      color: root.sliceColor(colorIndex, 1.0)
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-    }
+        Item {
+          required property int index
+          required property var modelData
 
-    Text {
-      id: appName
-      text: app
-      color: root.foreground
-      opacity: 0.78
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      elide: Text.ElideRight
-      anchors.left: swatch.right
-      anchors.leftMargin: Style.space(7)
-      anchors.right: categoryText.left
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
-    }
+          width: parent.width
+          height: Style.space(34)
 
-    Text {
-      id: categoryText
-      visible: category !== "" && category !== "neutral" && category !== "mixed"
-      width: visible ? Math.min(implicitWidth, Style.space(82)) : 0
-      text: category
-      color: root.faint
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      elide: Text.ElideRight
-      anchors.right: appTime.left
-      anchors.rightMargin: visible ? Style.space(8) : 0
-      anchors.verticalCenter: parent.verticalCenter
-    }
+          readonly property int seconds: Number(modelData.seconds || 0)
+          readonly property int pct: Number(modelData.pct || 0)
+          readonly property color barColor: root.colorFromHex(String(colors[index] || Color.accent), 1.0)
 
-    Text {
-      id: appTime
-      width: Math.min(implicitWidth, Style.space(104))
-      text: root.formatDuration(seconds) + "  " + pct + "%"
-      color: root.foreground
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      font.bold: true
-      horizontalAlignment: Text.AlignRight
-      elide: Text.ElideRight
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-    }
+          Text {
+            id: rankName
+            anchors.left: parent.left
+            anchors.right: rankValue.left
+            anchors.rightMargin: Style.space(10)
+            anchors.top: parent.top
+            text: String(modelData.app || "")
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: index === 0
+            elide: Text.ElideRight
+          }
 
-    Rectangle {
-      id: pctTrack
+          Text {
+            id: rankValue
+            width: Style.space(112)
+            anchors.right: parent.right
+            anchors.top: parent.top
+            text: root.formatDuration(seconds) + "  " + pct + "%"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            horizontalAlignment: Text.AlignRight
+            elide: Text.ElideRight
+          }
 
-      anchors.left: swatch.right
-      anchors.leftMargin: Style.space(7)
-      anchors.right: appTime.left
-      anchors.rightMargin: Style.space(10)
-      anchors.bottom: parent.bottom
-      height: Style.space(2)
-      radius: height / 2
-      color: root.track
-      visible: width > Style.space(18)
+          Rectangle {
+            id: rankTrack
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: Style.space(7)
+            radius: height / 2
+            color: root.track
 
-      Rectangle {
-        width: pctTrack.width * root.clamp01(pct / 100)
-        height: parent.height
-        radius: parent.radius
-        color: root.sliceColor(colorIndex, 0.72)
+            Rectangle {
+              width: rankTrack.width * root.clamp01(seconds / rankRoot.maxSeconds)
+              height: parent.height
+              radius: parent.radius
+              color: barColor
 
-        Behavior on width {
-          NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
+              Behavior on width {
+                NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
+              }
+            }
+          }
         }
       }
     }

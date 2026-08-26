@@ -44,7 +44,7 @@ BarWidget {
   property bool injectQueued: false
   readonly property int cacheMaxEntries: 12
   readonly property int fullReportTtlMs: 5 * 60 * 1000
-  readonly property int summaryTtlMs: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 2000
+  readonly property int summaryTtlMs: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 1000
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property real openPanelIndicatorWidth: button.labelWidth
@@ -71,6 +71,7 @@ BarWidget {
   onWidgetInsightChanged: scheduleInjectPanel()
   onDailyChanged: scheduleInjectPanel()
   onHeatmapChanged: scheduleInjectPanel()
+  onPanelDataLoadedChanged: scheduleInjectPanel()
   onTodayKeyChanged: scheduleInjectPanel()
   onLensLabelChanged: scheduleInjectPanel()
   onPeriodLabelChanged: scheduleInjectPanel()
@@ -388,6 +389,7 @@ BarWidget {
     if ("widgetInsight" in target) target.widgetInsight = root.widgetInsight
     if ("daily" in target) target.daily = root.daily
     if ("heatmap" in target) target.heatmap = root.heatmap
+    if ("panelDataLoaded" in target) target.panelDataLoaded = root.panelDataLoaded
     if ("todayKey" in target) target.todayKey = root.todayKey
     if ("lensLabel" in target) target.lensLabel = root.lensLabel
     if ("periodLabel" in target) target.periodLabel = root.periodLabel
@@ -654,15 +656,19 @@ BarWidget {
         )
       )
       var open = numericField(item, "open_seconds", numericField(item, "total_open_seconds", 0))
+      var elapsed = numericField(item, "elapsed_seconds", 0)
       var idle = numericField(item, "idle_seconds", 0)
       var locked = numericField(item, "locked_seconds", 0)
       var sleep = numericField(item, "sleep_seconds", 0)
       var unobserved = numericField(item, "unobserved_seconds", 0)
+      var observed = numericField(item, "observed_seconds", Math.max(0, elapsed - unobserved))
       output.push({
         date: String(item.date || item.key || ""),
         label: String(item.label || item.day || item.date || ""),
         focused_seconds: focused,
         open_seconds: open,
+        elapsed_seconds: elapsed,
+        observed_seconds: observed,
         idle_seconds: idle,
         locked_seconds: locked,
         sleep_seconds: sleep,

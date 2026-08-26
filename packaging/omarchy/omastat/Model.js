@@ -146,6 +146,16 @@ function dayOpenSeconds(day) {
   return firstNumber(day, ["open_seconds", "total_open_seconds"], 0)
 }
 
+function dayElapsedSeconds(day) {
+  return firstNumber(day, ["elapsed_seconds"], 0)
+}
+
+function dayObservedSeconds(day) {
+  var explicit = optionalNumber(day, "observed_seconds")
+  if (explicit !== null) return explicit
+  return Math.max(0, dayElapsedSeconds(day) - firstNumber(day, ["unobserved_seconds"], 0))
+}
+
 function dayExcludedSeconds(day) {
   var explicit = optionalNumber(day, "excluded_seconds")
   if (explicit !== null) return explicit
@@ -170,12 +180,14 @@ function trendDays(daily, todayKey, lens) {
     var focused = dayFocusedSeconds(list[i])
     var open = dayOpenSeconds(list[i])
     var excluded = dayExcludedSeconds(list[i])
-    var observed = focused + excluded
+    var observed = dayObservedSeconds(list[i])
+    if (observed <= 0) observed = focused + excluded
     out.push({
       key: String(list[i].date || ""),
       seconds: focused,
       focused_seconds: focused,
       open_seconds: open,
+      elapsed_seconds: dayElapsedSeconds(list[i]),
       excluded_seconds: excluded,
       observed_seconds: observed,
       valueText: fmt(focused),
@@ -291,7 +303,8 @@ function monthCells(daily, lens) {
       seconds: dayFocusedSeconds(list[i]),
       open_seconds: dayOpenSeconds(list[i]),
       excluded_seconds: dayExcludedSeconds(list[i]),
-      observed_seconds: dayFocusedSeconds(list[i]) + dayExcludedSeconds(list[i])
+      elapsed_seconds: dayElapsedSeconds(list[i]),
+      observed_seconds: dayObservedSeconds(list[i])
     })
   }
   return out
@@ -306,10 +319,14 @@ function weekCells(daily) {
     var focused = 0
     var open = 0
     var excluded = 0
+    var elapsed = 0
+    var observed = 0
     for (var i = start; i < end; i++) {
       focused += dayFocusedSeconds(list[i])
       open += dayOpenSeconds(list[i])
       excluded += dayExcludedSeconds(list[i])
+      elapsed += dayElapsedSeconds(list[i])
+      observed += dayObservedSeconds(list[i])
     }
     var first = list[start] || {}
     var last = list[end - 1] || first
@@ -322,10 +339,50 @@ function weekCells(daily) {
       seconds: focused,
       open_seconds: open,
       excluded_seconds: excluded,
-      observed_seconds: focused + excluded
+      elapsed_seconds: elapsed,
+      observed_seconds: observed
     })
   }
   return out
+}
+
+function monthBucketCells(daily) {
+  var buckets = {}
+  var order = []
+  for (var i = 0; i < (daily || []).length; i++) {
+    var key = String(daily[i].date || "").substr(0, 7)
+    if (key.length !== 7) continue
+    if (!buckets[key]) {
+      var date = parseDateKey(key + "-01")
+      buckets[key] = {
+        blank: false,
+        monthly: true,
+        date: key + "-01",
+        day: date ? MONTH_LABELS[date.getMonth()] : key,
+        label: date ? MONTH_LABELS[date.getMonth()] + " " + date.getFullYear() : key,
+        seconds: 0,
+        open_seconds: 0,
+        excluded_seconds: 0,
+        elapsed_seconds: 0,
+        observed_seconds: 0
+      }
+      order.push(key)
+    }
+    buckets[key].seconds += dayFocusedSeconds(daily[i])
+    buckets[key].open_seconds += dayOpenSeconds(daily[i])
+    buckets[key].excluded_seconds += dayExcludedSeconds(daily[i])
+    buckets[key].elapsed_seconds += dayElapsedSeconds(daily[i])
+    buckets[key].observed_seconds += dayObservedSeconds(daily[i])
+  }
+  return order.map(function(key) { return buckets[key] })
+}
+
+function activityCells(daily, lens) {
+  var lensValue = String(lens || "day")
+  if (lensValue === "year") return monthBucketCells(daily)
+  if (lensValue === "life") return weekCells(daily).slice(-13)
+  if (lensValue === "month") return monthCells(daily, lens)
+  return trendDays(daily, "", lensValue)
 }
 
 function compactRangeLabel(first, last) {
@@ -353,6 +410,7 @@ function monthDefaultText(cells, weekly) {
 }
 
 var WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+var MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 function weekdayLabels() {
   return WEEKDAY_LABELS
 }
@@ -384,6 +442,45 @@ function heatmapCells(heatmap) {
     }
   }
   return out
+}
+
+function hourlyCells(heatmap) {
+  var totals = []
+  for (var h = 0; h < 24; h++) totals.push({ hour: h, seconds: 0 })
+  for (var i = 0; i < (heatmap || []).length; i++) {
+    var item = heatmap[i] || {}
+    var hour = Math.max(0, Math.min(23, Number(item.hour || 0)))
+    totals[hour].seconds += Number(item.focused_seconds || item.seconds || 0)
+  }
+  return totals
+}
+
+function hourlyTrendCells(heatmap) {
+  var cells = hourlyCells(heatmap)
+  var out = []
+  for (var i = 0; i < cells.length; i++) {
+    out.push({
+      key: "hour-" + cells[i].hour,
+      seconds: cells[i].seconds,
+      focused_seconds: cells[i].seconds,
+      open_seconds: 0,
+      excluded_seconds: 0,
+      observed_seconds: cells[i].seconds,
+      valueText: cells[i].seconds > 0 ? fmt(cells[i].seconds) : "",
+      excludedText: "0s",
+      densityText: "",
+      label: hourLabel(cells[i].hour),
+      fullLabel: hourLabel(cells[i].hour),
+      isToday: false
+    })
+  }
+  return out
+}
+
+function maxHourlySeconds(cells) {
+  var max = 0
+  for (var i = 0; i < (cells || []).length; i++) max = Math.max(max, Number(cells[i].seconds || 0))
+  return max
 }
 
 function maxHeatSeconds(cells) {
@@ -532,6 +629,21 @@ function sliceColors(count, accentHex) {
     if (base.s < 12) l = grayRamp[i % grayRamp.length]
     else if (i % 2 === 1) l = Math.max(32, Math.min(80, base.l - 14))
     out.push(hslToHex(h, base.s, l))
+  }
+  return out
+}
+
+function stableAppColors(apps, accentHex) {
+  var base = hexToHsl(accentHex)
+  var out = []
+  for (var i = 0; i < (apps || []).length; i++) {
+    var key = String(apps[i].app_class || apps[i].app || i)
+    var hash = 0
+    for (var j = 0; j < key.length; j++) hash = ((hash << 5) - hash + key.charCodeAt(j)) | 0
+    var h = base.s < 12 ? Math.abs(hash) % 360 : (base.h + Math.abs(hash) % 150) % 360
+    var s = base.s < 12 ? 42 : Math.max(34, Math.min(76, base.s))
+    var l = 42 + Math.abs(hash) % 28
+    out.push(hslToHex(h, s, l))
   }
   return out
 }

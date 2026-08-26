@@ -29,6 +29,8 @@ pub struct DayTotals {
     pub label: String,
     pub focused_seconds: i64,
     pub open_seconds: i64,
+    pub elapsed_seconds: i64,
+    pub observed_seconds: i64,
     pub idle_seconds: i64,
     pub locked_seconds: i64,
     pub sleep_seconds: i64,
@@ -892,6 +894,8 @@ impl Storage {
                     label: start.format("%b %-d").to_string(),
                     focused_seconds: 0,
                     open_seconds: 0,
+                    elapsed_seconds: 0,
+                    observed_seconds: 0,
                     idle_seconds: 0,
                     locked_seconds: 0,
                     sleep_seconds: 0,
@@ -1003,6 +1007,14 @@ impl Storage {
                     }
                 }
             }
+        }
+
+        for (index, window) in boundaries.windows(2).enumerate() {
+            let elapsed = query_end.min(window[1]) - window[0];
+            output[index].elapsed_seconds = elapsed.max(0);
+            output[index].observed_seconds = output[index]
+                .elapsed_seconds
+                .saturating_sub(output[index].unobserved_seconds.max(0));
         }
 
         Ok(output)
@@ -4208,11 +4220,15 @@ mod tests {
         let days = storage
             .daily_totals_for_local_dates(date, 1, ended_at)
             .unwrap();
+        assert_eq!(days[0].elapsed_seconds, 2 * 3600);
+        assert_eq!(days[0].observed_seconds, 3600);
         assert_eq!(days[0].unobserved_seconds, 3600);
         assert_eq!(days[0].sleep_seconds, 0);
         let days = storage
             .daily_totals_for_local_dates(date, 1, ended_at + 30 * 60)
             .unwrap();
+        assert_eq!(days[0].elapsed_seconds, 2 * 3600 + 30 * 60);
+        assert_eq!(days[0].observed_seconds, 3600 + 30 * 60);
         assert_eq!(days[0].unobserved_seconds, 3600);
         assert_eq!(days[0].sleep_seconds, 1800);
         let totals = storage
