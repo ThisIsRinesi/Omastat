@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "local.omastat",
   "name": "Omastat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "rinesi",
   "license": "MIT",
   "repository": "https://github.com/ThisIsRinesi/Omastat",
