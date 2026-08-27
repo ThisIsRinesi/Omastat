@@ -697,7 +697,6 @@ BarWidget {
     for (var i = 0; i < list.length; i++) {
       var item = list[i] || {}
       var kind = String(item.kind || "")
-      if (kind === "focus-density" || kind === "app-focus-density") continue
       var label = String(item.title || item.label || item.kind || "")
       var value = String(item.value || "")
       if (label.length === 0 && value.length === 0) continue

@@ -560,24 +560,10 @@ Panel {
             visible: root.insightRows.length > 0
           }
 
-          Column {
+          InsightGrid {
             width: parent.width
             visible: root.insightRows.length > 0
-            spacing: Style.space(8)
-
-            Repeater {
-              model: root.insightRows.slice(0, 5)
-
-              InsightRow {
-                required property var modelData
-
-                width: parent.width
-                title: String(modelData.label || "Insight")
-                value: String(modelData.value || "")
-                detail: String(modelData.detail || "")
-                tone: String(modelData.tone || "")
-              }
-            }
+            insights: root.insightRows
           }
 
           SectionHeader {
@@ -1533,17 +1519,6 @@ Panel {
         color: root.withAlpha(root.foreground, 0.24)
       }
 
-      Text {
-        visible: trendRoot.maxSeconds > 0 && trendRoot.averageSeconds > 0 && parent.width > Style.space(280)
-        anchors.right: parent.right
-        y: Math.max(0, Math.min(parent.height - implicitHeight, trendPlot.height - Style.space(62) - ((trendPlot.height - Style.space(54)) * trendRoot.averageSeconds / trendRoot.maxSeconds)))
-        text: "Avg " + root.formatDuration(Math.round(trendRoot.averageSeconds))
-        color: root.faint
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignRight
-      }
-
       Row {
         id: trendBarsRow
 
@@ -1795,7 +1770,7 @@ Panel {
       anchors.leftMargin: Style.space(14)
       anchors.rightMargin: Style.space(14)
       anchors.topMargin: Style.space(8)
-      anchors.bottomMargin: Style.space(38)
+      anchors.bottomMargin: Style.space(56)
 
       readonly property real gap: width < Style.space(430) ? Style.space(3) : Style.space(5)
       readonly property real barWidth: Math.max(Style.space(5), (width - gap * 23) / 24)
@@ -2411,13 +2386,43 @@ Panel {
     }
   }
 
+  component InsightGrid: GridLayout {
+    id: insightGrid
+
+    property var insights: []
+    readonly property int visibleCount: Math.min(insights.length, root.widePanel ? 9 : (root.compactPanel ? 6 : 8))
+
+    columns: root.widePanel ? 3 : (root.compactPanel ? 1 : 2)
+    rowSpacing: Style.space(8)
+    columnSpacing: Style.space(8)
+
+    Repeater {
+      model: insightGrid.insights.slice(0, insightGrid.visibleCount)
+
+      InsightRow {
+        required property var modelData
+
+        Layout.fillWidth: true
+        Layout.preferredWidth: insightGrid.columns > 0
+          ? Math.max(0, (insightGrid.width - insightGrid.columnSpacing * (insightGrid.columns - 1)) / insightGrid.columns)
+          : insightGrid.width
+        title: String(modelData.label || "Insight")
+        value: String(modelData.value || "")
+        detail: String(modelData.detail || "")
+        category: String(modelData.category || "")
+        tone: String(modelData.tone || "")
+      }
+    }
+  }
+
   component InsightRow: Rectangle {
     property string title: ""
     property string value: ""
     property string detail: ""
+    property string category: ""
     property string tone: ""
 
-    implicitHeight: insightColumn.implicitHeight + Style.space(18)
+    implicitHeight: Style.space(88)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -2433,6 +2438,23 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
     }
 
+    Text {
+      id: insightCategory
+
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(12)
+      anchors.top: parent.top
+      anchors.topMargin: Style.space(10)
+      width: Math.min(implicitWidth, parent.width * 0.34)
+      text: category.replace("-", " ")
+      color: root.faint
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      horizontalAlignment: Text.AlignRight
+      elide: Text.ElideRight
+      visible: category.length > 0 && parent.width > Style.space(220)
+    }
+
     Column {
       id: insightColumn
       anchors.left: parent.left
@@ -2440,10 +2462,11 @@ Panel {
       anchors.right: parent.right
       anchors.rightMargin: Style.space(12)
       anchors.verticalCenter: parent.verticalCenter
-      spacing: Style.space(2)
+      spacing: Style.space(3)
 
       Text {
         width: parent.width
+        rightPadding: insightCategory.visible ? insightCategory.width + Style.space(8) : 0
         text: title
         color: root.dim
         font.family: root.fontFamily
@@ -2472,7 +2495,7 @@ Panel {
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
-        maximumLineCount: 2
+        maximumLineCount: 1
         elide: Text.ElideRight
       }
     }
