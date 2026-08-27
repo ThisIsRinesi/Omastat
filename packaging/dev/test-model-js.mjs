@@ -57,6 +57,27 @@ assert.equal(month[0].date, "2026-08-03");
 assert.equal(month[0].day, 3);
 assert.equal(month[1].seconds, 0);
 
+const monthWeeks = context.monthWeekCells([
+  { date: "2026-08-01", label: "Aug 1", focused_seconds: 600, observed_seconds: 1200 },
+  { date: "2026-08-02", label: "Aug 2", focused_seconds: 900, observed_seconds: 1800 },
+  { date: "2026-08-03", label: "Aug 3", focused_seconds: 300, observed_seconds: 600 },
+]);
+assert.equal(monthWeeks.length, 2);
+assert.equal(monthWeeks[0].label, "Aug 1-2");
+assert.equal(monthWeeks[0].seconds, 1500);
+assert.equal(monthWeeks[0].activeDays, 2);
+assert.equal(monthWeeks[1].label, "Aug 3");
+
+const weekdays = context.weekdayFocusCells([
+  { weekday: 0, hour: 9, focused_seconds: 600 },
+  { weekday: 0, hour: 10, focused_seconds: 900 },
+  { weekday: 6, hour: 22, focused_seconds: 300 },
+]);
+assert.equal(weekdays.length, 7);
+assert.equal(weekdays[0].label, "Mon");
+assert.equal(weekdays[0].seconds, 1500);
+assert.equal(weekdays[6].seconds, 300);
+
 const trend = context.trendDays(
   [
     {

@@ -310,6 +310,70 @@ function monthCells(daily, lens) {
   return out
 }
 
+function monthWeekCells(daily) {
+  var list = daily || []
+  if (list.length === 0) return []
+  var weeks = []
+  var current = null
+
+  for (var i = 0; i < list.length; i++) {
+    var date = parseDateKey(list[i].date)
+    var weekKey = ""
+    if (date) {
+      var weekStart = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7))
+      weekKey = dateKey(weekStart)
+    } else {
+      weekKey = "week-" + Math.floor(i / 7)
+    }
+
+    if (!current || current.key !== weekKey) {
+      current = {
+        key: weekKey,
+        label: "",
+        startLabel: String(list[i].label || list[i].date || ""),
+        endLabel: String(list[i].label || list[i].date || ""),
+        seconds: 0,
+        open_seconds: 0,
+        observed_seconds: 0,
+        excluded_seconds: 0,
+        activeDays: 0,
+        totalDays: 0
+      }
+      weeks.push(current)
+    }
+
+    var focused = dayFocusedSeconds(list[i])
+    current.seconds += focused
+    current.open_seconds += dayOpenSeconds(list[i])
+    current.observed_seconds += dayObservedSeconds(list[i])
+    current.excluded_seconds += dayExcludedSeconds(list[i])
+    current.endLabel = String(list[i].label || list[i].date || "")
+    current.totalDays += 1
+    if (focused > 0) current.activeDays += 1
+  }
+
+  for (var j = 0; j < weeks.length; j++) {
+    weeks[j].label = compactWeekRangeLabel(weeks[j].startLabel, weeks[j].endLabel)
+    weeks[j].valueText = fmt(weeks[j].seconds)
+    weeks[j].densityText = weeks[j].observed_seconds > 0 ? percent(weeks[j].seconds / weeks[j].observed_seconds) : "--"
+    weeks[j].fullLabel = "Week " + weeks[j].label
+  }
+  return weeks
+}
+
+function compactWeekRangeLabel(startLabel, endLabel) {
+  var start = String(startLabel || "")
+  var end = String(endLabel || "")
+  if (start === end || end.length === 0) return start
+  var startParts = start.split(" ")
+  var endParts = end.split(" ")
+  if (startParts.length > 1 && endParts.length > 1 && startParts[0] === endParts[0]) {
+    return startParts[0] + " " + startParts[1] + "-" + endParts[1]
+  }
+  return start + " - " + end
+}
+
 function weekCells(daily) {
   var list = daily || []
   if (list.length === 0) return []
@@ -344,6 +408,17 @@ function weekCells(daily) {
     })
   }
   return out
+}
+
+function weekdayFocusCells(heatmap) {
+  var totals = []
+  for (var day = 0; day < 7; day++) totals.push({ weekday: day, label: WEEKDAY_LABELS[day], seconds: 0 })
+  for (var i = 0; i < (heatmap || []).length; i++) {
+    var item = heatmap[i] || {}
+    var weekday = Math.max(0, Math.min(6, Number(item.weekday || 0)))
+    totals[weekday].seconds += Number(item.focused_seconds || item.seconds || 0)
+  }
+  return totals
 }
 
 function monthBucketCells(daily) {

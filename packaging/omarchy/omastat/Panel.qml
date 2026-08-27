@@ -78,8 +78,12 @@ Panel {
   readonly property var appColors: Model.stableAppColors(visibleApps, Color.accent)
   readonly property string trendSummaryText: Model.weekTrendSummary(daily, displayTodayKey)
   readonly property var monthCells: Model.monthCells(daily, selectedLens)
+  readonly property var monthWeeks: Model.monthWeekCells(daily)
+  readonly property var weekdayCells: Model.weekdayFocusCells(heatmap)
   readonly property var activityCells: Model.activityCells(daily, selectedLens)
   readonly property real monthMax: Model.maxMonthSeconds(monthCells)
+  readonly property real monthWeekMax: Model.maxDailySeconds(monthWeeks)
+  readonly property real weekdayMax: Model.maxDailySeconds(weekdayCells)
   readonly property var heatCells: Model.heatmapCells(heatmap)
   readonly property var hourlyCells: Model.hourlyCells(heatmap)
   readonly property var hourlyTrendCells: Model.hourlyTrendCells(heatmap)
@@ -449,15 +453,18 @@ Panel {
                 selectedIndex: root.inspectedActivityIndex
               }
 
-              MonthHeatmap {
+              MonthRhythm {
                 width: parent.width
                 visible: root.selectedLens === "month" && root.monthCells.length > 0
                 title: root.activityChartTitle
                 detail: root.activityChartDetail
                 cells: root.monthCells
+                weeks: root.monthWeeks
+                weekdays: root.weekdayCells
                 maxSeconds: root.monthMax
+                weekMaxSeconds: root.monthWeekMax
+                weekdayMaxSeconds: root.weekdayMax
                 selectedIndex: root.inspectedActivityIndex
-                weekly: false
               }
 
               Text {
@@ -1894,6 +1901,348 @@ Panel {
       anchors.bottom: parent.bottom
       anchors.margins: Style.space(10)
       text: hourlyRoot.readoutText.length > 0 ? hourlyRoot.readoutText : hourlyRoot.defaultText
+    }
+  }
+
+  component MonthRhythm: Rectangle {
+    id: monthRhythmRoot
+
+    property string title: ""
+    property string detail: ""
+    property var cells: []
+    property var weeks: []
+    property var weekdays: []
+    property real maxSeconds: 0
+    property real weekMaxSeconds: 0
+    property real weekdayMaxSeconds: 0
+    property int selectedIndex: -1
+    property int hoveredIndex: -1
+    property string hoveredText: ""
+    property real revealProgress: 0
+    readonly property string selectedText: selectedIndex >= 0 && selectedIndex < cells.length
+      ? Model.monthCellDetailText(cells[selectedIndex])
+      : ""
+    readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property string defaultText: Model.monthDefaultText(cells, false)
+    readonly property bool compact: width > 0 && width < Style.space(540)
+    readonly property real gap: Style.space(4)
+    readonly property int rowCount: Math.ceil(cells.length / 7)
+    readonly property real cellSize: Math.max(Style.space(22), Math.min(Style.space(36), (width - Style.space(compact ? 28 : 304)) / 7))
+    readonly property real calendarWidth: 7 * cellSize + 6 * gap
+
+    function restartReveal() {
+      revealProgress = 0
+      monthRhythmReveal.restart()
+    }
+
+    onCellsChanged: restartReveal()
+    onMaxSecondsChanged: restartReveal()
+    Component.onCompleted: restartReveal()
+
+    implicitHeight: compact ? Style.space(398) : Style.space(268)
+    radius: Style.space(7)
+    color: root.fill
+    border.color: root.line
+    border.width: 1
+
+    NumberAnimation {
+      id: monthRhythmReveal
+
+      target: monthRhythmRoot
+      property: "revealProgress"
+      from: 0
+      to: 1
+      duration: 620
+      easing.type: Easing.OutCubic
+    }
+
+    Item {
+      id: monthRhythmHeader
+
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: Style.space(12)
+      height: Style.space(20)
+
+      Text {
+        anchors.left: parent.left
+        anchors.right: monthRhythmDetail.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: monthRhythmRoot.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: monthRhythmDetail
+
+        width: Math.min(implicitWidth, parent.width * 0.46)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: monthRhythmRoot.detail
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+      }
+    }
+
+    GridLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: monthRhythmHeader.bottom
+      anchors.bottom: monthRhythmReadout.top
+      anchors.margins: Style.space(12)
+      anchors.topMargin: Style.space(10)
+      anchors.bottomMargin: Style.space(10)
+      columns: monthRhythmRoot.compact ? 1 : 2
+      columnSpacing: Style.space(14)
+      rowSpacing: Style.space(10)
+
+      Column {
+        Layout.preferredWidth: monthRhythmRoot.compact ? parent.width : monthRhythmRoot.calendarWidth
+        Layout.alignment: Qt.AlignTop
+        spacing: Style.space(4)
+
+        Row {
+          width: monthRhythmRoot.calendarWidth
+          spacing: monthRhythmRoot.gap
+
+          Repeater {
+            model: Model.weekdayLabels()
+
+            Text {
+              required property string modelData
+              width: monthRhythmRoot.cellSize
+              text: modelData.substr(0, 1)
+              color: root.faint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+            }
+          }
+        }
+
+        Grid {
+          width: monthRhythmRoot.calendarWidth
+          columns: 7
+          rowSpacing: monthRhythmRoot.gap
+          columnSpacing: monthRhythmRoot.gap
+
+          Repeater {
+            model: cells
+
+            Rectangle {
+              required property int index
+              required property var modelData
+              readonly property real cellSeconds: Number(modelData.seconds || 0)
+              readonly property real cellIntensity: Model.heatIntensity(cellSeconds, monthRhythmRoot.maxSeconds)
+              readonly property color heatBase: root.sliceColor(0, 1.0)
+
+              width: monthRhythmRoot.cellSize
+              height: width
+              radius: Style.space(4)
+              color: modelData.blank
+                ? "transparent"
+                : (cellSeconds > 0
+                  ? root.withAlpha(heatBase, 0.10 + monthRhythmRoot.revealProgress * (0.14 + 0.70 * cellIntensity))
+                  : root.track)
+              border.color: modelData.blank ? "transparent" : root.line
+              border.width: modelData.blank ? 0 : 1
+              scale: (monthRhythmRoot.hoveredIndex === index || monthRhythmRoot.selectedIndex === index) && !modelData.blank ? 1.05 : 1.0
+
+              Behavior on color {
+                ColorAnimation { duration: 140 }
+              }
+
+              Behavior on scale {
+                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+              }
+
+              Text {
+                anchors.centerIn: parent
+                text: modelData.blank ? "" : String(modelData.day || "")
+                color: cellSeconds > 0 ? root.foreground : root.faint
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: cellSeconds > 0
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                enabled: !modelData.blank
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onEntered: {
+                  monthRhythmRoot.hoveredIndex = index
+                  monthRhythmRoot.hoveredText = Model.monthCellDetailText(modelData)
+                }
+                onExited: {
+                  if (monthRhythmRoot.hoveredIndex === index) {
+                    monthRhythmRoot.hoveredIndex = -1
+                    monthRhythmRoot.hoveredText = ""
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      Column {
+        Layout.fillWidth: true
+        Layout.alignment: Qt.AlignTop
+        spacing: Style.space(10)
+
+        Column {
+          width: parent.width
+          spacing: Style.space(5)
+
+          Text {
+            width: parent.width
+            text: "Weekly pace"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Repeater {
+            model: weeks
+
+            Item {
+              required property var modelData
+
+              width: parent.width
+              height: Style.space(22)
+
+              Text {
+                id: weekName
+                anchors.left: parent.left
+                anchors.top: parent.top
+                width: Style.space(74)
+                text: String(modelData.label || "")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+
+              Text {
+                id: weekValue
+                anchors.right: parent.right
+                anchors.top: parent.top
+                width: Style.space(72)
+                text: String(modelData.valueText || "")
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                horizontalAlignment: Text.AlignRight
+                elide: Text.ElideRight
+              }
+
+              Rectangle {
+                anchors.left: weekName.right
+                anchors.right: weekValue.left
+                anchors.leftMargin: Style.space(8)
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: weekName.verticalCenter
+                height: Style.space(6)
+                radius: height / 2
+                color: root.track
+
+                Rectangle {
+                  width: parent.width * root.clamp01(Number(modelData.seconds || 0) / monthRhythmRoot.weekMaxSeconds) * monthRhythmRoot.revealProgress
+                  height: parent.height
+                  radius: parent.radius
+                  color: root.sliceColor(0, 0.9)
+                }
+              }
+            }
+          }
+        }
+
+        Item {
+          width: parent.width
+          height: Style.space(54)
+
+          Text {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            text: "Weekday balance"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          Repeater {
+            model: weekdays
+
+            Item {
+              required property int index
+              required property var modelData
+
+              readonly property real itemGap: Style.space(5)
+              readonly property real itemWidth: (parent.width - itemGap * 6) / 7
+
+              x: index * (itemWidth + itemGap)
+              y: Style.space(18)
+              width: itemWidth
+              height: Style.space(36)
+
+              Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: dayLabel.top
+                anchors.bottomMargin: Style.space(3)
+                height: Style.space(16)
+                radius: Style.space(3)
+                color: root.track
+
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.bottom: parent.bottom
+                  width: parent.width
+                  height: Math.max(Style.space(3), parent.height * root.clamp01(Number(modelData.seconds || 0) / monthRhythmRoot.weekdayMaxSeconds) * monthRhythmRoot.revealProgress)
+                  radius: parent.radius
+                  color: root.sliceColor(1, 0.82)
+                }
+              }
+
+              Text {
+                id: dayLabel
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                text: String(modelData.label || "").substr(0, 1)
+                color: root.faint
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                horizontalAlignment: Text.AlignHCenter
+              }
+            }
+          }
+        }
+      }
+    }
+
+    ChartReadout {
+      id: monthRhythmReadout
+
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      anchors.margins: Style.space(10)
+      text: monthRhythmRoot.readoutText.length > 0 ? monthRhythmRoot.readoutText : monthRhythmRoot.defaultText
     }
   }
 
