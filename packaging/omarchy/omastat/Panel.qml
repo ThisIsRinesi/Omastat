@@ -90,7 +90,9 @@ Panel {
   readonly property real heatMax: Model.maxHeatSeconds(heatCells)
   readonly property real hourlyMax: Model.maxHourlySeconds(hourlyCells)
   readonly property var consistency: Model.consistencyStats(daily)
-  readonly property var insightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
+  readonly property var baseInsightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
+  readonly property var insightRows: Model.enrichedInsights(baseInsightRows, visibleApps, daily, heatmap, selectedLens, totalFocused, totalElapsed)
+  readonly property var insightGroups: Model.insightGroups(insightRows)
   readonly property bool hasFocusedData: totalFocused > 0 || visibleApps.length > 0
   readonly property bool showBreakdown: totalFocused + totalObserved + totalExcluded > 0
   readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.75, Style.space(1180)) : Style.space(1080)
@@ -564,13 +566,13 @@ Panel {
 
           SectionHeader {
             text: "Insights"
-            visible: root.insightRows.length > 0
+            visible: root.insightGroups.length > 0
           }
 
-          InsightGrid {
+          InsightLanes {
             width: parent.width
-            visible: root.insightRows.length > 0
-            insights: root.insightRows
+            visible: root.insightGroups.length > 0
+            groups: root.insightGroups
           }
 
           SectionHeader {
@@ -2735,31 +2737,80 @@ Panel {
     }
   }
 
-  component InsightGrid: GridLayout {
-    id: insightGrid
+  component InsightLanes: Column {
+    id: lanesRoot
 
-    property var insights: []
-    readonly property int visibleCount: Math.min(insights.length, root.widePanel ? 9 : (root.compactPanel ? 6 : 8))
+    property var groups: []
 
-    columns: root.widePanel ? 3 : (root.compactPanel ? 1 : 2)
-    rowSpacing: Style.space(8)
-    columnSpacing: Style.space(8)
+    spacing: Style.space(8)
 
     Repeater {
-      model: insightGrid.insights.slice(0, insightGrid.visibleCount)
+      model: groups
 
-      InsightRow {
+      Column {
         required property var modelData
 
-        Layout.fillWidth: true
-        Layout.preferredWidth: insightGrid.columns > 0
-          ? Math.max(0, (insightGrid.width - insightGrid.columnSpacing * (insightGrid.columns - 1)) / insightGrid.columns)
-          : insightGrid.width
-        title: String(modelData.label || "Insight")
-        value: String(modelData.value || "")
-        detail: String(modelData.detail || "")
-        category: String(modelData.category || "")
-        tone: String(modelData.tone || "")
+        width: lanesRoot.width
+        spacing: Style.space(6)
+
+        Row {
+          width: parent.width
+          height: Style.space(18)
+          spacing: Style.space(8)
+
+          Text {
+            width: implicitWidth
+            anchors.verticalCenter: parent.verticalCenter
+            text: String(modelData.title || "Insights")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(4)
+            height: width
+            radius: width / 2
+            color: root.faint
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: String((modelData.rows || []).length) + " facts"
+            color: root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        GridLayout {
+          id: insightLaneGrid
+
+          width: parent.width
+          columns: root.widePanel ? 3 : (root.compactPanel ? 1 : 2)
+          rowSpacing: Style.space(8)
+          columnSpacing: Style.space(8)
+
+          Repeater {
+            model: (modelData.rows || []).slice(0, root.widePanel ? 6 : (root.compactPanel ? 3 : 4))
+
+            InsightRow {
+              required property var modelData
+
+              Layout.fillWidth: true
+              Layout.preferredWidth: insightLaneGrid.columns > 0
+                ? Math.max(0, (insightLaneGrid.width - insightLaneGrid.columnSpacing * (insightLaneGrid.columns - 1)) / insightLaneGrid.columns)
+                : insightLaneGrid.width
+              title: String(modelData.label || "Insight")
+              value: String(modelData.value || "")
+              detail: String(modelData.detail || "")
+              category: String(modelData.category || "")
+              tone: String(modelData.tone || "")
+            }
+          }
+        }
       }
     }
   }

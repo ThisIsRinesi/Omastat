@@ -78,6 +78,44 @@ assert.equal(weekdays[0].label, "Mon");
 assert.equal(weekdays[0].seconds, 1500);
 assert.equal(weekdays[6].seconds, 300);
 
+const enriched = context.enrichedInsights(
+  [
+    {
+      label: "App changes",
+      value: "12 switches/hour",
+      detail: "Switching normalized by focus time.",
+      category: "focus-quality",
+      tone: "caution",
+    },
+  ],
+  [{ app: "Editor", seconds: 12000 }],
+  [
+    { date: "2026-08-01", label: "Aug 1", focused_seconds: 3600 },
+    { date: "2026-08-02", label: "Aug 2", focused_seconds: 7200 },
+    { date: "2026-08-03", label: "Aug 3", focused_seconds: 3600 },
+    { date: "2026-08-04", label: "Aug 4", focused_seconds: 7200 },
+    { date: "2026-08-05", label: "Aug 5", focused_seconds: 3600 },
+    { date: "2026-08-06", label: "Aug 6", focused_seconds: 7200 },
+    { date: "2026-08-07", label: "Aug 7", focused_seconds: 3600 },
+  ],
+  [
+    { weekday: 0, hour: 9, focused_seconds: 1800 },
+    { weekday: 0, hour: 10, focused_seconds: 1800 },
+    { weekday: 0, hour: 11, focused_seconds: 900 },
+  ],
+  "month",
+  36000,
+  72000,
+);
+assert.ok(enriched.some((item) => item.label === "Projected month"));
+assert.ok(enriched.some((item) => item.label === "Prime window"));
+assert.ok(enriched.some((item) => item.label === "Attention anchor"));
+
+const groups = context.insightGroups(enriched);
+assert.ok(groups.some((group) => group.key === "focus-quality"));
+assert.ok(groups.some((group) => group.key === "patterns"));
+assert.ok(groups.some((group) => group.key === "apps"));
+
 const trend = context.trendDays(
   [
     {
