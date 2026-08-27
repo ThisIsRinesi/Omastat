@@ -510,19 +510,19 @@ Panel {
             id: appMixCard
 
             width: parent.width
-            implicitHeight: appRankBars.implicitHeight + Style.space(24)
+            implicitHeight: appRankBars.contentHeight + Style.space(24)
             radius: Style.space(7)
             color: root.fill
-            border.color: root.widePanel ? root.sliceColor(0, 0.32) : root.line
+            border.color: root.line
             border.width: 1
             visible: root.visibleApps.length > 0
             clip: true
 
             Rectangle {
               anchors.left: parent.left
-              anchors.right: parent.right
               anchors.top: parent.top
-              height: Style.space(2)
+              anchors.bottom: parent.bottom
+              width: Style.space(3)
               color: root.sliceColor(0, 0.72)
               opacity: root.widePanel ? 1 : 0.72
             }
@@ -827,9 +827,11 @@ Panel {
 
         SummaryStat {
           Layout.fillWidth: true
-          label: "Tracking"
-          value: root.totalUnobserved > 0 ? root.formatDuration(root.totalUnobserved) + " gap" : "No gaps"
-          detail: root.excludedDetailText.length > 0 ? root.excludedDetailText : "Tracker coverage looks complete"
+          label: "Coverage"
+          value: root.totalUnobserved > 0 ? root.formatDuration(root.totalUnobserved) + " gap" : "Complete"
+          detail: root.totalUnobserved > 0
+            ? root.excludedDetailText
+            : (root.pausedDetailText.length > 0 ? "Paused " + root.pausedDetailText : "No excluded time")
           accentColor: root.totalUnobserved > 0 ? Color.urgent : root.sliceColor(1, 1.0)
         }
       }
@@ -1076,12 +1078,14 @@ Panel {
       anchors.margins: Style.space(12)
       spacing: Style.space(8)
 
-      Row {
+      Item {
         width: parent.width
         height: Style.space(22)
 
         Text {
           anchors.left: parent.left
+          anchors.right: observedBreakdownLabel.left
+          anchors.rightMargin: Style.space(10)
           anchors.verticalCenter: parent.verticalCenter
           text: "Elapsed breakdown"
           color: root.dim
@@ -1091,6 +1095,9 @@ Panel {
         }
 
         Text {
+          id: observedBreakdownLabel
+
+          width: Math.min(implicitWidth, parent.width * 0.52)
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           text: observedSeconds > 0 ? root.formatDuration(observedSeconds) + " observed" : root.observedDetailText
@@ -1290,15 +1297,17 @@ Panel {
     }
 
     spacing: Style.space(8)
-    implicitHeight: rankHeader.implicitHeight + Style.space(8) + rankRows.implicitHeight
+    readonly property real contentHeight: rankHeader.implicitHeight + Style.space(8) + rankRows.implicitHeight
 
-    Row {
+    Item {
       id: rankHeader
       width: parent.width
       height: Style.space(18)
 
       Text {
         anchors.left: parent.left
+        anchors.right: rankHeaderValue.left
+        anchors.rightMargin: Style.space(10)
         anchors.verticalCenter: parent.verticalCenter
         text: "Ranked apps"
         color: root.dim
@@ -1308,6 +1317,9 @@ Panel {
       }
 
       Text {
+        id: rankHeaderValue
+
+        width: Math.min(implicitWidth, Style.space(112))
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
         text: root.formatDuration(root.totalFocused)
@@ -1524,10 +1536,10 @@ Panel {
             Text {
               width: parent.width
               text: String(modelData.valueText || "")
-              color: modelData.isToday ? root.foreground : root.dim
+              color: modelData.isToday === true ? root.foreground : root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
-              font.bold: modelData.isToday
+              font.bold: modelData.isToday === true
               horizontalAlignment: Text.AlignHCenter
               elide: Text.ElideRight
             }
