@@ -98,6 +98,10 @@ Panel {
   readonly property string periodScopeLabel: selectedOffset === 0 && selectedLens !== "day" && selectedLens !== "life" ? periodLabel + " to date" : periodLabel
   readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days only" : "Across period")
   readonly property string loadingAppMixText: summaryTopApp && summaryTopApp.app ? "Loading app mix; top " + String(summaryTopApp.app) + " " + root.formatDuration(Number(summaryTopApp.seconds || 0)) : "Loading app mix..."
+  readonly property string activityChartTitle: selectedLens === "day" ? "Last 7 days" : (selectedLens === "week" ? "This week" : (selectedLens === "month" ? "Month calendar" : (selectedLens === "year" ? "Monthly focus" : "Recent weeks")))
+  readonly property string timeChartTitle: selectedLens === "day" ? "Today by hour" : "Focus by time of week"
+  readonly property string activityChartDetail: selectedLens === "month" ? "Daily focused time" : "Focused time and observed share"
+  readonly property string timeChartDetail: selectedLens === "day" ? "Hourly focused time" : "Weekday and hour intensity"
 
   onSelectedLensChanged: clearInspection()
   onSelectedOffsetChanged: clearInspection()
@@ -414,35 +418,8 @@ Panel {
             }
           }
 
-          GridLayout {
+          DashboardSummary {
             width: parent.width
-            columns: root.metricColumns
-            rowSpacing: Style.space(8)
-            columnSpacing: Style.space(8)
-
-            MetricTile {
-              Layout.fillWidth: true
-              label: "Focused"
-              value: root.formatDuration(root.totalFocused)
-              detail: root.periodScopeLabel
-              accentColor: root.sliceColor(0, 1.0)
-            }
-
-            MetricTile {
-              Layout.fillWidth: true
-              label: "Focus Share"
-              value: root.focusShareText
-              detail: root.focusDenominator > 0 ? "Focused / observed" : "--"
-              accentColor: root.sliceColor(1, 1.0)
-            }
-
-            MetricTile {
-              Layout.fillWidth: true
-              label: root.topVisibleApp ? "Top App" : "Top App"
-              value: root.topAppName
-              detail: root.topAppValue
-              accentColor: root.sliceColor(2, 1.0)
-            }
           }
 
           GridLayout {
@@ -461,14 +438,12 @@ Panel {
               visible: root.showActivityChart
               spacing: Style.space(8)
 
-              SectionHeader {
-                text: root.selectedLens === "day" ? "Last 7 Days" : (root.selectedLens === "week" ? "This Week" : (root.selectedLens === "month" ? "Month Calendar" : (root.selectedLens === "year" ? "Monthly Focus" : "Recent Weeks")))
-              }
-
               TrendBars {
                 width: parent.width
                 expanded: root.widePanel
                 visible: root.selectedLens !== "month" && root.activityCells.length > 0
+                title: root.activityChartTitle
+                detail: root.activityChartDetail
                 days: root.activityCells
                 maxSeconds: Model.maxDailySeconds(root.activityCells)
                 selectedIndex: root.inspectedActivityIndex
@@ -477,6 +452,8 @@ Panel {
               MonthHeatmap {
                 width: parent.width
                 visible: root.selectedLens === "month" && root.monthCells.length > 0
+                title: root.activityChartTitle
+                detail: root.activityChartDetail
                 cells: root.monthCells
                 maxSeconds: root.monthMax
                 selectedIndex: root.inspectedActivityIndex
@@ -501,14 +478,12 @@ Panel {
               visible: root.showHourlyChart || root.showHeatmapChart
               spacing: Style.space(8)
 
-              SectionHeader {
-                text: root.selectedLens === "day" ? "Today by Hour" : "Focus by Time of Week"
-              }
-
               TrendBars {
                 width: parent.width
                 expanded: root.widePanel
                 visible: root.showHourlyChart
+                title: root.timeChartTitle
+                detail: root.timeChartDetail
                 days: root.hourlyTrendCells
                 maxSeconds: root.hourlyMax
                 selectedIndex: -1
@@ -518,6 +493,8 @@ Panel {
                 width: parent.width
                 expanded: root.widePanel
                 visible: root.showHeatmapChart
+                title: root.timeChartTitle
+                detail: root.timeChartDetail
                 cells: root.heatCells
                 maxSeconds: root.heatMax
                 selectedIndex: root.inspectedHeatIndex
@@ -719,6 +696,235 @@ Panel {
     font.bold: true
     text: ""
     elide: Text.ElideRight
+  }
+
+  component DashboardSummary: Rectangle {
+    id: summaryRoot
+
+    readonly property int otherTrackedSeconds: Math.max(0, root.totalObserved - root.totalFocused - root.totalPaused)
+    readonly property int elapsedSeconds: Math.max(1, root.totalObserved + root.totalUnobserved)
+
+    implicitHeight: summaryColumn.implicitHeight + Style.space(24)
+    radius: Style.space(7)
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.075)
+    border.color: root.sliceColor(0, root.refreshRunning ? 0.56 : 0.28)
+    border.width: 1
+    clip: true
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      width: Style.space(3)
+      color: root.errorText !== "" ? Color.urgent : root.sliceColor(0, 0.92)
+    }
+
+    Column {
+      id: summaryColumn
+
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(16)
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(14)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(10)
+
+      Item {
+        width: parent.width
+        height: Math.max(primaryValue.implicitHeight + primaryLabel.implicitHeight + Style.space(2), focusSharePill.implicitHeight)
+
+        Column {
+          anchors.left: parent.left
+          anchors.right: focusSharePill.left
+          anchors.rightMargin: Style.space(12)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(1)
+
+          Text {
+            id: primaryLabel
+
+            width: parent.width
+            text: "Focused time"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Text {
+            id: primaryValue
+
+            width: parent.width
+            text: root.formatDuration(root.totalFocused)
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
+            elide: Text.ElideRight
+          }
+        }
+
+        Rectangle {
+          id: focusSharePill
+
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          implicitWidth: focusShareColumn.implicitWidth + Style.space(20)
+          implicitHeight: focusShareColumn.implicitHeight + Style.space(10)
+          radius: Style.space(6)
+          color: root.sliceColor(1, 0.16)
+          border.color: root.sliceColor(1, 0.36)
+          border.width: 1
+
+          Column {
+            id: focusShareColumn
+
+            anchors.centerIn: parent
+            spacing: 0
+
+            Text {
+              text: root.focusShareText
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            Text {
+              text: "observed"
+              color: root.faint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+            }
+          }
+        }
+      }
+
+      GridLayout {
+        width: parent.width
+        columns: root.metricColumns
+        rowSpacing: Style.space(8)
+        columnSpacing: Style.space(12)
+
+        SummaryStat {
+          Layout.fillWidth: true
+          label: "Period"
+          value: root.periodScopeLabel
+          detail: root.observedDetailText
+          accentColor: root.sliceColor(0, 1.0)
+        }
+
+        SummaryStat {
+          Layout.fillWidth: true
+          label: "Top app"
+          value: root.topAppName
+          detail: root.topAppValue
+          accentColor: root.sliceColor(2, 1.0)
+        }
+
+        SummaryStat {
+          Layout.fillWidth: true
+          label: "Tracking"
+          value: root.totalUnobserved > 0 ? root.formatDuration(root.totalUnobserved) + " gap" : "No gaps"
+          detail: root.excludedDetailText.length > 0 ? root.excludedDetailText : "Tracker coverage looks complete"
+          accentColor: root.totalUnobserved > 0 ? Color.urgent : root.sliceColor(1, 1.0)
+        }
+      }
+
+      Row {
+        width: parent.width
+        height: Style.space(10)
+        spacing: 0
+        visible: root.showBreakdown
+        clip: true
+
+        Rectangle {
+          width: parent.width * root.clamp01(root.totalFocused / summaryRoot.elapsedSeconds)
+          height: parent.height
+          radius: Style.space(4)
+          color: root.sliceColor(0, 0.94)
+        }
+
+        Rectangle {
+          width: parent.width * root.clamp01(root.totalPaused / summaryRoot.elapsedSeconds)
+          height: parent.height
+          color: root.sliceColor(3, 0.84)
+        }
+
+        Rectangle {
+          width: parent.width * root.clamp01(summaryRoot.otherTrackedSeconds / summaryRoot.elapsedSeconds)
+          height: parent.height
+          color: root.sliceColor(1, 0.55)
+        }
+
+        Rectangle {
+          width: parent.width * root.clamp01(root.totalUnobserved / summaryRoot.elapsedSeconds)
+          height: parent.height
+          radius: Style.space(4)
+          color: root.totalUnobserved > 0 ? Color.urgent : root.faint
+        }
+      }
+    }
+  }
+
+  component SummaryStat: Item {
+    property string label: ""
+    property string value: ""
+    property string detail: ""
+    property color accentColor: root.accent
+
+    Layout.minimumWidth: Style.space(126)
+    implicitHeight: Style.space(48)
+
+    Rectangle {
+      width: Style.space(6)
+      height: width
+      radius: width / 2
+      color: accentColor
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.topMargin: Style.space(5)
+    }
+
+    Column {
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(12)
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(1)
+
+      Text {
+        width: parent.width
+        text: label
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width
+        text: value
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width
+        text: detail
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+    }
   }
 
   component MetricTile: Rectangle {
@@ -1210,6 +1416,8 @@ Panel {
   component TrendBars: Rectangle {
     id: trendRoot
 
+    property string title: ""
+    property string detail: ""
     property var days: []
     property real maxSeconds: 0
     property int selectedIndex: -1
@@ -1232,7 +1440,7 @@ Panel {
     onMaxSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: expanded ? Style.space(198) : Style.space(164)
+    implicitHeight: expanded ? Style.space(216) : Style.space(184)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -1249,9 +1457,51 @@ Panel {
       easing.type: Easing.OutCubic
     }
 
-    Row {
-      anchors.fill: parent
+    Item {
+      id: trendHeader
+
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
       anchors.margins: Style.space(12)
+      height: Style.space(20)
+
+      Text {
+        anchors.left: parent.left
+        anchors.right: trendDetail.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: trendRoot.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: trendDetail
+
+        width: Math.min(implicitWidth, parent.width * 0.46)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: trendRoot.detail
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+      }
+    }
+
+    Row {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: trendHeader.bottom
+      anchors.bottom: parent.bottom
+      anchors.leftMargin: Style.space(12)
+      anchors.rightMargin: Style.space(12)
+      anchors.topMargin: Style.space(8)
       anchors.bottomMargin: Style.space(38)
       spacing: Style.space(7)
 
@@ -1285,7 +1535,7 @@ Panel {
             Item {
               id: barSlot
               width: parent.width
-              height: Math.max(Style.space(62), trendRoot.height - Style.space(102))
+              height: Math.max(Style.space(44), parent.height - Style.space(54))
 
               Repeater {
                 model: 3
@@ -1387,6 +1637,8 @@ Panel {
   component MonthHeatmap: Rectangle {
     id: monthRoot
 
+    property string title: ""
+    property string detail: ""
     property var cells: []
     property real maxSeconds: 0
     property int selectedIndex: -1
@@ -1418,7 +1670,7 @@ Panel {
     onMaxSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: Style.space(80) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
+    implicitHeight: Style.space(108) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -1435,11 +1687,48 @@ Panel {
       easing.type: Easing.OutCubic
     }
 
+    Item {
+      id: monthHeader
+
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: Style.space(12)
+      height: Style.space(20)
+
+      Text {
+        anchors.left: parent.left
+        anchors.right: monthDetail.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: monthRoot.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: monthDetail
+
+        width: Math.min(implicitWidth, parent.width * 0.46)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: monthRoot.detail
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+      }
+    }
+
     Row {
       id: weekdayHeader
       width: monthRoot.gridWidth
       anchors.horizontalCenter: parent.horizontalCenter
-      anchors.top: parent.top
+      anchors.top: monthHeader.bottom
       anchors.topMargin: Style.space(8)
       spacing: monthRoot.gap
 
@@ -1537,6 +1826,8 @@ Panel {
   component HeatmapGrid: Rectangle {
     id: heatRoot
 
+    property string title: ""
+    property string detail: ""
     property var cells: []
     property real maxSeconds: 0
     property int selectedIndex: -1
@@ -1566,7 +1857,7 @@ Panel {
     onMaxSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: Math.max(expanded ? Style.space(198) : Style.space(166), Style.space(92) + gridHeight)
+    implicitHeight: Math.max(expanded ? Style.space(216) : Style.space(184), Style.space(118) + gridHeight)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -1584,8 +1875,51 @@ Panel {
     }
 
     Item {
-      anchors.fill: parent
+      id: heatHeader
+
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
       anchors.margins: Style.space(12)
+      height: Style.space(20)
+
+      Text {
+        anchors.left: parent.left
+        anchors.right: heatDetail.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: heatRoot.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: heatDetail
+
+        width: Math.min(implicitWidth, parent.width * 0.46)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: heatRoot.detail
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+      }
+    }
+
+    Item {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: heatHeader.bottom
+      anchors.bottom: parent.bottom
+      anchors.leftMargin: Style.space(12)
+      anchors.rightMargin: Style.space(12)
+      anchors.topMargin: Style.space(8)
+      anchors.bottomMargin: Style.space(12)
 
       Row {
         id: hourLabels
