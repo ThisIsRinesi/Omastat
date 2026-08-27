@@ -1927,7 +1927,7 @@ Panel {
     readonly property bool compact: width > 0 && width < Style.space(540)
     readonly property real gap: Style.space(4)
     readonly property int rowCount: Math.ceil(cells.length / 7)
-    readonly property real cellSize: Math.max(Style.space(22), Math.min(Style.space(36), (width - Style.space(compact ? 28 : 304)) / 7))
+    readonly property real cellSize: Math.max(Style.space(22), Math.min(Style.space(32), (width - Style.space(compact ? 28 : 304)) / 7))
     readonly property real calendarWidth: 7 * cellSize + 6 * gap
 
     function restartReveal() {
@@ -1939,7 +1939,7 @@ Panel {
     onMaxSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: compact ? Style.space(398) : Style.space(268)
+    implicitHeight: compact ? Style.space(398) : Style.space(304)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -2703,8 +2703,8 @@ Panel {
     property string text: ""
 
     visible: text.length > 0
-    implicitHeight: visible ? readoutLabel.implicitHeight + Style.space(6) : 0
-    height: implicitHeight
+    implicitHeight: visible ? Style.space(24) : 0
+    height: visible ? Style.space(24) : 0
     radius: Style.space(5)
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
     border.color: root.line
