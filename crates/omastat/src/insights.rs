@@ -4,7 +4,7 @@ use crate::{
         AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, TimelineInterval, WorkspaceTotals,
     },
 };
-use chrono::NaiveDate;
+use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -40,10 +40,13 @@ pub struct AnalysisInput<'a> {
     pub daily: &'a [DayTotals],
     pub heatmap: &'a [FocusHeatCell],
     pub focus_intervals: &'a [TimelineInterval],
+    pub historical_focus_intervals: &'a [TimelineInterval],
     pub workspaces: &'a [WorkspaceTotals],
     pub app_workspaces: &'a [AppWorkspaceTotals],
     pub today_key: &'a str,
     pub selected_day_key: &'a str,
+    pub current_weekday: Option<u32>,
+    pub current_hour: Option<u32>,
     pub period: AnalysisPeriod<'a>,
     pub previous_period: Option<AnalysisComparisonPeriod>,
     pub total_focused_seconds: i64,
@@ -72,6 +75,11 @@ pub struct Insight {
 pub enum InsightKind {
     TopApp,
     DayComparison,
+    SameWeekdayPace,
+    UsuallyActiveNow,
+    UsualAppNow,
+    AppRoutine,
+    FocusMomentum,
     PeriodComparison,
     BestDay,
     WorstActiveDay,
@@ -216,6 +224,10 @@ pub fn analyze(input: AnalysisInput<'_>) -> Vec<Insight> {
     if input.total_focused_seconds > 0 {
         push_top_app(&input, &mut out);
         push_day_comparison(&input, &mut out);
+        push_same_weekday_pace(&input, &mut out);
+        push_current_habit_facts(&input, &mut out);
+        push_app_routine_fact(&input, &mut out);
+        push_focus_momentum_fact(&input, &mut out);
         push_period_comparison(&input, &mut out);
         push_day_facts(&input, &mut out);
         push_peak_facts(&input, &mut out);
@@ -262,6 +274,32 @@ struct FragmentedApp {
     focused_seconds: i64,
     block_count: usize,
     rate_per_hour: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SlotApp {
+    app_class: String,
+    focused_seconds: i64,
+    active_days: usize,
+    share: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Daypart {
+    key: &'static str,
+    label: &'static str,
+    start_hour: u32,
+    end_hour: u32,
+}
+
+#[derive(Debug, Clone)]
+struct AppRoutine {
+    app_class: String,
+    weekday: u32,
+    daypart: Daypart,
+    focused_seconds: i64,
+    active_days: usize,
+    share: f64,
 }
 
 fn push_top_app(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
@@ -342,6 +380,309 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             comparison_seconds: yesterday,
             delta_seconds: delta,
         }),
+    });
+}
+
+fn push_same_weekday_pace(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
+    if input.period.lens != AnalysisLens::Day || input.period.label != "Today" {
+        return;
+    }
+
+    let Ok(selected_date) = NaiveDate::parse_from_str(input.selected_day_key, "%Y-%m-%d") else {
+        return;
+    };
+    let selected_weekday = selected_date.weekday();
+    let matching_days = input
+        .daily
+        .iter()
+        .filter(|day| day.date != input.selected_day_key)
+        .filter_map(|day| {
+            let date = NaiveDate::parse_from_str(&day.date, "%Y-%m-%d").ok()?;
+            (date.weekday() == selected_weekday && day.focused_seconds > 0)
+                .then_some(day.focused_seconds.max(0))
+        })
+        .collect::<Vec<_>>();
+
+    const MIN_MATCHING_DAYS: usize = 3;
+    if matching_days.len() < MIN_MATCHING_DAYS {
+        return;
+    }
+
+    let baseline = mean_seconds(&matching_days).round().max(0.0) as i64;
+    if baseline < 15 * 60 {
+        return;
+    }
+
+    let delta = input.total_focused_seconds - baseline;
+    let tolerance = (baseline / 5).max(15 * 60);
+    let (tone, title, value) = if delta.abs() <= tolerance {
+        (
+            InsightTone::Neutral,
+            "Near usual pace",
+            format_duration(input.total_focused_seconds),
+        )
+    } else if delta > 0 {
+        (
+            InsightTone::Positive,
+            "Ahead of usual pace",
+            signed_duration(delta),
+        )
+    } else {
+        (
+            InsightTone::Info,
+            "Behind usual pace",
+            signed_duration(delta),
+        )
+    };
+
+    let mut support = period_support(input.period);
+    support.date = Some(input.selected_day_key.to_string());
+    support.date_label = Some("Today".to_string());
+    support.weekday = Some(selected_weekday.num_days_from_monday());
+    support.weekday_label =
+        Some(weekday_label(selected_weekday.num_days_from_monday()).to_string());
+    support.focused_seconds = Some(input.total_focused_seconds.max(0));
+    support.baseline_seconds = Some(baseline);
+    support.delta_seconds = Some(delta);
+
+    out.push(Insight {
+        kind: InsightKind::SameWeekdayPace,
+        category: InsightCategory::Patterns,
+        tone,
+        title: title.to_string(),
+        value,
+        explanation: format!(
+            "Compares today with your usual focused time across prior active {}s.",
+            weekday_label(selected_weekday.num_days_from_monday())
+        ),
+        confidence: confidence(matching_days.len(), MIN_MATCHING_DAYS),
+        evidence: InsightEvidence {
+            data_points: matching_days.len(),
+            minimum_data_points: MIN_MATCHING_DAYS,
+            observed_focus_seconds: input.total_focused_seconds.max(0),
+            observed_open_seconds: input.total_open_seconds.max(0),
+        },
+        supporting: support,
+    });
+}
+
+fn push_current_habit_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
+    if input.period.lens != AnalysisLens::Day || input.period.label != "Today" {
+        return;
+    }
+    let (Some(current_weekday), Some(current_hour)) = (input.current_weekday, input.current_hour)
+    else {
+        return;
+    };
+
+    let matching_weekdays = prior_matching_weekday_count(input.daily, input.selected_day_key);
+    if matching_weekdays < 3 {
+        return;
+    }
+
+    let slot_days = active_slot_days(
+        input.historical_focus_intervals,
+        input.selected_day_key,
+        current_weekday,
+        current_hour,
+    );
+    let active_days = slot_days.len();
+    let active_share = active_days as f64 / matching_weekdays as f64;
+    if active_share < 0.60 {
+        return;
+    }
+
+    let slot_seconds = slot_days.values().copied().sum::<i64>();
+    let average = slot_seconds / active_days.max(1) as i64;
+    if average < 5 * 60 {
+        return;
+    }
+
+    let mut support = period_support(input.period);
+    support.weekday = Some(current_weekday);
+    support.weekday_label = Some(weekday_label(current_weekday).to_string());
+    support.hour = Some(current_hour);
+    support.hour_label = Some(hour_label(current_hour));
+    support.focused_seconds = Some(slot_seconds.max(0));
+    support.baseline_seconds = Some(average.max(0));
+    support.share = Some(active_share.clamp(0.0, 1.0));
+
+    out.push(Insight {
+        kind: InsightKind::UsuallyActiveNow,
+        category: InsightCategory::Patterns,
+        tone: if active_share >= 0.80 {
+            InsightTone::Positive
+        } else {
+            InsightTone::Info
+        },
+        title: "Usually active now".to_string(),
+        value: format!(
+            "{} {}",
+            weekday_label(current_weekday),
+            hour_label(current_hour)
+        ),
+        explanation: format!(
+            "This weekday and hour had focused time on {} of {} prior matching days.",
+            active_days, matching_weekdays
+        ),
+        confidence: confidence(matching_weekdays, 3),
+        evidence: InsightEvidence {
+            data_points: matching_weekdays,
+            minimum_data_points: 3,
+            observed_focus_seconds: input.total_focused_seconds.max(0),
+            observed_open_seconds: input.total_open_seconds.max(0),
+        },
+        supporting: support,
+    });
+
+    if let Some(app) = dominant_slot_app(
+        input.historical_focus_intervals,
+        input.selected_day_key,
+        current_weekday,
+        current_hour,
+    ) {
+        if app.share >= 0.60 && app.active_days >= 3 && app.focused_seconds >= 15 * 60 {
+            let app_label = identity::display_name(&app.app_class);
+            let mut support = period_support(input.period).with_app(
+                &app.app_class,
+                &app_label,
+                app.focused_seconds,
+                None,
+                Some(app.share),
+            );
+            support.weekday = Some(current_weekday);
+            support.weekday_label = Some(weekday_label(current_weekday).to_string());
+            support.hour = Some(current_hour);
+            support.hour_label = Some(hour_label(current_hour));
+
+            out.push(Insight {
+                kind: InsightKind::UsualAppNow,
+                category: InsightCategory::Apps,
+                tone: InsightTone::Info,
+                title: "Usual app now".to_string(),
+                value: app_label,
+                explanation: format!(
+                    "This app held {} of focused time in this usual time slot.",
+                    percent(app.share)
+                ),
+                confidence: confidence(app.active_days, 3),
+                evidence: InsightEvidence {
+                    data_points: app.active_days,
+                    minimum_data_points: 3,
+                    observed_focus_seconds: input.total_focused_seconds.max(0),
+                    observed_open_seconds: input.total_open_seconds.max(0),
+                },
+                supporting: support,
+            });
+        }
+    }
+}
+
+fn push_app_routine_fact(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
+    let Some(routine) =
+        strongest_app_routine(input.historical_focus_intervals, input.selected_day_key)
+    else {
+        return;
+    };
+    if routine.active_days < 3 || routine.focused_seconds < 60 * 60 || routine.share < 0.45 {
+        return;
+    }
+
+    let app_label = identity::display_name(&routine.app_class);
+    let mut support = period_support(input.period).with_app(
+        &routine.app_class,
+        &app_label,
+        routine.focused_seconds,
+        None,
+        Some(routine.share),
+    );
+    support.weekday = Some(routine.weekday);
+    support.weekday_label = Some(weekday_label(routine.weekday).to_string());
+
+    out.push(Insight {
+        kind: InsightKind::AppRoutine,
+        category: InsightCategory::Apps,
+        tone: if routine.share >= 0.65 {
+            InsightTone::Positive
+        } else {
+            InsightTone::Info
+        },
+        title: "Routine".to_string(),
+        value: format!(
+            "{} {} {}",
+            app_label,
+            weekday_label(routine.weekday),
+            routine.daypart.label
+        ),
+        explanation: format!(
+            "{} has a recurring {} pattern on {}s.",
+            app_label,
+            routine.daypart.label,
+            weekday_label(routine.weekday)
+        ),
+        confidence: confidence(routine.active_days, 3),
+        evidence: InsightEvidence {
+            data_points: routine.active_days,
+            minimum_data_points: 3,
+            observed_focus_seconds: routine.focused_seconds.max(0),
+            observed_open_seconds: input.total_open_seconds.max(0),
+        },
+        supporting: support,
+    });
+}
+
+fn push_focus_momentum_fact(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
+    let values = input
+        .daily
+        .iter()
+        .map(|day| day.focused_seconds.max(0))
+        .collect::<Vec<_>>();
+    if values.len() < 14 {
+        return;
+    }
+
+    let recent = values[values.len().saturating_sub(7)..].iter().sum::<i64>();
+    let previous_start = values.len().saturating_sub(14);
+    let previous = values[previous_start..values.len() - 7].iter().sum::<i64>();
+    if previous < 60 * 60 {
+        return;
+    }
+
+    let delta = recent - previous;
+    let change = delta as f64 / previous.max(1) as f64;
+    if change.abs() < 0.20 || delta.abs() < 30 * 60 {
+        return;
+    }
+
+    let mut support = period_support(input.period);
+    support.focused_seconds = Some(recent.max(0));
+    support.comparison_seconds = Some(previous.max(0));
+    support.delta_seconds = Some(delta);
+    support.share = Some(change.abs().min(1.0));
+
+    out.push(Insight {
+        kind: InsightKind::FocusMomentum,
+        category: InsightCategory::Patterns,
+        tone: if delta > 0 {
+            InsightTone::Positive
+        } else {
+            InsightTone::Info
+        },
+        title: if delta > 0 {
+            "Focus trending up".to_string()
+        } else {
+            "Focus trending down".to_string()
+        },
+        value: signed_duration(delta),
+        explanation: "Compares the last 7 loaded days with the 7 days before them.".to_string(),
+        confidence: confidence(values.len(), 14),
+        evidence: InsightEvidence {
+            data_points: values.len(),
+            minimum_data_points: 14,
+            observed_focus_seconds: recent.max(0),
+            observed_open_seconds: input.total_open_seconds.max(0),
+        },
+        supporting: support,
     });
 }
 
@@ -1242,6 +1583,234 @@ fn peak_weekday(cells: &[FocusHeatCell]) -> Option<WeekdayTotal> {
     })
 }
 
+fn prior_matching_weekday_count(daily: &[DayTotals], selected_day_key: &str) -> usize {
+    let Ok(selected_date) = NaiveDate::parse_from_str(selected_day_key, "%Y-%m-%d") else {
+        return 0;
+    };
+    let selected_weekday = selected_date.weekday();
+    daily
+        .iter()
+        .filter(|day| day.date != selected_day_key)
+        .filter(|day| {
+            NaiveDate::parse_from_str(&day.date, "%Y-%m-%d")
+                .is_ok_and(|date| date.weekday() == selected_weekday)
+        })
+        .count()
+}
+
+fn active_slot_days(
+    intervals: &[TimelineInterval],
+    selected_day_key: &str,
+    weekday: u32,
+    hour: u32,
+) -> BTreeMap<String, i64> {
+    let mut days = BTreeMap::<String, i64>::new();
+    for interval in intervals {
+        add_slot_overlaps(interval, selected_day_key, weekday, hour, &mut days, None);
+    }
+    days.retain(|_, seconds| *seconds >= 5 * 60);
+    days
+}
+
+fn dominant_slot_app(
+    intervals: &[TimelineInterval],
+    selected_day_key: &str,
+    weekday: u32,
+    hour: u32,
+) -> Option<SlotApp> {
+    let mut totals = BTreeMap::<String, (i64, BTreeMap<String, i64>)>::new();
+    for interval in intervals {
+        let day_totals = totals.entry(interval.app_class.clone()).or_default();
+        add_slot_overlaps(
+            interval,
+            selected_day_key,
+            weekday,
+            hour,
+            &mut day_totals.1,
+            Some(&mut day_totals.0),
+        );
+    }
+
+    let total_seconds = totals
+        .values()
+        .map(|(seconds, _)| seconds.max(&0))
+        .sum::<i64>();
+    if total_seconds <= 0 {
+        return None;
+    }
+
+    totals
+        .into_iter()
+        .filter_map(|(app_class, (focused_seconds, mut days))| {
+            days.retain(|_, seconds| *seconds >= 5 * 60);
+            (focused_seconds > 0).then(|| SlotApp {
+                app_class,
+                focused_seconds,
+                active_days: days.len(),
+                share: ratio(focused_seconds, total_seconds),
+            })
+        })
+        .max_by(|left, right| {
+            left.share
+                .total_cmp(&right.share)
+                .then_with(|| left.focused_seconds.cmp(&right.focused_seconds))
+        })
+}
+
+fn add_slot_overlaps(
+    interval: &TimelineInterval,
+    selected_day_key: &str,
+    weekday: u32,
+    hour: u32,
+    days: &mut BTreeMap<String, i64>,
+    mut total_seconds: Option<&mut i64>,
+) {
+    let mut cursor = interval.started_at;
+    while cursor < interval.ended_at {
+        let Some((date, slot_weekday, slot_hour)) = local_day_slot(cursor) else {
+            break;
+        };
+        let segment_end = next_slot_change(cursor, interval.ended_at, slot_weekday, slot_hour);
+        let overlap = segment_end - cursor;
+        if overlap > 0 && date != selected_day_key && slot_weekday == weekday && slot_hour == hour {
+            *days.entry(date).or_default() += overlap;
+            if let Some(total) = total_seconds.as_deref_mut() {
+                *total += overlap;
+            }
+        }
+        cursor = segment_end.max(cursor + 1);
+    }
+}
+
+fn strongest_app_routine(
+    intervals: &[TimelineInterval],
+    selected_day_key: &str,
+) -> Option<AppRoutine> {
+    let dayparts = dayparts();
+    let mut totals = BTreeMap::<(String, u32, &'static str), (i64, BTreeMap<String, i64>)>::new();
+    let mut app_totals = BTreeMap::<String, i64>::new();
+
+    for interval in intervals {
+        let mut cursor = interval.started_at;
+        while cursor < interval.ended_at {
+            let Some((date, weekday, hour)) = local_day_slot(cursor) else {
+                break;
+            };
+            let segment_end = next_slot_change(cursor, interval.ended_at, weekday, hour);
+            let overlap = segment_end - cursor;
+            if overlap > 0 && date != selected_day_key {
+                *app_totals.entry(interval.app_class.clone()).or_default() += overlap;
+                if let Some(daypart) = dayparts.iter().find(|part| part.contains(hour)) {
+                    let entry = totals
+                        .entry((interval.app_class.clone(), weekday, daypart.key))
+                        .or_default();
+                    entry.0 += overlap;
+                    *entry.1.entry(date).or_default() += overlap;
+                }
+            }
+            cursor = segment_end.max(cursor + 1);
+        }
+    }
+
+    totals
+        .into_iter()
+        .filter_map(
+            |((app_class, weekday, daypart_key), (focused_seconds, mut days))| {
+                days.retain(|_, seconds| *seconds >= 10 * 60);
+                let active_days = days.len();
+                let app_total = *app_totals.get(&app_class)?;
+                let daypart = dayparts
+                    .iter()
+                    .find(|part| part.key == daypart_key)
+                    .copied()?;
+                (app_total > 0).then(|| AppRoutine {
+                    app_class,
+                    weekday,
+                    daypart,
+                    focused_seconds,
+                    active_days,
+                    share: ratio(focused_seconds, app_total),
+                })
+            },
+        )
+        .max_by(|left, right| {
+            left.share
+                .total_cmp(&right.share)
+                .then_with(|| left.active_days.cmp(&right.active_days))
+                .then_with(|| left.focused_seconds.cmp(&right.focused_seconds))
+        })
+}
+
+impl Daypart {
+    fn contains(self, hour: u32) -> bool {
+        hour >= self.start_hour && hour < self.end_hour
+    }
+}
+
+fn dayparts() -> [Daypart; 4] {
+    [
+        Daypart {
+            key: "morning",
+            label: "morning",
+            start_hour: 5,
+            end_hour: 12,
+        },
+        Daypart {
+            key: "afternoon",
+            label: "afternoon",
+            start_hour: 12,
+            end_hour: 17,
+        },
+        Daypart {
+            key: "evening",
+            label: "evening",
+            start_hour: 17,
+            end_hour: 22,
+        },
+        Daypart {
+            key: "night",
+            label: "night",
+            start_hour: 22,
+            end_hour: 24,
+        },
+    ]
+}
+
+fn local_day_slot(timestamp: i64) -> Option<(String, u32, u32)> {
+    let local = Local.timestamp_opt(timestamp, 0).single()?;
+    Some((
+        local.format("%Y-%m-%d").to_string(),
+        local.weekday().num_days_from_monday(),
+        local.hour(),
+    ))
+}
+
+fn next_slot_change(cursor: i64, ended_at: i64, weekday: u32, hour: u32) -> i64 {
+    let search_end = ended_at.min(cursor.saturating_add(3 * 60 * 60 + 1));
+    if search_end <= cursor + 1 {
+        return search_end;
+    }
+    if local_day_slot(search_end.saturating_sub(1))
+        .is_some_and(|(_, next_weekday, next_hour)| next_weekday == weekday && next_hour == hour)
+    {
+        return search_end;
+    }
+
+    let mut low = cursor + 1;
+    let mut high = search_end;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if local_day_slot(mid).is_some_and(|(_, next_weekday, next_hour)| {
+            next_weekday == weekday && next_hour == hour
+        }) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
 fn effective_app_count(rows: &[AppTotals], total_focused_seconds: i64) -> f64 {
     analytics::effective_app_count(rows, total_focused_seconds)
 }
@@ -1696,6 +2265,173 @@ mod tests {
     }
 
     #[test]
+    fn emits_same_weekday_pace_for_today_with_enough_history() {
+        let rows = vec![AppTotals {
+            app_class: "steam".to_string(),
+            focused_seconds: 5400,
+            open_seconds: 5400,
+        }];
+        let daily = vec![
+            day("2025-12-24", "Wed", 3600),
+            day("2025-12-31", "Wed", 4500),
+            day("2026-01-07", "Wed", 2700),
+            day("2026-01-13", "Tue", 900),
+            day("2026-01-14", "Wed", 5400),
+        ];
+
+        let insights = analyze(input(&rows, &daily, 5400, 5400, 0, 0));
+        let pace = insights
+            .iter()
+            .find(|insight| insight.kind == InsightKind::SameWeekdayPace)
+            .unwrap();
+
+        assert_eq!(pace.title, "Ahead of usual pace");
+        assert_eq!(pace.value, "+30m");
+        assert_eq!(pace.category, InsightCategory::Patterns);
+        assert_eq!(pace.confidence, InsightConfidence::Medium);
+        assert_eq!(pace.evidence.data_points, 3);
+        assert_eq!(pace.supporting.weekday_label.as_deref(), Some("Wed"));
+        assert_eq!(pace.supporting.baseline_seconds, Some(3600));
+        assert_eq!(pace.supporting.delta_seconds, Some(1800));
+    }
+
+    #[test]
+    fn suppresses_same_weekday_pace_without_enough_history() {
+        let rows = vec![AppTotals {
+            app_class: "steam".to_string(),
+            focused_seconds: 1800,
+            open_seconds: 1800,
+        }];
+        let daily = vec![
+            day("2025-12-31", "Wed", 4500),
+            day("2026-01-07", "Wed", 2700),
+            day("2026-01-14", "Wed", 1800),
+        ];
+
+        let insights = analyze(input(&rows, &daily, 1800, 1800, 0, 0));
+
+        assert!(
+            insights
+                .iter()
+                .all(|insight| insight.kind != InsightKind::SameWeekdayPace)
+        );
+    }
+
+    #[test]
+    fn emits_current_slot_habits_from_historical_focus() {
+        let rows = vec![AppTotals {
+            app_class: "steam".to_string(),
+            focused_seconds: 1800,
+            open_seconds: 1800,
+        }];
+        let daily = vec![
+            day("2025-12-24", "Wed", 1800),
+            day("2025-12-31", "Wed", 1800),
+            day("2026-01-07", "Wed", 1800),
+            day("2026-01-14", "Wed", 1800),
+        ];
+        let history = vec![
+            focus(
+                "steam",
+                local_ts(2025, 12, 24, 9, 0),
+                local_ts(2025, 12, 24, 9, 20),
+            ),
+            focus(
+                "steam",
+                local_ts(2025, 12, 31, 9, 0),
+                local_ts(2025, 12, 31, 9, 20),
+            ),
+            focus(
+                "steam",
+                local_ts(2026, 1, 7, 9, 0),
+                local_ts(2026, 1, 7, 9, 20),
+            ),
+            focus(
+                "code",
+                local_ts(2026, 1, 7, 9, 20),
+                local_ts(2026, 1, 7, 9, 25),
+            ),
+        ];
+        let mut analysis = input(&rows, &daily, 1800, 1800, 0, 0);
+        analysis.historical_focus_intervals = &history;
+        analysis.current_weekday = Some(2);
+        analysis.current_hour = Some(9);
+
+        let insights = analyze(analysis);
+        let active = insights
+            .iter()
+            .find(|insight| insight.kind == InsightKind::UsuallyActiveNow)
+            .unwrap();
+        let app = insights
+            .iter()
+            .find(|insight| insight.kind == InsightKind::UsualAppNow)
+            .unwrap();
+
+        assert_eq!(active.value, "Wed 9 AM");
+        assert_eq!(active.supporting.share, Some(1.0));
+        assert_eq!(app.value, "Steam");
+        assert_eq!(app.supporting.app_class.as_deref(), Some("steam"));
+    }
+
+    #[test]
+    fn emits_app_routine_and_focus_momentum() {
+        let rows = vec![AppTotals {
+            app_class: "steam".to_string(),
+            focused_seconds: 7200,
+            open_seconds: 7200,
+        }];
+        let daily = vec![
+            day("2026-01-01", "Thu", 600),
+            day("2026-01-02", "Fri", 600),
+            day("2026-01-03", "Sat", 600),
+            day("2026-01-04", "Sun", 600),
+            day("2026-01-05", "Mon", 600),
+            day("2026-01-06", "Tue", 600),
+            day("2026-01-07", "Wed", 1800),
+            day("2026-01-08", "Thu", 1800),
+            day("2026-01-09", "Fri", 1800),
+            day("2026-01-10", "Sat", 1800),
+            day("2026-01-11", "Sun", 1800),
+            day("2026-01-12", "Mon", 1800),
+            day("2026-01-13", "Tue", 1800),
+            day("2026-01-14", "Wed", 1800),
+        ];
+        let history = vec![
+            focus(
+                "steam",
+                local_ts(2025, 12, 24, 18, 0),
+                local_ts(2025, 12, 24, 19, 0),
+            ),
+            focus(
+                "steam",
+                local_ts(2025, 12, 31, 18, 0),
+                local_ts(2025, 12, 31, 19, 0),
+            ),
+            focus(
+                "steam",
+                local_ts(2026, 1, 7, 18, 0),
+                local_ts(2026, 1, 7, 19, 0),
+            ),
+        ];
+        let mut analysis = input(&rows, &daily, 7200, 7200, 0, 0);
+        analysis.historical_focus_intervals = &history;
+
+        let insights = analyze(analysis);
+
+        assert!(
+            insights
+                .iter()
+                .any(|insight| insight.kind == InsightKind::AppRoutine)
+        );
+        let momentum = insights
+            .iter()
+            .find(|insight| insight.kind == InsightKind::FocusMomentum)
+            .unwrap();
+        assert_eq!(momentum.title, "Focus trending up");
+        assert_eq!(momentum.value, "+2h");
+    }
+
+    #[test]
     fn emits_first_pass_pattern_quality_app_and_workspace_facts() {
         let rows = vec![
             AppTotals {
@@ -1949,10 +2685,13 @@ mod tests {
             daily,
             heatmap: &[],
             focus_intervals: &[],
+            historical_focus_intervals: &[],
             workspaces: &[],
             app_workspaces: &[],
             today_key: "2026-01-14",
             selected_day_key: "2026-01-14",
+            current_weekday: Some(2),
+            current_hour: Some(9),
             period: AnalysisPeriod {
                 lens: AnalysisLens::Day,
                 label: "Today",
@@ -1982,10 +2721,13 @@ mod tests {
             daily,
             heatmap,
             focus_intervals,
+            historical_focus_intervals: focus_intervals,
             workspaces,
             app_workspaces,
             today_key: "2026-01-14",
             selected_day_key: "2026-01-14",
+            current_weekday: Some(2),
+            current_hour: Some(9),
             period: AnalysisPeriod {
                 lens: AnalysisLens::Day,
                 label: "Today",
@@ -2047,5 +2789,13 @@ mod tests {
             app_class: app_class.to_string(),
             focused_seconds,
         }
+    }
+
+    fn local_ts(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+            .timestamp()
     }
 }

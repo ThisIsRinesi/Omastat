@@ -2433,6 +2433,11 @@ fn insight_display_title(insight: &Insight) -> String {
     match insight.kind {
         InsightKind::TopApp => "Top app".to_string(),
         InsightKind::DayComparison => "Compared with yesterday".to_string(),
+        InsightKind::SameWeekdayPace => "Usual pace".to_string(),
+        InsightKind::UsuallyActiveNow => "Now pattern".to_string(),
+        InsightKind::UsualAppNow => "Usual app now".to_string(),
+        InsightKind::AppRoutine => "Routine".to_string(),
+        InsightKind::FocusMomentum => "Focus momentum".to_string(),
         InsightKind::PeriodComparison => "Compared with last period".to_string(),
         InsightKind::BestDay => "Best day".to_string(),
         InsightKind::WorstActiveDay => "Lightest day".to_string(),
@@ -2470,6 +2475,21 @@ fn insight_display_explanation(insight: &Insight) -> String {
         }
         InsightKind::DayComparison => {
             "Compares today's focus time with yesterday.".to_string()
+        }
+        InsightKind::SameWeekdayPace => {
+            "Compares today with prior active days on the same weekday.".to_string()
+        }
+        InsightKind::UsuallyActiveNow => {
+            "Shows when the current weekday and hour are usually active.".to_string()
+        }
+        InsightKind::UsualAppNow => {
+            "Shows the app most often focused in this usual time slot.".to_string()
+        }
+        InsightKind::AppRoutine => {
+            "Shows the strongest recurring app, weekday, and time-of-day pattern.".to_string()
+        }
+        InsightKind::FocusMomentum => {
+            "Compares the last 7 loaded days with the 7 days before them.".to_string()
         }
         InsightKind::PeriodComparison => {
             "Compares this period with the previous matching period.".to_string()

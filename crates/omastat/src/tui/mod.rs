@@ -443,6 +443,7 @@ mod tests {
             total_unobserved_seconds,
             rows,
             apps,
+            browser_activity: Vec::new(),
             daily,
             heatmap: Vec::new(),
             insights,

@@ -23,6 +23,7 @@ BarWidget {
   property var summariesByKey: ({})
   property var rows: []
   property var reportApps: []
+  property var browserActivity: []
   property var summaryTopApp: null
   property var reportInsights: []
   property var widgetInsight: null
@@ -66,6 +67,7 @@ BarWidget {
   onSelectedOffsetChanged: scheduleInjectPanel()
   onRowsChanged: scheduleInjectPanel()
   onReportAppsChanged: scheduleInjectPanel()
+  onBrowserActivityChanged: scheduleInjectPanel()
   onSummaryTopAppChanged: scheduleInjectPanel()
   onReportInsightsChanged: scheduleInjectPanel()
   onWidgetInsightChanged: scheduleInjectPanel()
@@ -238,6 +240,7 @@ BarWidget {
   function applyReport(report, markUpdated) {
     rows = report.rows
     reportApps = report.apps
+    browserActivity = report.browserActivity
     summaryTopApp = null
     reportInsights = report.insights
     widgetInsight = report.widgetInsight
@@ -264,6 +267,7 @@ BarWidget {
     if (!root.opened) {
       rows = []
       reportApps = []
+      browserActivity = []
       summaryTopApp = null
       reportInsights = []
       widgetInsight = null
@@ -294,6 +298,7 @@ BarWidget {
   function beginPeriodLoad(lens, offset) {
     rows = []
     reportApps = []
+    browserActivity = []
     summaryTopApp = null
     reportInsights = []
     widgetInsight = null
@@ -319,6 +324,7 @@ BarWidget {
   function clearReport(error, status) {
     rows = []
     reportApps = []
+    browserActivity = []
     summaryTopApp = null
     reportInsights = []
     widgetInsight = null
@@ -384,6 +390,7 @@ BarWidget {
     if ("refreshRunning" in target) target.refreshRunning = root.refreshRunning
     if ("rows" in target) target.rows = root.rows
     if ("reportApps" in target) target.reportApps = root.reportApps
+    if ("browserActivity" in target) target.browserActivity = root.browserActivity
     if ("summaryTopApp" in target) target.summaryTopApp = root.summaryTopApp
     if ("reportInsights" in target) target.reportInsights = root.reportInsights
     if ("widgetInsight" in target) target.widgetInsight = root.widgetInsight
@@ -495,6 +502,7 @@ BarWidget {
       return {
         rows: legacyRows,
         apps: [],
+        browserActivity: [],
         insights: [],
         widgetInsight: null,
         daily: [],
@@ -520,6 +528,7 @@ BarWidget {
     return {
       rows: rows,
       apps: Array.isArray(object.apps) ? normalizeApps(object.apps) : [],
+      browserActivity: Array.isArray(object.browser_activity) ? normalizeBrowserActivity(object.browser_activity) : [],
       insights: Array.isArray(object.insights) ? normalizeInsights(object.insights) : [],
       widgetInsight: object.widget_insight && typeof object.widget_insight === "object" ? normalizeWidgetInsight(object.widget_insight) : null,
       daily: Array.isArray(object.daily) ? normalizeDaily(object.daily) : [],
@@ -642,6 +651,29 @@ BarWidget {
     return output
   }
 
+  function normalizeBrowserActivity(list) {
+    var output = []
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i] || {}
+      var seconds = numericField(item, "focused_seconds", numericField(item, "seconds", 0))
+      if (seconds <= 0) continue
+      var rawShare = item.share !== undefined && item.share !== null ? Number(item.share) : Number(item.pct || 0) / 100
+      if (isNaN(rawShare)) rawShare = 0
+      output.push({
+        app_class: String(item.app_class || ""),
+        browser: String(item.browser_label || item.browser || "Browser"),
+        label: String(item.label || item.site || item.title || "Page"),
+        title: String(item.title || item.label || ""),
+        site: String(item.site || ""),
+        seconds: seconds,
+        pct: Math.round(Math.max(0, Math.min(1, rawShare)) * 100),
+        source: String(item.source || "title")
+      })
+    }
+    output.sort(function(left, right) { return right.seconds - left.seconds })
+    return output
+  }
+
   function normalizeDaily(list) {
     var output = []
     for (var i = 0; i < list.length; i++) {
@@ -701,12 +733,15 @@ BarWidget {
       var value = String(item.value || "")
       if (label.length === 0 && value.length === 0) continue
       output.push({
+        kind: kind,
+        title: String(item.title || ""),
         label: friendlyInsightLabel(item, label),
         value: value,
         detail: friendlyInsightDetail(item),
         category: String(item.category || ""),
         confidence: String(item.confidence || ""),
         tone: String(item.tone || ""),
+        evidence: item.evidence && typeof item.evidence === "object" ? item.evidence : {},
         supporting: item.supporting && typeof item.supporting === "object" ? item.supporting : {}
       })
     }
@@ -733,6 +768,11 @@ BarWidget {
     var kind = String(item && item.kind || "")
     switch (kind) {
       case "top-app": return "Top app"
+      case "same-weekday-pace": return "Usual pace"
+      case "usually-active-now": return "Now pattern"
+      case "usual-app-now": return "Usual app now"
+      case "app-routine": return "Routine"
+      case "focus-momentum": return "Focus momentum"
       case "day-comparison": {
         var title = String(item && item.title || "")
         var support = item && item.supporting && typeof item.supporting === "object" ? item.supporting : {}

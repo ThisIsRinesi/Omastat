@@ -1,4 +1,5 @@
 use crate::{
+    browser::{self, BrowserActivity, BrowserHistoryResolver},
     clock,
     config::Config,
     identity,
@@ -9,7 +10,7 @@ use crate::{
     storage::{AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, FocusedRollups, Storage},
 };
 use anyhow::{Context, Result};
-use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone, Timelike};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -59,6 +60,7 @@ pub struct UsageReport {
     pub total_unobserved_seconds: i64,
     pub rows: Vec<AppTotals>,
     pub apps: Vec<AppBreakdown>,
+    pub browser_activity: Vec<BrowserActivity>,
     pub daily: Vec<DayTotals>,
     pub heatmap: Vec<FocusHeatCell>,
     pub insights: Vec<Insight>,
@@ -365,6 +367,10 @@ fn usage_report_with_rollups_for_period_with_days(
     let selected_day_key = selected_day_key(lens, &period, &daily, &today_key);
     let apps = app_breakdown_with_config(&rows, 6, config);
     let rollups = storage.focused_rollups_between(period.start_ts, period.query_end_ts, 8, 64)?;
+    let browser_activity =
+        browser_activity_for_period(storage, config, period.start_ts, period.query_end_ts)?;
+    let historical_focus_intervals =
+        historical_focus_intervals_for_report(storage, steam, lens, &period, &daily)?;
     let heatmap = rollups.heatmap.clone();
     let focus_intervals = rollups
         .focus_intervals
@@ -383,10 +389,13 @@ fn usage_report_with_rollups_for_period_with_days(
         daily: &daily,
         heatmap: &heatmap,
         focus_intervals: &focus_intervals,
+        historical_focus_intervals: &historical_focus_intervals,
         workspaces: &workspaces,
         app_workspaces: &app_workspaces,
         today_key: &today_key,
         selected_day_key: &selected_day_key,
+        current_weekday: current_weekday(lens, &period),
+        current_hour: current_hour(lens, &period),
         period: AnalysisPeriod {
             lens: lens.into(),
             label: &period.meta.label,
@@ -424,6 +433,7 @@ fn usage_report_with_rollups_for_period_with_days(
         total_unobserved_seconds: session_totals.unobserved_seconds,
         rows,
         apps,
+        browser_activity,
         daily,
         heatmap,
         insights,
@@ -841,6 +851,66 @@ fn resolve_app_workspace_totals(
     rows
 }
 
+fn browser_activity_for_period(
+    storage: &Storage,
+    config: &Config,
+    start_ts: i64,
+    end_ts: i64,
+) -> Result<Vec<BrowserActivity>> {
+    if !config.capture_titles() {
+        return Ok(Vec::new());
+    }
+
+    let titles = storage.focused_title_totals_by_app_between(start_ts, end_ts, 32)?;
+    let mut history = if config.privacy.browser_history {
+        BrowserHistoryResolver::discover_zen()
+    } else {
+        BrowserHistoryResolver::disabled()
+    };
+    Ok(browser::browser_activity(&titles, &mut history, 8))
+}
+
+fn historical_focus_intervals_for_report(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    lens: Lens,
+    period: &PeriodBounds,
+    daily: &[DayTotals],
+) -> Result<Vec<crate::storage::TimelineInterval>> {
+    if period.meta.offset != 0 || !matches!(lens, Lens::Day | Lens::Week | Lens::Month | Lens::Life)
+    {
+        return Ok(Vec::new());
+    }
+
+    let Some(first_day) = daily.first() else {
+        return Ok(Vec::new());
+    };
+    let start_date = NaiveDate::parse_from_str(&first_day.date, "%Y-%m-%d")
+        .context("failed to parse first historical day")?;
+    let start_ts = local_midnight(start_date)?.timestamp();
+    let mut intervals = storage.focused_timeline_between(start_ts, period.query_end_ts)?;
+    for interval in &mut intervals {
+        interval.app_class = steam.resolve_class(&interval.app_class);
+    }
+    Ok(intervals)
+}
+
+fn current_weekday(lens: Lens, period: &PeriodBounds) -> Option<u32> {
+    if lens == Lens::Day && period.meta.offset == 0 {
+        Some(clock::local_now().weekday().num_days_from_monday())
+    } else {
+        None
+    }
+}
+
+fn current_hour(lens: Lens, period: &PeriodBounds) -> Option<u32> {
+    if lens == Lens::Day && period.meta.offset == 0 {
+        Some(clock::local_now().hour())
+    } else {
+        None
+    }
+}
+
 fn local_midnight(date: NaiveDate) -> Result<chrono::DateTime<Local>> {
     let naive = date.and_hms_opt(0, 0, 0).context("invalid date")?;
     match Local.from_local_datetime(&naive) {
@@ -1088,6 +1158,7 @@ mod tests {
                 open_seconds: 5400,
             }],
             apps: Vec::new(),
+            browser_activity: Vec::new(),
             daily: Vec::new(),
             heatmap: vec![FocusHeatCell {
                 weekday: 1,

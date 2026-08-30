@@ -708,6 +708,10 @@ pub async fn doctor(config: &Config, database: Option<&Path>) -> Result<()> {
     println!("Config");
     println!("  Path: {}", config.path.display());
     println!("  Title capture: {:?}", config.privacy.title_capture);
+    println!(
+        "  Browser history enrichment: {}",
+        yes_no(config.privacy.browser_history)
+    );
     let warnings = config.warnings();
     if warnings.is_empty() {
         println!("  Warnings: none");

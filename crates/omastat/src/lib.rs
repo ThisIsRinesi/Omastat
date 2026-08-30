@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod browser;
 pub mod cli;
 pub mod clock;
 pub mod config;

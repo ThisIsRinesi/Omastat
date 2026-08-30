@@ -231,6 +231,14 @@ function weekTrendSummary(daily, todayKey) {
 function trendDefaultText(days) {
   var list = days || []
   if (list.length === 0) return ""
+  if (list[0] && list[0].cumulative === true) {
+    var last = list[list.length - 1]
+    var activeCumulative = 0
+    for (var c = 0; c < list.length; c++) {
+      if (Number(list[c].seconds || 0) > (c > 0 ? Number(list[c - 1].seconds || 0) : 0)) activeCumulative += 1
+    }
+    return "Total " + fmt(Number(last.seconds || 0)) + " by " + String(last.fullLabel || last.label || "today") + "  " + activeCumulative + "/" + list.length + " days added focus"
+  }
   var best = null
   var total = 0
   var active = 0
@@ -245,6 +253,32 @@ function trendDefaultText(days) {
   parts.push("Average " + fmt(list.length > 0 ? Math.round(total / list.length) : 0))
   parts.push(active + "/" + list.length + " active")
   return parts.join("  ")
+}
+
+function cumulativeCells(cells) {
+  var list = cells || []
+  var total = 0
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i] || {}
+    total += Number(item.focused_seconds || item.seconds || 0)
+    out.push({
+      key: String(item.key || item.date || i),
+      seconds: total,
+      focused_seconds: total,
+      open_seconds: Number(item.open_seconds || 0),
+      excluded_seconds: Number(item.excluded_seconds || 0),
+      observed_seconds: Number(item.observed_seconds || 0),
+      valueText: fmt(total),
+      excludedText: String(item.excludedText || ""),
+      densityText: "",
+      label: String(item.label || ""),
+      fullLabel: String(item.fullLabel || item.label || item.date || "Day"),
+      isToday: item.isToday === true,
+      cumulative: true
+    })
+  }
+  return out
 }
 
 function bestHour(cells) {
@@ -621,7 +655,7 @@ function trendDetailText(day) {
   if (!day) return ""
   var parts = []
   var label = String(day.fullLabel || day.label || day.key || "Day")
-  parts.push(label + ": " + fmt(Number(day.seconds || 0)) + " focused")
+  parts.push(label + ": " + fmt(Number(day.seconds || 0)) + (day.cumulative === true ? " cumulative focus" : " focused"))
   if (Number(day.excluded_seconds || 0) > 0) parts.push(fmt(day.excluded_seconds) + " not counted")
   return parts.join("  ")
 }
@@ -694,12 +728,15 @@ function enrichedInsights(baseInsights, apps, daily, heatmap, lens, totalSeconds
     if (seen[key]) return
     seen[key] = true
     out.push({
+      kind: String(item.kind || ""),
+      title: String(item.title || ""),
       label: label,
       value: value,
       detail: String(item.detail || item.explanation || ""),
       category: String(item.category || "patterns"),
       confidence: String(item.confidence || ""),
       tone: String(item.tone || "neutral"),
+      evidence: item.evidence && typeof item.evidence === "object" ? item.evidence : {},
       supporting: item.supporting && typeof item.supporting === "object" ? item.supporting : {}
     })
   }
@@ -714,6 +751,64 @@ function enrichedInsights(baseInsights, apps, daily, heatmap, lens, totalSeconds
     return insightPriorityValue(left) - insightPriorityValue(right)
   })
   return out
+}
+
+function usualPace(insights) {
+  var list = insights || []
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i] || {}
+    if (String(item.kind || "") !== "same-weekday-pace") continue
+    var support = item.supporting && typeof item.supporting === "object" ? item.supporting : {}
+    var baseline = Number(support.baseline_seconds || 0)
+    var points = Number(item.evidence && item.evidence.data_points || 0)
+    var weekday = String(support.weekday_label || "this day")
+    return {
+      available: true,
+      label: "Usual pace",
+      value: String(item.title || item.value || item.label || "Usual pace"),
+      detail: baseline > 0
+        ? "Typical " + weekday + " " + fmt(baseline) + (points > 0 ? " across " + points + " days" : "")
+        : String(item.detail || item.explanation || ""),
+      tone: String(item.tone || "info")
+    }
+  }
+  return {
+    available: false,
+    label: "Period",
+    value: "",
+    detail: ""
+  }
+}
+
+function nowHabit(insights) {
+  var active = null
+  var app = null
+  var list = insights || []
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i] || {}
+    var kind = String(item.kind || "")
+    if (kind === "usually-active-now") active = item
+    else if (kind === "usual-app-now") app = item
+  }
+  if (!active) {
+    return {
+      available: false,
+      label: "Peak time",
+      value: "",
+      detail: ""
+    }
+  }
+
+  var support = active.supporting && typeof active.supporting === "object" ? active.supporting : {}
+  var slot = String(active.value || support.hour_label || "Now")
+  var appLabel = app ? String(app.value || app.label || "") : ""
+  return {
+    available: true,
+    label: "Now",
+    value: String(active.title || active.label || "Usually active"),
+    detail: appLabel.length > 0 ? appLabel + " most often" : slot,
+    tone: String(active.tone || "info")
+  }
 }
 
 function generatedInsights(apps, daily, heatmap, lens, totalSeconds, totalElapsedSeconds) {
@@ -887,6 +982,7 @@ function insightGroups(insights) {
 function insightPriorityValue(item) {
   var tone = String(item && item.tone || "")
   var category = String(item && item.category || "")
+  if (String(item && item.kind || "") === "same-weekday-pace") return 1
   if (tone === "caution" || tone === "negative") return 0
   if (category === "focus-quality") return 1
   if (category === "patterns") return 2
@@ -968,6 +1064,15 @@ function stableAppColors(apps, accentHex) {
     out.push(hslToHex(h, s, l))
   }
   return out
+}
+
+function browserActivity(rows, limit) {
+  var list = (rows || []).slice()
+  var max = typeof limit === "number" ? limit : 6
+  list.sort(function(left, right) {
+    return Number(right.seconds || 0) - Number(left.seconds || 0)
+  })
+  return list.slice(0, Math.max(1, max))
 }
 
 var ARC_GAP_DEG = 1.5

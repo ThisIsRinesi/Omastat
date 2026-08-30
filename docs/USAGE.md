@@ -134,6 +134,7 @@ Default config values:
 ```toml
 [privacy]
 title_capture = "off"
+browser_history = false
 title_allowlist = []
 title_blocklist = []
 
@@ -168,6 +169,12 @@ Set `title_capture = "all"` only if you want focused intervals to include
 cleaned window titles. `title_allowlist` and `title_blocklist` are optional
 case-insensitive substring filters applied to the app class and cleaned title;
 blocklist matches win over allowlist matches.
+
+When title capture is enabled, browser windows can be summarized by page or
+inferred site in the widget panel. Set `browser_history = true` to let Omastat
+enrich Zen Browser titles from local `~/.zen/*/places.sqlite` history files.
+History enrichment is read-only, local, best-effort, and ignored unless
+`title_capture = "all"` is also enabled.
 
 App aliases change display labels in reports, exports, and the TUI while raw
 exports keep the original app class. Categories are local strings normalized to

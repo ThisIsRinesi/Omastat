@@ -18,6 +18,7 @@ Panel {
   property bool refreshRunning: false
   property var rows: []
   property var reportApps: []
+  property var browserActivity: []
   property var summaryTopApp: null
   property var reportInsights: []
   property var widgetInsight: null
@@ -73,17 +74,18 @@ Panel {
   readonly property string pausedDetailText: Model.pausedDetail(totalIdle, totalLocked, totalSleep)
   readonly property string excludedDetailText: Model.excludedDetail(totalIdle, totalLocked, totalSleep, totalUnobserved)
   readonly property var visibleApps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
+  readonly property var visibleBrowserActivity: Model.browserActivity(browserActivity, 6)
   readonly property var topVisibleApp: visibleApps.length > 0 ? visibleApps[0] : null
   readonly property string topAppName: topVisibleApp ? String(topVisibleApp.app || "App") : "--"
   readonly property string topAppValue: topVisibleApp ? root.formatDuration(Number(topVisibleApp.seconds || 0)) + "  " + Number(topVisibleApp.pct || 0) + "%" : "--"
   readonly property var sliceColors: Model.sliceColors(visibleApps.length, Color.accent)
   readonly property var appColors: Model.stableAppColors(visibleApps, Color.accent)
-  readonly property string trendSummaryText: Model.weekTrendSummary(daily, displayTodayKey)
   readonly property var monthCells: Model.monthCells(daily, selectedLens)
   readonly property var monthWeeks: Model.monthWeekCells(daily)
   readonly property var weekdayCells: Model.weekdayFocusCells(heatmap)
   readonly property var activityCells: Model.activityCells(daily, selectedLens)
-  readonly property real activityMax: Model.maxDailySeconds(activityCells)
+  readonly property var trendLineCells: selectedLens === "week" ? Model.cumulativeCells(activityCells) : activityCells
+  readonly property real activityMax: Model.maxDailySeconds(trendLineCells)
   readonly property real monthMax: Model.maxMonthSeconds(monthCells)
   readonly property real monthWeekMax: Model.maxDailySeconds(monthWeeks)
   readonly property real weekdayMax: Model.maxDailySeconds(weekdayCells)
@@ -96,6 +98,8 @@ Panel {
   readonly property var consistency: Model.consistencyStats(daily)
   readonly property var baseInsightRows: reportInsights && reportInsights.length > 0 ? reportInsights : Model.insights(rows, daily, todayKey, totalFocused)
   readonly property var insightRows: Model.enrichedInsights(baseInsightRows, visibleApps, daily, heatmap, selectedLens, totalFocused, totalElapsed)
+  readonly property var usualPace: Model.usualPace(insightRows)
+  readonly property var nowHabit: Model.nowHabit(insightRows)
   readonly property var insightGroups: Model.insightGroups(insightRows)
   readonly property bool hasFocusedData: totalFocused > 0 || visibleApps.length > 0
   readonly property bool showBreakdown: totalFocused + totalObserved + totalExcluded > 0
@@ -105,13 +109,12 @@ Panel {
   readonly property bool showActivityChart: selectedLens === "month" ? monthMax > 0 : activityMax > 0
   readonly property bool showHeatmapChart: selectedLens !== "day" && heatMax > 0
   readonly property bool showHourlyChart: selectedLens === "day" && hourlyMax > 0
-  readonly property bool showHorizonChart: (selectedLens === "year" || selectedLens === "life") && activityMax > 0
   readonly property string periodScopeLabel: selectedOffset === 0 && selectedLens !== "day" && selectedLens !== "life" ? periodLabel + " to date" : periodLabel
   readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days only" : "Across period")
   readonly property string loadingAppMixText: summaryTopApp && summaryTopApp.app ? "Loading app mix; top " + String(summaryTopApp.app) + " " + root.formatDuration(Number(summaryTopApp.seconds || 0)) : "Loading app mix..."
   readonly property string activityChartTitle: selectedLens === "day" ? "Last 7 days" : (selectedLens === "week" ? "This week" : (selectedLens === "month" ? "Month calendar" : (selectedLens === "year" ? "Monthly focus" : "Recent weeks")))
   readonly property string timeChartTitle: selectedLens === "day" ? "Today by hour" : "Focus by time of week"
-  readonly property string activityChartDetail: selectedLens === "month" ? "Daily focused time" : "Focused time"
+  readonly property string activityChartDetail: selectedLens === "month" ? "Daily focused time" : (selectedLens === "week" ? "Cumulative focused time" : "Focused time")
   readonly property string timeChartDetail: selectedLens === "day" ? "Hourly focused time" : "Weekday and hour intensity"
 
   onSelectedLensChanged: clearInspection()
@@ -506,24 +509,13 @@ Panel {
               visible: root.showActivityChart
               spacing: Style.space(8)
 
-              TrendBars {
+              FocusTrendLine {
                 width: parent.width
                 expanded: root.widePanel
-                visible: root.selectedLens !== "month" && !root.showHorizonChart && root.activityCells.length > 0
+                visible: root.selectedLens !== "month" && root.activityMax > 0
                 title: root.activityChartTitle
                 detail: root.activityChartDetail
-                days: root.activityCells
-                maxSeconds: root.activityMax
-                selectedIndex: root.inspectedActivityIndex
-              }
-
-              FocusHorizon {
-                width: parent.width
-                expanded: root.widePanel
-                visible: root.showHorizonChart
-                title: root.activityChartTitle
-                detail: root.activityChartDetail
-                days: root.activityCells
+                days: root.trendLineCells
                 maxSeconds: root.activityMax
                 selectedIndex: root.inspectedActivityIndex
               }
@@ -540,16 +532,6 @@ Panel {
                 weekMaxSeconds: root.monthWeekMax
                 weekdayMaxSeconds: root.weekdayMax
                 selectedIndex: root.inspectedActivityIndex
-              }
-
-              Text {
-                visible: root.trendSummaryText !== ""
-                width: parent.width
-                text: root.trendSummaryText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                elide: Text.ElideRight
               }
             }
 
@@ -637,6 +619,12 @@ Panel {
                 colors: root.appColors
               }
             }
+          }
+
+          BrowserFocus {
+            width: parent.width
+            visible: root.visibleBrowserActivity.length > 0
+            rows: root.visibleBrowserActivity
           }
 
           EmptyState {
@@ -898,10 +886,12 @@ Panel {
 
         SummaryStat {
           Layout.fillWidth: true
-          label: "Period"
-          value: root.periodScopeLabel
-          detail: root.selectedOffset === 0 ? "Current lens" : "Historical lens"
-          accentColor: root.sliceColor(0, 1.0)
+          label: root.usualPace.available ? root.usualPace.label : "Period"
+          value: root.usualPace.available ? root.usualPace.value : root.periodScopeLabel
+          detail: root.usualPace.available
+            ? root.usualPace.detail
+            : (root.selectedOffset === 0 ? "Current lens" : "Historical lens")
+          accentColor: root.usualPace.available ? root.toneColor(root.usualPace.tone) : root.sliceColor(0, 1.0)
         }
 
         SummaryStat {
@@ -914,10 +904,10 @@ Panel {
 
         SummaryStat {
           Layout.fillWidth: true
-          label: "Peak time"
-          value: root.peakHour.label
-          detail: root.peakHour.value + "  " + root.peakHour.detail
-          accentColor: root.sliceColor(1, 1.0)
+          label: root.nowHabit.available ? root.nowHabit.label : "Peak time"
+          value: root.nowHabit.available ? root.nowHabit.value : root.peakHour.label
+          detail: root.nowHabit.available ? root.nowHabit.detail : root.peakHour.value + "  " + root.peakHour.detail
+          accentColor: root.nowHabit.available ? root.toneColor(root.nowHabit.tone) : root.sliceColor(1, 1.0)
         }
 
         SummaryStat {
@@ -1392,8 +1382,8 @@ Panel {
     readonly property string centerDetail: apps.length > 0 ? String(apps[0].app || "Top app") : "Focused"
     readonly property int chartSize: Math.min(Style.space(190), Math.max(Style.space(142), width - Style.space(24)))
 
-    Layout.minimumHeight: Style.space(232)
-    implicitHeight: Style.space(232)
+    Layout.minimumHeight: Style.space(252)
+    implicitHeight: Style.space(252)
 
     onAppsChanged: donutCanvas.requestPaint()
     onColorsChanged: donutCanvas.requestPaint()
@@ -1656,6 +1646,162 @@ Panel {
     }
   }
 
+  component BrowserFocus: Rectangle {
+    id: browserRoot
+
+    property var rows: []
+
+    readonly property int totalSeconds: {
+      var total = 0
+      for (var i = 0; i < rows.length; i++) total += Number(rows[i].seconds || 0)
+      return total
+    }
+    readonly property int maxSeconds: {
+      var value = 0
+      for (var i = 0; i < rows.length; i++) value = Math.max(value, Number(rows[i].seconds || 0))
+      return Math.max(1, value)
+    }
+
+    implicitHeight: browserColumn.implicitHeight + Style.space(24)
+    radius: Style.space(7)
+    color: root.fill
+    border.color: root.line
+    border.width: 1
+    clip: true
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      width: Style.space(3)
+      color: root.sliceColor(2, 0.78)
+    }
+
+    Column {
+      id: browserColumn
+
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(14)
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(14)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(8)
+
+      Item {
+        width: parent.width
+        height: Style.space(20)
+
+        Text {
+          anchors.left: parent.left
+          anchors.right: browserTotal.left
+          anchors.rightMargin: Style.space(10)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Browser Focus"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Text {
+          id: browserTotal
+
+          width: Style.space(128)
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.formatDuration(browserRoot.totalSeconds)
+          color: root.faint
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          horizontalAlignment: Text.AlignRight
+          elide: Text.ElideRight
+        }
+      }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(7)
+
+        Repeater {
+          model: browserRoot.rows
+
+          Item {
+            required property int index
+            required property var modelData
+
+            width: parent.width
+            height: Style.space(38)
+
+            readonly property int seconds: Number(modelData.seconds || 0)
+            readonly property int pct: Number(modelData.pct || 0)
+            readonly property bool fromHistory: String(modelData.source || "") === "history"
+            readonly property string titleText: String(modelData.title || "")
+            readonly property string sourceText: fromHistory ? "history match" : "title match"
+            readonly property string detailText: titleText.length > 0 && titleText !== String(modelData.label || "")
+                                                 ? sourceText + "  " + titleText
+                                                 : sourceText
+
+            Text {
+              id: browserName
+              anchors.left: parent.left
+              anchors.right: browserValue.left
+              anchors.rightMargin: Style.space(10)
+              anchors.top: parent.top
+              text: String(modelData.label || "Page")
+              color: index === 0 ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: index === 0
+              elide: Text.ElideRight
+            }
+
+            Text {
+              id: browserValue
+              width: Style.space(112)
+              anchors.right: parent.right
+              anchors.top: parent.top
+              text: root.formatDuration(seconds) + "  " + pct + "%"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+              horizontalAlignment: Text.AlignRight
+              elide: Text.ElideRight
+            }
+
+            Text {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: browserName.bottom
+              text: detailText
+              color: root.faint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              height: Style.space(5)
+              radius: height / 2
+              color: root.track
+
+              Rectangle {
+                width: parent.width * root.clamp01(seconds / browserRoot.maxSeconds)
+                height: parent.height
+                radius: parent.radius
+                color: root.sliceColor(index + 2, index === 0 ? 0.86 : 0.62)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   component EmptyState: Rectangle {
     property string text: ""
     property bool urgent: false
@@ -1883,8 +2029,8 @@ Panel {
     }
   }
 
-  component FocusHorizon: Rectangle {
-    id: horizonRoot
+  component FocusTrendLine: Rectangle {
+    id: lineRoot
 
     property string title: ""
     property string detail: ""
@@ -1899,6 +2045,35 @@ Panel {
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
     readonly property string defaultText: Model.trendDefaultText(days)
+    readonly property real averageSeconds: {
+      var list = days || []
+      if (list.length <= 0) return 0
+      var total = 0
+      for (var i = 0; i < list.length; i++) total += Number(list[i].seconds || 0)
+      return total / list.length
+    }
+
+    function pointX(index) {
+      var count = Math.max(1, days.length)
+      if (count === 1) return linePlot.width / 2
+      return index * linePlot.width / (count - 1)
+    }
+
+    function pointY(seconds) {
+      var value = root.clamp01(Number(seconds || 0) / Math.max(1, lineRoot.maxSeconds))
+      return Math.max(0, Math.min(linePlot.height, linePlot.height - value * linePlot.height))
+    }
+
+    function indexAt(x) {
+      var count = days.length
+      if (count <= 0 || linePlot.width <= 0) return -1
+      if (count === 1) return 0
+      return Math.max(0, Math.min(count - 1, Math.round(x / linePlot.width * (count - 1))))
+    }
+
+    function requestPaint() {
+      if (lineCanvas) lineCanvas.requestPaint()
+    }
 
     implicitHeight: expanded ? Style.space(216) : Style.space(184)
     radius: Style.space(7)
@@ -1906,8 +2081,16 @@ Panel {
     border.color: root.line
     border.width: 1
 
+    onDaysChanged: requestPaint()
+    onMaxSecondsChanged: requestPaint()
+    onHoveredIndexChanged: requestPaint()
+    onSelectedIndexChanged: requestPaint()
+    onAverageSecondsChanged: requestPaint()
+    onWidthChanged: requestPaint()
+    onHeightChanged: requestPaint()
+
     Item {
-      id: horizonHeader
+      id: lineHeader
 
       anchors.left: parent.left
       anchors.right: parent.right
@@ -1917,10 +2100,10 @@ Panel {
 
       Text {
         anchors.left: parent.left
-        anchors.right: horizonDetail.left
+        anchors.right: lineDetail.left
         anchors.rightMargin: Style.space(8)
         anchors.verticalCenter: parent.verticalCenter
-        text: horizonRoot.title
+        text: lineRoot.title
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -1929,12 +2112,12 @@ Panel {
       }
 
       Text {
-        id: horizonDetail
+        id: lineDetail
 
         width: Math.min(implicitWidth, parent.width * 0.46)
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        text: horizonRoot.detail
+        text: lineRoot.detail
         color: root.faint
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -1944,18 +2127,14 @@ Panel {
     }
 
     Item {
-      id: horizonPlot
+      id: linePlot
       anchors.left: parent.left
       anchors.right: parent.right
-      anchors.top: horizonHeader.bottom
-      anchors.bottom: horizonReadout.top
+      anchors.top: lineHeader.bottom
+      anchors.bottom: lineReadout.top
       anchors.margins: Style.space(12)
       anchors.topMargin: Style.space(12)
       anchors.bottomMargin: Style.space(26)
-
-      readonly property real gap: days.length > 28 ? Style.space(2) : Style.space(4)
-      readonly property real cellWidth: days.length > 0 ? Math.max(Style.space(9), (width - gap * (days.length - 1)) / days.length) : 0
-      readonly property real bandHeight: height / 3
 
       Repeater {
         model: 3
@@ -1965,63 +2144,95 @@ Panel {
 
           anchors.left: parent.left
           anchors.right: parent.right
-          y: index * horizonPlot.bandHeight
+          y: Math.round((index + 1) * parent.height / 4)
           height: 1
           color: root.line
-          opacity: 0.34
+          opacity: 0.32
         }
       }
 
-      Repeater {
-        model: days
+      Rectangle {
+        visible: lineRoot.maxSeconds > 0 && lineRoot.averageSeconds > 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        y: Math.round(lineRoot.pointY(lineRoot.averageSeconds))
+        height: 1
+        color: root.withAlpha(root.foreground, 0.26)
+      }
 
-        Item {
-          required property int index
-          required property var modelData
+      Canvas {
+        id: lineCanvas
 
-          readonly property real seconds: Number(modelData.seconds || 0)
-          readonly property real ratio: horizonRoot.maxSeconds > 0 ? root.clamp01(seconds / horizonRoot.maxSeconds) : 0
-          readonly property int bands: ratio <= 0 ? 0 : Math.max(1, Math.ceil(ratio * 3))
-          readonly property bool active: horizonRoot.hoveredIndex === index || horizonRoot.selectedIndex === index
+        anchors.fill: parent
+        antialiasing: true
 
-          x: index * (horizonPlot.cellWidth + horizonPlot.gap)
-          width: horizonPlot.cellWidth
-          height: horizonPlot.height
+        onPaint: {
+          var ctx = getContext("2d")
+          ctx.reset()
+          var list = lineRoot.days || []
+          if (list.length <= 0 || lineRoot.maxSeconds <= 0 || width <= 0 || height <= 0) return
 
-          Repeater {
-            model: bands
+          var accent = root.sliceColor(0, 1.0)
+          var mutedAccent = root.sliceColor(0, 0.26)
+          var area = ctx.createLinearGradient(0, 0, 0, height)
+          area.addColorStop(0, root.canvasColor(accent, 0.28))
+          area.addColorStop(1, root.canvasColor(accent, 0.03))
 
-            Rectangle {
-              required property int index
-
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.bottom: parent.bottom
-              anchors.bottomMargin: index * horizonPlot.bandHeight
-              height: Math.max(Style.space(5), horizonPlot.bandHeight - Style.space(3))
-              radius: Math.min(width / 2, Style.space(4))
-              color: root.sliceColor(index, active ? 0.96 : 0.34 + (index + 1) * 0.16)
-              border.color: active ? root.withAlpha(root.foreground, 0.42) : "transparent"
-              border.width: active ? 1 : 0
-            }
+          ctx.beginPath()
+          ctx.moveTo(lineRoot.pointX(0), height)
+          for (var i = 0; i < list.length; i++) {
+            ctx.lineTo(lineRoot.pointX(i), lineRoot.pointY(Number(list[i].seconds || 0)))
           }
+          ctx.lineTo(lineRoot.pointX(list.length - 1), height)
+          ctx.closePath()
+          ctx.fillStyle = area
+          ctx.fill()
 
-          MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onEntered: {
-              horizonRoot.hoveredIndex = index
-              horizonRoot.hoveredText = Model.trendDetailText(modelData)
-            }
-            onExited: {
-              if (horizonRoot.hoveredIndex === index) {
-                horizonRoot.hoveredIndex = -1
-                horizonRoot.hoveredText = ""
-              }
+          ctx.beginPath()
+          for (var j = 0; j < list.length; j++) {
+            var x = lineRoot.pointX(j)
+            var y = lineRoot.pointY(Number(list[j].seconds || 0))
+            if (j === 0) ctx.moveTo(x, y)
+            else ctx.lineTo(x, y)
+          }
+          ctx.strokeStyle = root.canvasColor(accent, 0.92)
+          ctx.lineWidth = Style.space(3)
+          ctx.lineJoin = "round"
+          ctx.lineCap = "round"
+          ctx.stroke()
+
+          var count = list.length
+          var dotStride = count <= 14 ? 1 : (count <= 31 ? 3 : Math.ceil(count / 12))
+          for (var k = 0; k < count; k++) {
+            var seconds = Number(list[k].seconds || 0)
+            var active = k === lineRoot.hoveredIndex || k === lineRoot.selectedIndex
+            if (!active && seconds <= 0 && k % dotStride !== 0) continue
+            if (!active && k % dotStride !== 0 && k !== 0 && k !== count - 1) continue
+            var px = lineRoot.pointX(k)
+            var py = lineRoot.pointY(seconds)
+            ctx.beginPath()
+            ctx.arc(px, py, active ? Style.space(5) : Style.space(3), 0, Math.PI * 2, false)
+            ctx.fillStyle = active ? root.canvasColor(root.foreground, 0.96) : root.canvasColor(mutedAccent, mutedAccent.a)
+            ctx.fill()
+            ctx.lineWidth = active ? Style.space(2) : 0
+            if (active) {
+              ctx.strokeStyle = root.canvasColor(accent, 0.95)
+              ctx.stroke()
             }
           }
         }
+      }
+
+      Rectangle {
+        visible: lineRoot.hoveredIndex >= 0 || lineRoot.selectedIndex >= 0
+        x: {
+          var index = lineRoot.hoveredIndex >= 0 ? lineRoot.hoveredIndex : lineRoot.selectedIndex
+          return Math.max(0, Math.min(parent.width - width, lineRoot.pointX(index) - width / 2))
+        }
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: 1
+        color: root.withAlpha(root.foreground, 0.24)
       }
 
       Text {
@@ -2047,492 +2258,30 @@ Panel {
         horizontalAlignment: Text.AlignRight
         elide: Text.ElideRight
       }
-    }
 
-    ChartReadout {
-      id: horizonReadout
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.bottom: parent.bottom
-      anchors.margins: Style.space(10)
-      text: horizonRoot.readoutText.length > 0 ? horizonRoot.readoutText : horizonRoot.defaultText
-    }
-  }
-
-  component TrendBars: Rectangle {
-    id: trendRoot
-
-    property string title: ""
-    property string detail: ""
-    property var days: []
-    property real maxSeconds: 0
-    property int selectedIndex: -1
-    property string hoveredKey: ""
-    property string hoveredText: ""
-    property real revealProgress: 0
-    property bool expanded: false
-    readonly property string selectedText: selectedIndex >= 0 && selectedIndex < days.length
-      ? Model.trendDetailText(days[selectedIndex])
-      : ""
-    readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
-    readonly property string defaultText: Model.trendDefaultText(days)
-    readonly property real averageSeconds: {
-      var list = days || []
-      if (list.length <= 0) return 0
-      var total = 0
-      for (var i = 0; i < list.length; i++) total += Number(list[i].seconds || 0)
-      return total / list.length
-    }
-
-    function restartReveal() {
-      revealProgress = 0
-      trendReveal.restart()
-    }
-
-    onDaysChanged: restartReveal()
-    onMaxSecondsChanged: restartReveal()
-    Component.onCompleted: restartReveal()
-
-    implicitHeight: expanded ? Style.space(216) : Style.space(184)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
-
-    NumberAnimation {
-      id: trendReveal
-
-      target: trendRoot
-      property: "revealProgress"
-      from: 0
-      to: 1
-      duration: 560
-      easing.type: Easing.OutCubic
-    }
-
-    Item {
-      id: trendHeader
-
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
-      anchors.margins: Style.space(12)
-      height: Style.space(20)
-
-      Text {
-        anchors.left: parent.left
-        anchors.right: trendDetail.left
-        anchors.rightMargin: Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-        text: trendRoot.title
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-        elide: Text.ElideRight
-      }
-
-      Text {
-        id: trendDetail
-
-        width: Math.min(implicitWidth, parent.width * 0.46)
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        text: trendRoot.detail
-        color: root.faint
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignRight
-        elide: Text.ElideRight
-      }
-    }
-
-    Item {
-      id: trendPlot
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: trendHeader.bottom
-      anchors.bottom: parent.bottom
-      anchors.leftMargin: Style.space(12)
-      anchors.rightMargin: Style.space(12)
-      anchors.topMargin: Style.space(8)
-      anchors.bottomMargin: Style.space(32)
-
-      Rectangle {
-        visible: trendRoot.maxSeconds > 0 && trendRoot.averageSeconds > 0
-        anchors.left: parent.left
-        anchors.right: parent.right
-        y: Math.round(Math.max(0, Math.min(parent.height - height, parent.height - Style.space(54) - ((parent.height - Style.space(54)) * trendRoot.averageSeconds / trendRoot.maxSeconds))))
-        height: 1
-        color: root.withAlpha(root.foreground, 0.24)
-      }
-
-      Row {
-        id: trendBarsRow
-
+      MouseArea {
         anchors.fill: parent
-        spacing: Style.space(7)
-
-        Repeater {
-          model: days
-
-          Item {
-            required property int index
-            required property var modelData
-
-            readonly property bool active: trendRoot.hoveredKey === String(modelData.key || "") || trendRoot.selectedIndex === index
-
-            width: days.length > 0 ? (parent.width - parent.spacing * (days.length - 1)) / days.length : 0
-            height: parent.height
-
-            Column {
-              anchors.fill: parent
-              spacing: Style.space(3)
-
-              Text {
-                width: parent.width
-                text: String(modelData.valueText || "")
-                color: modelData.isToday === true ? root.foreground : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: modelData.isToday === true
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-              }
-
-              Item {
-                id: barSlot
-                width: parent.width
-                height: Math.max(Style.space(44), parent.height - Style.space(38))
-
-                Repeater {
-                  model: 3
-
-                  Rectangle {
-                    required property int index
-
-                    width: parent.width
-                    height: 1
-                    y: Math.round((index + 1) * barSlot.height / 4)
-                    color: root.line
-                    opacity: 0.36
-                  }
-                }
-
-                Rectangle {
-                  width: Math.max(Style.space(7), parent.width * 0.48)
-                  height: parent.height
-                  radius: Style.space(3)
-                  color: root.track
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  anchors.bottom: parent.bottom
-                }
-
-                Rectangle {
-                  visible: Number(modelData.seconds || 0) > 0 && maxSeconds > 0
-                  width: Math.max(Style.space(7), parent.width * 0.48)
-                  radius: Style.space(3)
-                  color: active || modelData.isToday === true ? root.sliceColor(0, 1.0) : root.sliceColor(0, 0.48)
-                  border.color: active ? root.withAlpha(root.foreground, 0.42) : "transparent"
-                  border.width: active ? 1 : 0
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  anchors.bottom: parent.bottom
-                  height: Math.max(Style.space(4), barSlot.height * Number(modelData.seconds || 0) / maxSeconds * trendRoot.revealProgress)
-
-                  Behavior on height {
-                    NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
-                  }
-
-                  Behavior on color {
-                    ColorAnimation { duration: 140 }
-                  }
-
-                  Behavior on border.color {
-                    ColorAnimation { duration: 140 }
-                  }
-                }
-              }
-
-              Text {
-                width: parent.width
-                text: String(modelData.label || "")
-                color: modelData.isToday === true ? root.foreground : root.faint
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-              }
-
-            }
-
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onEntered: {
-                trendRoot.hoveredKey = String(modelData.key || "")
-                trendRoot.hoveredText = Model.trendDetailText(modelData)
-              }
-              onExited: {
-                if (trendRoot.hoveredKey === String(modelData.key || "")) {
-                  trendRoot.hoveredKey = ""
-                  trendRoot.hoveredText = ""
-                }
-              }
-            }
-          }
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onPositionChanged: function(mouse) {
+          var index = lineRoot.indexAt(mouse.x)
+          lineRoot.hoveredIndex = index
+          lineRoot.hoveredText = index >= 0 && index < lineRoot.days.length ? Model.trendDetailText(lineRoot.days[index]) : ""
+        }
+        onExited: {
+          lineRoot.hoveredIndex = -1
+          lineRoot.hoveredText = ""
         }
       }
     }
 
     ChartReadout {
+      id: lineReadout
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: parent.bottom
       anchors.margins: Style.space(10)
-      text: trendRoot.readoutText.length > 0 ? trendRoot.readoutText : trendRoot.defaultText
-    }
-  }
-
-  component HourlyBars: Rectangle {
-    id: hourlyRoot
-
-    property string title: ""
-    property string detail: ""
-    property var hours: []
-    property real maxSeconds: 0
-    property int selectedIndex: -1
-    property int hoveredIndex: -1
-    property string hoveredText: ""
-    property real revealProgress: 0
-    property bool expanded: false
-    readonly property string selectedText: selectedIndex >= 0 && selectedIndex < hours.length
-      ? hourlyDetailText(hours[selectedIndex])
-      : ""
-    readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
-    readonly property real averageSeconds: {
-      var list = hours || []
-      if (list.length <= 0) return 0
-      var total = 0
-      for (var i = 0; i < list.length; i++) total += Number(list[i].seconds || 0)
-      return total / list.length
-    }
-    readonly property int activeCount: {
-      var count = 0
-      for (var i = 0; i < (hours || []).length; i++) if (Number(hours[i].seconds || 0) > 0) count++
-      return count
-    }
-    readonly property string defaultText: {
-      var best = null
-      for (var i = 0; i < (hours || []).length; i++) {
-        if (!best || Number(hours[i].seconds || 0) > Number(best.seconds || 0)) best = hours[i]
-      }
-      if (!best || Number(best.seconds || 0) <= 0) return ""
-      return "Peak " + String(best.fullLabel || best.label || "") + ": " + root.formatDuration(best.seconds) + "  Average " + root.formatDuration(Math.round(averageSeconds)) + "  " + activeCount + "/24 active"
-    }
-
-    function hourlyDetailText(cell) {
-      if (!cell) return ""
-      return String(cell.fullLabel || cell.label || "Hour") + ": " + root.formatDuration(Number(cell.seconds || 0)) + " focused"
-    }
-
-    function restartReveal() {
-      revealProgress = 0
-      hourlyReveal.restart()
-    }
-
-    onHoursChanged: restartReveal()
-    onMaxSecondsChanged: restartReveal()
-    Component.onCompleted: restartReveal()
-
-    implicitHeight: expanded ? Style.space(216) : Style.space(184)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
-
-    NumberAnimation {
-      id: hourlyReveal
-
-      target: hourlyRoot
-      property: "revealProgress"
-      from: 0
-      to: 1
-      duration: 560
-      easing.type: Easing.OutCubic
-    }
-
-    Item {
-      id: hourlyHeader
-
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
-      anchors.margins: Style.space(12)
-      height: Style.space(20)
-
-      Text {
-        anchors.left: parent.left
-        anchors.right: hourlyDetail.left
-        anchors.rightMargin: Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-        text: hourlyRoot.title
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-        elide: Text.ElideRight
-      }
-
-      Text {
-        id: hourlyDetail
-
-        width: Math.min(implicitWidth, parent.width * 0.46)
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        text: hourlyRoot.detail
-        color: root.faint
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignRight
-        elide: Text.ElideRight
-      }
-    }
-
-    Item {
-      id: hourlyPlot
-
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: hourlyHeader.bottom
-      anchors.bottom: parent.bottom
-      anchors.leftMargin: Style.space(14)
-      anchors.rightMargin: Style.space(14)
-      anchors.topMargin: Style.space(8)
-      anchors.bottomMargin: Style.space(56)
-
-      readonly property real gap: width < Style.space(430) ? Style.space(3) : Style.space(5)
-      readonly property real barWidth: Math.max(Style.space(5), (width - gap * 23) / 24)
-
-      Repeater {
-        model: 3
-
-        Rectangle {
-          required property int index
-
-          anchors.left: parent.left
-          anchors.right: parent.right
-          y: Math.round((index + 1) * parent.height / 4)
-          height: 1
-          color: root.line
-          opacity: 0.28
-        }
-      }
-
-      Rectangle {
-        visible: hourlyRoot.maxSeconds > 0 && hourlyRoot.averageSeconds > 0
-        anchors.left: parent.left
-        anchors.right: parent.right
-        y: Math.round(Math.max(0, Math.min(parent.height - height, parent.height - parent.height * hourlyRoot.averageSeconds / hourlyRoot.maxSeconds)))
-        height: 1
-        color: root.withAlpha(root.foreground, 0.28)
-      }
-
-      Text {
-        visible: hourlyRoot.maxSeconds > 0 && hourlyRoot.averageSeconds > 0 && parent.width > Style.space(340)
-        anchors.right: parent.right
-        y: Math.max(0, Math.min(parent.height - implicitHeight, hourlyPlot.height - hourlyPlot.height * hourlyRoot.averageSeconds / hourlyRoot.maxSeconds - implicitHeight - Style.space(2)))
-        text: "Avg " + root.formatDuration(Math.round(hourlyRoot.averageSeconds))
-        color: root.faint
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignRight
-      }
-
-      Repeater {
-        model: hours
-
-        Item {
-          required property int index
-          required property var modelData
-
-          readonly property bool active: hourlyRoot.hoveredIndex === index || hourlyRoot.selectedIndex === index
-          readonly property real seconds: Number(modelData.seconds || 0)
-
-          x: index * (hourlyPlot.barWidth + hourlyPlot.gap)
-          width: hourlyPlot.barWidth
-          height: hourlyPlot.height
-
-          Rectangle {
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: parent.height
-            radius: Math.min(width / 2, Style.space(4))
-            color: root.track
-          }
-
-          Rectangle {
-            visible: seconds > 0 && hourlyRoot.maxSeconds > 0
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: Math.max(Style.space(4), parent.height * seconds / hourlyRoot.maxSeconds * hourlyRoot.revealProgress)
-            radius: Math.min(width / 2, Style.space(4))
-            color: active ? root.sliceColor(0, 1.0) : root.sliceColor(0, 0.64)
-            border.color: active ? root.withAlpha(root.foreground, 0.48) : "transparent"
-            border.width: active ? 1 : 0
-
-            Behavior on height {
-              NumberAnimation { duration: 260; easing.type: Easing.OutCubic }
-            }
-
-            Behavior on color {
-              ColorAnimation { duration: 140 }
-            }
-          }
-
-          MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onEntered: {
-              hourlyRoot.hoveredIndex = index
-              hourlyRoot.hoveredText = hourlyRoot.hourlyDetailText(modelData)
-            }
-            onExited: {
-              if (hourlyRoot.hoveredIndex === index) {
-                hourlyRoot.hoveredIndex = -1
-                hourlyRoot.hoveredText = ""
-              }
-            }
-          }
-        }
-      }
-
-      Repeater {
-        model: [0, 6, 12, 18, 23]
-
-        Text {
-          required property int modelData
-
-          x: Math.min(parent.width - width, modelData * (hourlyPlot.barWidth + hourlyPlot.gap))
-          anchors.top: parent.bottom
-          anchors.topMargin: Style.space(6)
-          text: Model.hourLabel(modelData)
-          color: root.faint
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-        }
-      }
-    }
-
-    ChartReadout {
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.bottom: parent.bottom
-      anchors.margins: Style.space(10)
-      text: hourlyRoot.readoutText.length > 0 ? hourlyRoot.readoutText : hourlyRoot.defaultText
+      text: lineRoot.readoutText.length > 0 ? lineRoot.readoutText : lineRoot.defaultText
     }
   }
 

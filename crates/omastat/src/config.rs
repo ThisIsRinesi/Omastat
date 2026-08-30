@@ -27,6 +27,8 @@ pub struct PrivacyConfig {
     #[serde(default)]
     pub title_capture: TitleCapture,
     #[serde(default)]
+    pub browser_history: bool,
+    #[serde(default)]
     pub title_allowlist: Vec<String>,
     #[serde(default)]
     pub title_blocklist: Vec<String>,
@@ -221,6 +223,12 @@ impl Config {
                     .to_string(),
             });
         }
+        if self.privacy.browser_history && !self.capture_titles() {
+            warnings.push(ConfigWarning {
+                field: "privacy.browser_history".to_string(),
+                message: "browser history enrichment requires title_capture to be all".to_string(),
+            });
+        }
 
         for (app_class, rule) in &self.apps {
             if app_class.trim().is_empty() {
@@ -343,6 +351,7 @@ impl Default for PrivacyConfig {
     fn default() -> Self {
         Self {
             title_capture: TitleCapture::Off,
+            browser_history: false,
             title_allowlist: Vec::new(),
             title_blocklist: Vec::new(),
         }
@@ -507,18 +516,21 @@ mod tests {
     fn title_filters_block_or_allow_cleaned_titles() {
         let mut config = Config::default();
         config.privacy.title_capture = TitleCapture::All;
+        config.privacy.browser_history = true;
         config.privacy.title_allowlist = vec!["issue".to_string()];
         config.privacy.title_blocklist = vec!["secret".to_string()];
 
         assert!(config.title_allowed("code", "Issue 123"));
         assert!(!config.title_allowed("code", "Calendar"));
         assert!(!config.title_allowed("code", "Issue secret"));
+        assert!(config.privacy.browser_history);
     }
 
     #[test]
     fn warnings_explain_clamped_and_ambiguous_config() {
         let mut config = Config::default();
         config.tracking.reconcile_seconds = 1;
+        config.privacy.browser_history = true;
         config.privacy.title_allowlist = vec!["issue".to_string()];
         config.goals.daily_focus_seconds = Some(3600);
         config.goals.daily_focus_minutes = Some(60);
@@ -540,6 +552,9 @@ mod tests {
         }));
         assert!(warnings.iter().any(|(field, message)| {
             field == "privacy.title_capture" && message.contains("ignored")
+        }));
+        assert!(warnings.iter().any(|(field, message)| {
+            field == "privacy.browser_history" && message.contains("title_capture")
         }));
         assert!(warnings.iter().any(|(field, message)| {
             field == "goals.daily_focus_seconds" && message.contains("takes precedence")

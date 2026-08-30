@@ -123,9 +123,11 @@ workspace/monitor context when Hyprland provides it. It does not store window
 titles, page names, file names, screenshots, or browser history.
 
 Optional title capture can be enabled explicitly in the config file when richer
-replay labels are worth the extra local data. Optional title allowlists and
-blocklists can restrict captured titles further, and `omastat purge` can remove
-older local telemetry after a dry-run review. See [docs/USAGE.md](docs/USAGE.md).
+replay labels and browser focus breakdowns are worth the extra local data. Zen
+Browser history enrichment is also opt-in and read-only. Optional title
+allowlists and blocklists can restrict captured titles further, and `omastat
+purge` can remove older local telemetry after a dry-run review. See
+[docs/USAGE.md](docs/USAGE.md).
 
 ## Development
 

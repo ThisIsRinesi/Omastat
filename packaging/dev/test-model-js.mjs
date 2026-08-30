@@ -111,6 +111,52 @@ assert.ok(enriched.some((item) => item.label === "Projected month"));
 assert.ok(enriched.some((item) => item.label === "Prime window"));
 assert.ok(enriched.some((item) => item.label === "Attention anchor"));
 
+const pace = context.usualPace([
+  {
+    kind: "same-weekday-pace",
+    title: "Ahead of usual pace",
+    label: "Usual pace",
+    value: "+30m",
+    category: "patterns",
+    tone: "positive",
+    evidence: { data_points: 3, minimum_data_points: 3 },
+    supporting: {
+      weekday_label: "Wed",
+      baseline_seconds: 3600,
+    },
+  },
+]);
+assert.equal(pace.available, true);
+assert.equal(pace.value, "Ahead of usual pace");
+assert.equal(pace.detail, "Typical Wed 1h across 3 days");
+
+const now = context.nowHabit([
+  {
+    kind: "usually-active-now",
+    title: "Usually active now",
+    value: "Wed 9 AM",
+    tone: "positive",
+    supporting: { hour_label: "9 AM" },
+  },
+  {
+    kind: "usual-app-now",
+    value: "Steam",
+  },
+]);
+assert.equal(now.available, true);
+assert.equal(now.label, "Now");
+assert.equal(now.detail, "Steam most often");
+
+const browserRows = context.browserActivity(
+  [
+    { label: "GitHub", seconds: 1200, pct: 40 },
+    { label: "YouTube", seconds: 2400, pct: 60 },
+  ],
+  1,
+);
+assert.equal(browserRows.length, 1);
+assert.equal(browserRows[0].label, "YouTube");
+
 const groups = context.insightGroups(enriched);
 assert.ok(groups.some((group) => group.key === "focus-quality"));
 assert.ok(groups.some((group) => group.key === "patterns"));
