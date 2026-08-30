@@ -1,10 +1,35 @@
 # Omastat
 
 Omastat is a local app focus tracker for Arch/Omarchy desktops running
-Hyprland. It records focused time to a local SQLite database, with open-window
-telemetry retained as secondary context, then
-shows the data through CLI reports, a terminal dashboard, HTML exports, and an
-Omarchy Quattro bar widget.
+Hyprland. It records focused window time to a local SQLite database, keeps
+open-window telemetry as secondary context, and turns that into CLI reports, a
+terminal dashboard, HTML exports, and an Omarchy Quattro widget.
+
+![Omastat day analytics widget](docs/assets/widget-day.png)
+
+## Quick Start
+
+```bash
+cargo install --path crates/omastat --locked
+packaging/systemd/install-user-service.sh
+omastat doctor
+```
+
+For the Omarchy bar widget:
+
+```bash
+omarchy plugin add https://github.com/ThisIsRinesi/Omastat.git
+omarchy plugin enable local.omastat
+```
+
+Click the widget for the analytics panel, middle-click to refresh, and
+right-click to toggle icon-only mode.
+
+## Screenshots
+
+![Omastat week focus heatmap](docs/assets/widget-week.png)
+
+![Omastat month calendar analytics](docs/assets/widget-month.png)
 
 ## Features
 
@@ -35,7 +60,7 @@ Omarchy Quattro bar widget.
   when those files are present.
 - Static HTML overview export for shareable day, week, month, year, and lifetime dashboards.
 
-## Install
+## Install From Source
 
 From a checkout or release tarball:
 
@@ -69,9 +94,6 @@ It appears in the right bar section by default. Move it later with:
 omarchy bar move local.omastat --section right
 ```
 
-Click the widget for the analytics popup, middle-click to refresh the current
-period, and right-click to toggle icon-only mode.
-
 ## Usage
 
 ```bash
@@ -81,8 +103,6 @@ omastat summary
 omastat summary --lens week --offset -1
 omastat widget-summary --lens day
 omastat insights --json
-omastat goals --lens week
-omastat digest --lens week
 omastat tui
 omastat export --lens month --output ~/Pictures/omastat-month.html
 omastat export-data --lens month --format csv --output ~/omastat-month-csv
