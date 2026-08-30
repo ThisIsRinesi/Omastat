@@ -247,6 +247,29 @@ function trendDefaultText(days) {
   return parts.join("  ")
 }
 
+function bestHour(cells) {
+  var list = cells || []
+  var best = null
+  var active = 0
+  var total = 0
+  for (var i = 0; i < list.length; i++) {
+    var seconds = Number(list[i].seconds || 0)
+    total += seconds
+    if (seconds > 0) active += 1
+    if (!best || seconds > Number(best.seconds || 0)) best = list[i]
+  }
+  if (!best || Number(best.seconds || 0) <= 0) {
+    return { label: "--", value: "--", detail: "No focused hours", active: 0, total: list.length }
+  }
+  return {
+    label: String(best.fullLabel || best.label || hourLabel(best.hour || 0)),
+    value: fmt(Number(best.seconds || 0)),
+    detail: active + "/" + list.length + " active hours",
+    active: active,
+    total: list.length
+  }
+}
+
 function consistencyStats(daily) {
   var list = daily || []
   var active = 0
@@ -599,7 +622,6 @@ function trendDetailText(day) {
   var parts = []
   var label = String(day.fullLabel || day.label || day.key || "Day")
   parts.push(label + ": " + fmt(Number(day.seconds || 0)) + " focused")
-  if (Number(day.observed_seconds || 0) > 0) parts.push(String(day.densityText || "--") + " of observed")
   if (Number(day.excluded_seconds || 0) > 0) parts.push(fmt(day.excluded_seconds) + " not counted")
   return parts.join("  ")
 }
@@ -608,7 +630,6 @@ function monthCellDetailText(cell) {
   if (!cell || cell.blank) return ""
   var parts = []
   parts.push(String(cell.label || cell.date || "Day") + ": " + fmt(Number(cell.seconds || 0)) + " focused")
-  if (Number(cell.observed_seconds || 0) > 0) parts.push(percent(Number(cell.seconds || 0) / Number(cell.observed_seconds || 1)) + " of observed")
   if (Number(cell.excluded_seconds || 0) > 0) parts.push(fmt(cell.excluded_seconds) + " not counted")
   return parts.join("  ")
 }

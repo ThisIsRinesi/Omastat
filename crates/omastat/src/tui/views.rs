@@ -511,11 +511,7 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     ));
     lines.push(widgets::metric_line(
         "Observed",
-        &format!(
-            "{} focus / {} open",
-            report::format_duration(insight.evidence.observed_focus_seconds),
-            report::format_duration(insight.evidence.observed_open_seconds)
-        ),
+        &report::format_duration(insight.evidence.observed_focus_seconds),
         support.width as usize,
         theme.muted,
         theme,
@@ -655,14 +651,11 @@ fn daily_pattern_summary_lines(app: &App, width: usize, theme: &Theme) -> Vec<Li
     let selected = app
         .selected_day()
         .map(|day| {
-            let day_share = widgets::ratio(day.focused_seconds, day.open_seconds);
             let not_counted = day_not_counted_seconds(day);
             format!(
-                "{}: {} focus, {} open, {} focused while open, {} not counted",
+                "{}: {} focus, {} not counted",
                 day.label,
                 report::format_duration(day.focused_seconds),
-                report::format_duration(day.open_seconds),
-                report::percent(day_share),
                 report::format_duration(not_counted)
             )
         })
@@ -678,11 +671,6 @@ fn daily_pattern_summary_lines(app: &App, width: usize, theme: &Theme) -> Vec<Li
             )
         })
         .unwrap_or_else(|| "best none".to_string());
-    let focus_share = widgets::ratio(
-        app.report().total_focused_seconds,
-        app.report().total_open_seconds,
-    );
-
     let mut lines = vec![
         Line::from(Span::styled(
             widgets::fit_text(&selected, width),
@@ -691,10 +679,9 @@ fn daily_pattern_summary_lines(app: &App, width: usize, theme: &Theme) -> Vec<Li
         Line::from(Span::styled(
             widgets::fit_text(
                 &format!(
-                    "{} days with focus | daily average {} | focus share {} | {best}",
+                    "{} days with focus | daily average {} | {best}",
                     app.stats().active_days,
-                    report::format_duration(app.stats().active_day_average_seconds),
-                    report::percent(focus_share)
+                    report::format_duration(app.stats().active_day_average_seconds)
                 ),
                 width,
             ),
@@ -704,14 +691,6 @@ fn daily_pattern_summary_lines(app: &App, width: usize, theme: &Theme) -> Vec<Li
 
     lines.push(Line::from(vec![
         Span::styled("Focus", Style::default().fg(theme.warn).bg(theme.panel)),
-        Span::styled(
-            "  Focus % ",
-            Style::default().fg(theme.success).bg(theme.panel),
-        ),
-        Span::styled(
-            " Open time ",
-            Style::default().fg(theme.secondary).bg(theme.panel),
-        ),
         Span::styled(
             " Not counted",
             Style::default().fg(theme.tertiary).bg(theme.panel),
@@ -731,17 +710,9 @@ fn daily_pattern_lane_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'
         .iter()
         .map(|day| day.focused_seconds.max(0) as f64)
         .collect::<Vec<_>>();
-    let open_values = days
-        .iter()
-        .map(|day| day.open_seconds.max(0) as f64)
-        .collect::<Vec<_>>();
     let not_counted_values = days
         .iter()
         .map(|day| day_not_counted_seconds(day).max(0) as f64)
-        .collect::<Vec<_>>();
-    let focus_share_values = days
-        .iter()
-        .map(|day| widgets::ratio(day.focused_seconds, day.open_seconds) * 100.0)
         .collect::<Vec<_>>();
 
     vec![
@@ -755,28 +726,6 @@ fn daily_pattern_lane_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'
             value_width,
             cell_width,
             color: theme.warn,
-            theme,
-        }),
-        daily_lane_line(DailyLane {
-            label: "Focus %",
-            values: &focus_share_values,
-            max_label: lane_percent_label(&focus_share_values),
-            selected_index: app.selected_day_index(),
-            label_width,
-            value_width,
-            cell_width,
-            color: theme.success,
-            theme,
-        }),
-        daily_lane_line(DailyLane {
-            label: "Open time",
-            values: &open_values,
-            max_label: lane_duration_label(&open_values),
-            selected_index: app.selected_day_index(),
-            label_width,
-            value_width,
-            cell_width,
-            color: theme.secondary,
             theme,
         }),
         daily_lane_line(DailyLane {
@@ -911,11 +860,6 @@ fn lane_duration_label(values: &[f64]) -> String {
     format!("top {}", widgets::compact_duration(max_seconds))
 }
 
-fn lane_percent_label(values: &[f64]) -> String {
-    let max = values.iter().copied().fold(0.0_f64, f64::max) / 100.0;
-    format!("top {}", report::percent(max))
-}
-
 fn day_not_counted_seconds(day: &DayTotals) -> i64 {
     day.idle_seconds
         .saturating_add(day.locked_seconds)
@@ -1007,13 +951,11 @@ fn render_composition_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
         let top = app.report().apps.first();
         let text = top
             .map(|row| {
-                let density = widgets::ratio(row.focused_seconds, row.open_seconds);
                 format!(
-                    "Top: {} {} ({}) | {} focused while open",
+                    "Top: {} {} ({})",
                     row.label,
                     widgets::compact_duration(row.focused_seconds),
-                    report::percent(row.share),
-                    report::percent(density)
+                    report::percent(row.share)
                 )
             })
             .unwrap_or_else(|| "no focused app time".to_string());
@@ -1253,23 +1195,12 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 6 {
-        let focus_share = widgets::ratio(
-            app.report().total_focused_seconds,
-            app.report().total_open_seconds,
-        );
         let lines = vec![
             widgets::metric_line(
-                "Focus share",
-                &report::percent(focus_share),
+                "Focused",
+                &report::format_duration(app.report().total_focused_seconds),
                 inner.width as usize,
-                widgets::density_color(focus_share, theme),
-                theme,
-            ),
-            widgets::metric_line(
-                "Open",
-                &report::format_duration(app.report().total_open_seconds),
-                inner.width as usize,
-                theme.secondary,
+                theme.warn,
                 theme,
             ),
             widgets::metric_line(
@@ -1306,10 +1237,6 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     else {
         return;
     };
-    let focus_share = widgets::ratio(
-        app.report().total_focused_seconds,
-        app.report().total_open_seconds,
-    );
     let signal_total = app
         .report()
         .total_focused_seconds
@@ -1327,11 +1254,11 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     frame.render_widget(
         LineGauge::default()
             .label(format!(
-                "focused while open {}",
-                report::percent(focus_share)
+                "focus time {}",
+                report::percent(app.report().total_focused_seconds as f64 / signal_total as f64)
             ))
-            .ratio(focus_share)
-            .filled_style(Style::default().fg(widgets::density_color(focus_share, theme)))
+            .ratio(app.report().total_focused_seconds as f64 / signal_total as f64)
+            .filled_style(Style::default().fg(theme.warn))
             .unfilled_style(Style::default().fg(theme.dim))
             .style(Style::default().bg(theme.panel)),
         gauge_lines[0],
@@ -1373,13 +1300,6 @@ fn render_period_signals(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
         gauge_lines[2],
     );
     let lines = vec![
-        widgets::metric_line(
-            "Open total",
-            &report::format_duration(app.report().total_open_seconds),
-            details.width as usize,
-            theme.secondary,
-            theme,
-        ),
         widgets::metric_line(
             "Away total",
             &report::format_duration(app.report().total_idle_seconds),
@@ -1641,7 +1561,6 @@ fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let density = widgets::ratio(row.focused_seconds, row.open_seconds);
             Row::new(vec![
                 Cell::from(format!("{:>2}", index + 1)).style(Style::default().fg(theme.dim)),
                 Cell::from(app.app_label(&row.app_class)),
@@ -1649,10 +1568,6 @@ fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                     .style(Style::default().fg(theme.warn)),
                 Cell::from(report::percent(widgets::ratio(row.focused_seconds, total)))
                     .style(Style::default().fg(theme.tertiary)),
-                Cell::from(report::percent(density))
-                    .style(Style::default().fg(widgets::density_color(density, theme))),
-                Cell::from(report::format_duration(row.open_seconds))
-                    .style(Style::default().fg(theme.secondary)),
             ])
             .style(Style::default().fg(theme.text).bg(theme.panel))
         })
@@ -1664,12 +1579,10 @@ fn render_app_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             Constraint::Min(18),
             Constraint::Length(9),
             Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(9),
         ],
     )
     .header(
-        Row::new(["#", "Application", "Focused", "Share", "Focus %", "Open"])
+        Row::new(["#", "Application", "Focused", "Share"])
             .style(Style::default().fg(theme.muted).bg(theme.panel_alt))
             .bottom_margin(1),
     )
@@ -1706,7 +1619,6 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
         widgets::render_empty(frame, inner, "No selected app", theme);
         return;
     };
-    let density = widgets::ratio(row.focused_seconds, row.open_seconds);
     let share = widgets::ratio(
         row.focused_seconds,
         app.report().total_focused_seconds.max(1),
@@ -1733,20 +1645,6 @@ fn render_app_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
             &report::format_duration(row.focused_seconds),
             summary.width as usize,
             theme.warn,
-            theme,
-        ),
-        widgets::metric_line(
-            "Open",
-            &report::format_duration(row.open_seconds),
-            summary.width as usize,
-            theme.secondary,
-            theme,
-        ),
-        widgets::metric_line(
-            "Focus share",
-            &report::percent(density),
-            summary.width as usize,
-            widgets::density_color(density, theme),
             theme,
         ),
         widgets::metric_line(
@@ -2324,14 +2222,13 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
     );
 
     let active_total = app.health().storage.focused_active
-        + app.health().storage.open_active
         + app.health().storage.idle_active
         + app.health().storage.locked_active
         + app.health().storage.sleep_active
         + app.health().storage.daemon_active;
     let focus_ratio = widgets::ratio(
         app.report().total_focused_seconds,
-        app.report().total_open_seconds,
+        app.report().total_elapsed_seconds,
     );
     let gauge_lines = Layout::vertical([
         Constraint::Length(2),
@@ -2341,9 +2238,9 @@ fn render_system_health(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Th
     .split(gauges);
     frame.render_widget(
         LineGauge::default()
-            .label(format!("focus share {}", report::percent(focus_ratio)))
+            .label(format!("focused elapsed {}", report::percent(focus_ratio)))
             .ratio(focus_ratio)
-            .filled_style(Style::default().fg(widgets::density_color(focus_ratio, theme)))
+            .filled_style(Style::default().fg(theme.warn))
             .unfilled_style(Style::default().fg(theme.dim))
             .style(Style::default().bg(theme.panel)),
         gauge_lines[0],
@@ -2589,11 +2486,9 @@ fn insight_display_explanation(insight: &Insight) -> String {
         InsightKind::FragmentedApp => {
             "Shows the app with the shortest typical focus sessions.".to_string()
         }
-        InsightKind::FocusDensity => {
-            "Shows how much open app time was focused.".to_string()
-        }
+        InsightKind::FocusDensity => "Compares focus with the surrounding tracked time.".to_string(),
         InsightKind::AppFocusDensity => {
-            "Shows which app had the strongest or weakest focus share while open.".to_string()
+            "Uses open-time telemetry as a background signal for app focus facts.".to_string()
         }
         InsightKind::EffectiveApps => {
             "Estimates how broadly your focus was spread across apps.".to_string()
@@ -2724,14 +2619,6 @@ fn insight_support_lines(
         support.focused_seconds,
         width,
         theme.warn,
-        theme,
-    );
-    push_duration_metric(
-        &mut lines,
-        "Open",
-        support.open_seconds,
-        width,
-        theme.secondary,
         theme,
     );
     push_duration_metric(

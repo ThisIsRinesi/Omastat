@@ -77,7 +77,7 @@ omastat export --lens month --output ~/Pictures/omastat-month.html
 omastat export --lens life --title "Lifetime App Overview"
 ```
 
-The export includes focused/open totals, structured period insights, daily
+The export includes focus totals, secondary open-window telemetry, structured period insights, daily
 pattern bars, ranked apps, app composition, workspace ranking, session length
 distribution, a week-by-hour heatmap, title rows when title capture is enabled,
 and Day/Week/Month/Year/Life totals.

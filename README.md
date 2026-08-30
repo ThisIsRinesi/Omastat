@@ -1,13 +1,14 @@
 # Omastat
 
-Omastat is a local app usage tracker for Arch/Omarchy desktops running
-Hyprland. It records focused time and open time to a local SQLite database, then
+Omastat is a local app focus tracker for Arch/Omarchy desktops running
+Hyprland. It records focused time to a local SQLite database, with open-window
+telemetry retained as secondary context, then
 shows the data through CLI reports, a terminal dashboard, HTML exports, and an
 Omarchy Quattro bar widget.
 
 ## Features
 
-- Focused and open time by application.
+- Focused time by application.
 - Idle, locked, asleep, and desktop/portal focus are excluded from focused time.
 - Daemon outages and restart recovery gaps are marked as unobserved excluded
   time instead of being counted as active focus.

@@ -19,6 +19,7 @@ cargo run -p omastat -- widget-insight --json
 cargo run -p omastat -- purge --older-than-days 90 --dry-run
 cargo run -p omastat -- tui
 packaging/dev/check-widget-qml.sh
+packaging/dev/capture-widget-panel.sh
 ```
 
 ## Local Auto-Update
@@ -78,3 +79,17 @@ to `~/.config/omarchy/plugins/local.omastat/`, validates the installed copy,
 then asks the running shell to rescan plugin data and confirm discovery. If the
 IPC reload is unavailable or Omarchy still cannot see the plugin, it falls back
 to `omarchy restart shell`.
+
+Capture the live Omarchy panel for visual review with:
+
+```bash
+packaging/dev/reinstall-and-restart.sh
+packaging/dev/capture-widget-panel.sh
+```
+
+The capture script opens `local.omastat` through Quickshell IPC, waits briefly,
+writes a PNG under `/tmp`, prints the path, and closes the panel. Use
+`--lens day|week|month|year|life` to capture a specific analytics lens,
+`--region GEOMETRY` for a panel-only crop, `--select` to pick a region
+interactively with `slurp`, or `--keep-open`, `--delay SECONDS`, and
+`--output PATH` when a review needs a specific state.

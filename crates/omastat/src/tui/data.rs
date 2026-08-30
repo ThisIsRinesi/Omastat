@@ -300,9 +300,8 @@ impl HealthSnapshot {
             return "empty db".to_string();
         }
         format!(
-            "{} focus / {} open / {} idle / {} locked / {} sleep / {} daemon",
+            "{} focus / {} idle / {} locked / {} sleep / {} daemon",
             self.storage.focused_active,
-            self.storage.open_active,
             self.storage.idle_active,
             self.storage.locked_active,
             self.storage.sleep_active,

@@ -373,7 +373,7 @@ struct DashboardPeriodPayload {
     range_label: String,
     generated: String,
     focused: String,
-    density: String,
+    focus_context: String,
     top_app: String,
     number_cards: String,
     daily_pattern: String,
@@ -433,10 +433,9 @@ fn build_dashboard_period(
         .collect::<Vec<_>>();
 
     let focused = report::format_duration(report.total_focused_seconds);
-    let open = report::format_duration(report.total_open_seconds);
-    let density = report::percent(ratio(
+    let focus_share = report::percent(ratio(
         report.total_focused_seconds,
-        report.total_open_seconds.max(1),
+        report.total_elapsed_seconds.max(1),
     ));
     let peak_day = report
         .daily
@@ -476,7 +475,7 @@ fn build_dashboard_period(
             )
         })
         .unwrap_or_else(|| "none".to_string());
-    let focus_note = format!("{density} focused while open");
+    let focus_context = format!("{focus_share} of elapsed");
     let top_app = report
         .rows
         .iter()
@@ -485,14 +484,13 @@ fn build_dashboard_period(
         .unwrap_or_else(|| "No focus yet".to_string());
     let number_cards_html = {
         let number_card_rows = vec![
-            NumberCard::new("Focused", &focused, &focus_note),
+            NumberCard::new("Focused", &focused, &focus_context),
             NumberCard::new("Daily avg", &daily_avg, &daily_note),
             NumberCard::new("Longest session", &longest_session, &session_note),
             NumberCard::new("App mix", &app_mix, &app_note),
             NumberCard::new("Streak", &streak_label, &streak_note),
             NumberCard::new("Peak hour", &peak_hour, "recurring focus window"),
             NumberCard::new("Peak day", &peak_day_label, &peak_day_duration),
-            NumberCard::new("Open time", &open, "tracked beside focus"),
         ];
         number_cards(&number_card_rows)
     };
@@ -508,7 +506,7 @@ fn build_dashboard_period(
         range_label: period_range_label(&report),
         generated: format_timestamp(report.generated_at),
         focused,
-        density,
+        focus_context,
         top_app,
         number_cards: number_cards_html,
         daily_pattern: daily_pattern_chart(&report.daily),
@@ -575,7 +573,7 @@ fn document(page_title: &str, dashboard: &DashboardPayload) -> String {
     <div class="focus-total">
       <small>Focused time</small>
       <strong data-bind="focused">{focused}</strong>
-      <span><span data-bind="density">{density}</span> focus density</span>
+      <span data-bind="focus_context">{focus_context}</span>
     </div>
   </header>
 
@@ -638,7 +636,7 @@ fn document(page_title: &str, dashboard: &DashboardPayload) -> String {
           <span class="kicker">Trend</span>
           <h2>Daily pattern</h2>
         </div>
-        <p>Bars show focused time; the line shows focus density while apps were open.</p>
+        <p>Bars show focused time. The highlighted marker calls out the strongest day.</p>
       </div>
       <div data-slot="daily_pattern">{daily_pattern}</div>
     </article>
@@ -661,7 +659,7 @@ fn document(page_title: &str, dashboard: &DashboardPayload) -> String {
           <span class="kicker">Applications</span>
           <h2>App table</h2>
         </div>
-        <p>Ranked applications include focused time, share, density, and open time.</p>
+        <p>Ranked applications by focused time and share of the selected period.</p>
       </div>
       <div data-slot="app_table">{app_table}</div>
     </article>
@@ -845,7 +843,7 @@ fn document(page_title: &str, dashboard: &DashboardPayload) -> String {
         range = escape_html(&initial.range_label),
         generated = escape_html(&initial.generated),
         focused = escape_html(&initial.focused),
-        density = escape_html(&initial.density),
+        focus_context = escape_html(&initial.focus_context),
         lens_controls = lens_controls,
         number_cards = initial.number_cards,
         daily_pattern = initial.daily_pattern,
@@ -1091,7 +1089,7 @@ fn dashboard_script() -> &'static str {
       setText('[data-bind="range"]', period.range_label);
       setText('[data-bind="generated"]', period.generated);
       setText('[data-bind="focused"]', period.focused);
-      setText('[data-bind="density"]', period.density);
+      setText('[data-bind="focus_context"]', period.focus_context);
       for (const name of [
         "number_cards",
         "daily_pattern",
@@ -1328,6 +1326,13 @@ body::before {
   letter-spacing: 0;
   transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease, opacity 160ms ease;
 }
+.segmented button:focus-visible,
+.period-nav button:focus-visible,
+.period-rail button:focus-visible {
+  outline: 2px solid var(--yellow);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 5px rgba(246,196,90,0.16);
+}
 .period-nav button:hover:not(:disabled),
 .period-rail button:hover {
   transform: translateY(-1px);
@@ -1428,7 +1433,7 @@ h2 {
 }
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
@@ -1605,7 +1610,7 @@ h2 {
 }
 .table-row {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1.4fr) 92px 72px 78px 92px;
+  grid-template-columns: 42px minmax(0, 1.4fr) 104px 84px;
   gap: 10px;
   align-items: center;
   min-height: 36px;
@@ -1852,7 +1857,7 @@ text {
 }
 @media (max-width: 720px) {
   .table-row {
-    grid-template-columns: 34px minmax(0, 1fr) 72px 76px;
+    grid-template-columns: 34px minmax(0, 1fr) 72px;
   }
   .hide-narrow {
     display: none;
@@ -1928,26 +1933,21 @@ fn daily_pattern_chart(days: &[DayTotals]) -> String {
         .max(2.0);
     let label_step = (visible_days.len() / 9).max(1);
     let mut bars = String::new();
-    let mut density_points = Vec::new();
     let mut labels = String::new();
 
     for (index, day) in visible_days.iter().enumerate() {
         let x = left + index as f64 * (bar_w + gap);
         let focus_height = (day.focused_seconds.max(0) as f64 / max_focus as f64) * chart_h;
         let y = top + chart_h - focus_height;
-        let density = ratio(day.focused_seconds, day.open_seconds.max(1));
-        let density_y = top + chart_h - density * chart_h;
         let cx = x + bar_w / 2.0;
-        density_points.push(format!("{cx:.2},{density_y:.2}"));
         let excluded = excluded_seconds(day);
         let opacity = if day.focused_seconds > 0 { 0.95 } else { 0.24 };
         bars.push_str(&format!(
             r##"<rect x="{x:.2}" y="{y:.2}" width="{bar_w:.2}" height="{focus_height:.2}" rx="3" fill="url(#focusBar)" opacity="{opacity:.2}">
-  <title>{date}: {focus} focused, {density} focus density, {excluded} excluded</title>
+  <title>{date}: {focus} focused, {excluded} not counted</title>
 </rect>"##,
             date = escape_html(&day.label),
             focus = escape_html(&report::format_duration(day.focused_seconds)),
-            density = escape_html(&report::percent(density)),
             excluded = escape_html(&report::format_duration(excluded)),
         ));
 
@@ -1982,10 +1982,8 @@ fn daily_pattern_chart(days: &[DayTotals]) -> String {
             )
         })
         .unwrap_or_default();
-    let density_line = density_points.join(" ");
-
     format!(
-        r##"<div class="chart-frame"><svg viewBox="0 0 1080 365" role="img" aria-label="Daily focused time with focus density line">
+        r##"<div class="chart-frame"><svg viewBox="0 0 1080 365" role="img" aria-label="Daily focused time">
 <defs>
   <linearGradient id="focusBar" x1="0" x2="0" y1="0" y2="1">
     <stop offset="0%" stop-color="#43d9e8" />
@@ -1996,15 +1994,12 @@ fn daily_pattern_chart(days: &[DayTotals]) -> String {
 <line x1="54" y1="160" x2="1050" y2="160" stroke="rgba(255,255,255,0.10)" stroke-width="1" />
 <line x1="54" y1="30" x2="1050" y2="30" stroke="rgba(255,255,255,0.08)" stroke-width="1" />
 <text x="5" y="34" font-size="12" font-weight="900" fill="#a8acb8">{max_label}</text>
-<text x="1012" y="34" font-size="12" font-weight="900" fill="#f6c45a">100%</text>
 {bars}
-<polyline points="{density_line}" fill="none" stroke="#f6c45a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
 {annotation}
 {labels}
 </svg></div>
 <div class="legend-strip">
   <span class="legend-chip"><i class="swatch" style="color:#43d9e8;background:#43d9e8"></i>Focused time</span>
-  <span class="legend-chip"><i class="swatch" style="color:#f6c45a;background:#f6c45a"></i>Focus density</span>
 </div>"##,
         max_label = escape_html(&report::format_duration(max_focus)),
     )
@@ -2178,11 +2173,10 @@ fn session_histogram(focus_intervals: &[TimelineInterval], stats: &ExportStats) 
 fn app_table(rows: &[AppTotals], total: i64) -> String {
     let rows = rows
         .iter()
-        .filter(|row| row.focused_seconds > 0 || row.open_seconds > 0)
+        .filter(|row| row.focused_seconds > 0)
         .take(18)
         .enumerate()
         .map(|(index, row)| {
-            let density = ratio(row.focused_seconds, row.open_seconds.max(1));
             let share = ratio(row.focused_seconds, total.max(1));
             format!(
                 r#"<div class="table-row">
@@ -2190,15 +2184,11 @@ fn app_table(rows: &[AppTotals], total: i64) -> String {
   <span class="table-name">{name}</span>
   <span>{focused}</span>
   <span class="hide-narrow">{share}</span>
-  <span class="hide-narrow">{density}</span>
-  <span>{open}</span>
 </div>"#,
                 rank = index + 1,
                 name = escape_html(&report::app_label(&row.app_class)),
                 focused = escape_html(&report::format_duration(row.focused_seconds)),
                 share = escape_html(&report::percent(share)),
-                density = escape_html(&report::percent(density)),
-                open = escape_html(&report::format_duration(row.open_seconds)),
             )
         })
         .collect::<Vec<_>>();
@@ -2210,7 +2200,7 @@ fn app_table(rows: &[AppTotals], total: i64) -> String {
     format!(
         r#"<div class="data-table app-data-table">
   <div class="table-row table-head">
-    <span>#</span><span>Application</span><span>Focused</span><span class="hide-narrow">Share</span><span class="hide-narrow">Focus %</span><span>Open</span>
+    <span>#</span><span>Application</span><span>Focused</span><span class="hide-narrow">Share</span>
   </div>
   {}
 </div>"#,
@@ -2451,7 +2441,6 @@ fn system_health_panel(
 ) -> String {
     let active_total = status
         .focused_active
-        .saturating_add(status.open_active)
         .saturating_add(status.idle_active)
         .saturating_add(status.locked_active)
         .saturating_add(status.sleep_active)
@@ -2462,9 +2451,8 @@ fn system_health_panel(
         (
             "Live",
             format!(
-                "{} focus / {} open / {} idle / {} locked / {} sleep / {} daemon",
+                "{} focus / {} idle / {} locked / {} sleep / {} daemon",
                 status.focused_active,
-                status.open_active,
                 status.idle_active,
                 status.locked_active,
                 status.sleep_active,
@@ -2475,11 +2463,7 @@ fn system_health_panel(
         ("Heartbeat", ago_label(status.last_heartbeat_at)),
         (
             "Loaded period",
-            format!(
-                "{} focus / {} open",
-                report::format_duration(report.total_focused_seconds),
-                report::format_duration(report.total_open_seconds)
-            ),
+            report::format_duration(report.total_focused_seconds),
         ),
     ];
     rows.extend(warnings.iter().map(|warning| ("Warning", warning.clone())));

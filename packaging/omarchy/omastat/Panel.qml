@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Window
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -39,6 +40,7 @@ Panel {
   property string updatedText: ""
   property int inspectedActivityIndex: -1
   property int inspectedHeatIndex: -1
+  property int inspectedHourIndex: -1
 
   readonly property var barIdentity: hostWidget || root
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
@@ -81,12 +83,14 @@ Panel {
   readonly property var monthWeeks: Model.monthWeekCells(daily)
   readonly property var weekdayCells: Model.weekdayFocusCells(heatmap)
   readonly property var activityCells: Model.activityCells(daily, selectedLens)
+  readonly property real activityMax: Model.maxDailySeconds(activityCells)
   readonly property real monthMax: Model.maxMonthSeconds(monthCells)
   readonly property real monthWeekMax: Model.maxDailySeconds(monthWeeks)
   readonly property real weekdayMax: Model.maxDailySeconds(weekdayCells)
   readonly property var heatCells: Model.heatmapCells(heatmap)
   readonly property var hourlyCells: Model.hourlyCells(heatmap)
   readonly property var hourlyTrendCells: Model.hourlyTrendCells(heatmap)
+  readonly property var peakHour: Model.bestHour(hourlyTrendCells)
   readonly property real heatMax: Model.maxHeatSeconds(heatCells)
   readonly property real hourlyMax: Model.maxHourlySeconds(hourlyCells)
   readonly property var consistency: Model.consistencyStats(daily)
@@ -98,24 +102,54 @@ Panel {
   readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.75, Style.space(1180)) : Style.space(1080)
   readonly property real targetPanelHeight: Screen.height > 0 ? Math.min(Screen.height * 0.88, Style.space(980)) : Style.space(820)
   readonly property bool widePanel: panel.width >= Style.space(900)
-  readonly property bool showActivityChart: selectedLens === "month" ? monthCells.length > 0 : activityCells.length > 0
+  readonly property bool showActivityChart: selectedLens === "month" ? monthMax > 0 : activityMax > 0
   readonly property bool showHeatmapChart: selectedLens !== "day" && heatMax > 0
   readonly property bool showHourlyChart: selectedLens === "day" && hourlyMax > 0
+  readonly property bool showHorizonChart: (selectedLens === "year" || selectedLens === "life") && activityMax > 0
   readonly property string periodScopeLabel: selectedOffset === 0 && selectedLens !== "day" && selectedLens !== "life" ? periodLabel + " to date" : periodLabel
   readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days only" : "Across period")
   readonly property string loadingAppMixText: summaryTopApp && summaryTopApp.app ? "Loading app mix; top " + String(summaryTopApp.app) + " " + root.formatDuration(Number(summaryTopApp.seconds || 0)) : "Loading app mix..."
   readonly property string activityChartTitle: selectedLens === "day" ? "Last 7 days" : (selectedLens === "week" ? "This week" : (selectedLens === "month" ? "Month calendar" : (selectedLens === "year" ? "Monthly focus" : "Recent weeks")))
   readonly property string timeChartTitle: selectedLens === "day" ? "Today by hour" : "Focus by time of week"
-  readonly property string activityChartDetail: selectedLens === "month" ? "Daily focused time" : "Focused time and observed share"
+  readonly property string activityChartDetail: selectedLens === "month" ? "Daily focused time" : "Focused time"
   readonly property string timeChartDetail: selectedLens === "day" ? "Hourly focused time" : "Weekday and hour intensity"
 
   onSelectedLensChanged: clearInspection()
   onSelectedOffsetChanged: clearInspection()
   onDailyChanged: inspectedActivityIndex = -1
-  onHeatmapChanged: inspectedHeatIndex = -1
+  onHeatmapChanged: {
+    inspectedHeatIndex = -1
+    inspectedHourIndex = -1
+  }
 
   function refresh() {
     if (hostWidget && hostWidget.refresh) hostWidget.refresh(true)
+  }
+
+  IpcHandler {
+    target: root.moduleName
+
+    function open() {
+      root.open()
+      root.refresh()
+    }
+    function close() { root.close() }
+    function show() {
+      root.open()
+      root.refresh()
+    }
+    function hide() { root.close() }
+    function toggle() {
+      root.toggle()
+      if (root.opened) root.refresh()
+    }
+    function refresh() { root.refresh() }
+    function status() { return root.statusText || "idle" }
+    function day() { root.setLens("day") }
+    function week() { root.setLens("week") }
+    function month() { root.setLens("month") }
+    function year() { root.setLens("year") }
+    function life() { root.setLens("life") }
   }
 
   function setLens(lens) {
@@ -156,6 +190,15 @@ Panel {
     return Qt.rgba(colorValue.r, colorValue.g, colorValue.b, root.clamp01(alpha))
   }
 
+  function canvasColor(colorValue, alpha) {
+    var a = alpha === undefined ? colorValue.a : alpha
+    return "rgba("
+      + Math.round(colorValue.r * 255) + ","
+      + Math.round(colorValue.g * 255) + ","
+      + Math.round(colorValue.b * 255) + ","
+      + root.clamp01(a) + ")"
+  }
+
   function toneColor(tone) {
     var value = String(tone || "")
     if (value === "positive") return root.sliceColor(1, 1.0)
@@ -172,6 +215,7 @@ Panel {
   function clearInspection() {
     inspectedActivityIndex = -1
     inspectedHeatIndex = -1
+    inspectedHourIndex = -1
   }
 
   function inspectActivity(delta) {
@@ -200,6 +244,24 @@ Panel {
       ? inspectedHeatIndex + direction
       : (direction > 0 ? 0 : count - 1)
     inspectedHeatIndex = (next + count) % count
+  }
+
+  function inspectTime(delta) {
+    if (root.showHourlyChart) {
+      root.inspectHour(delta)
+      return
+    }
+    root.inspectHeat(delta)
+  }
+
+  function inspectHour(delta) {
+    var count = root.hourlyTrendCells.length
+    if (count <= 0) return
+    var direction = delta < 0 ? -1 : 1
+    var next = inspectedHourIndex >= 0
+      ? inspectedHourIndex + direction
+      : (direction > 0 ? 0 : count - 1)
+    inspectedHourIndex = (next + count) % count
   }
 
   KeyboardPanel {
@@ -233,8 +295,8 @@ Panel {
         else if (text === "5") root.setLens("life")
         else if (text === "[") root.shiftPeriod(-1)
         else if (text === "]") root.shiftPeriod(1)
-        else if (text === "h" || text === "H") root.inspectHeat(-1)
-        else if (text === "l" || text === "L") root.inspectHeat(1)
+        else if (text === "h" || text === "H") root.inspectTime(-1)
+        else if (text === "l" || text === "L") root.inspectTime(1)
         else if (text === "Escape") root.clearInspection()
       }
 
@@ -289,7 +351,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: root.formatDuration(root.totalFocused) + " focused" + (root.focusShareText !== "--" ? "  -  " + root.focusShareText + " of observed" : "")
+              text: root.topVisibleApp ? root.topAppName + " leads with " + root.topAppValue : "No focused app time yet"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -447,11 +509,22 @@ Panel {
               TrendBars {
                 width: parent.width
                 expanded: root.widePanel
-                visible: root.selectedLens !== "month" && root.activityCells.length > 0
+                visible: root.selectedLens !== "month" && !root.showHorizonChart && root.activityCells.length > 0
                 title: root.activityChartTitle
                 detail: root.activityChartDetail
                 days: root.activityCells
-                maxSeconds: Model.maxDailySeconds(root.activityCells)
+                maxSeconds: root.activityMax
+                selectedIndex: root.inspectedActivityIndex
+              }
+
+              FocusHorizon {
+                width: parent.width
+                expanded: root.widePanel
+                visible: root.showHorizonChart
+                title: root.activityChartTitle
+                detail: root.activityChartDetail
+                days: root.activityCells
+                maxSeconds: root.activityMax
                 selectedIndex: root.inspectedActivityIndex
               }
 
@@ -487,15 +560,15 @@ Panel {
               visible: root.showHourlyChart || root.showHeatmapChart
               spacing: Style.space(8)
 
-              HourlyBars {
+              FocusRing {
                 width: parent.width
                 expanded: root.widePanel
                 visible: root.showHourlyChart
-                title: root.timeChartTitle
+                title: "24-hour focus ring"
                 detail: root.timeChartDetail
                 hours: root.hourlyTrendCells
                 maxSeconds: root.hourlyMax
-                selectedIndex: -1
+                selectedIndex: root.inspectedHourIndex
               }
 
               HeatmapGrid {
@@ -512,14 +585,14 @@ Panel {
           }
 
           SectionHeader {
-            text: "App Mix by Focused Time"
+            text: "Focus Mix"
           }
 
           Rectangle {
             id: appMixCard
 
             width: parent.width
-            implicitHeight: appRankBars.contentHeight + Style.space(24)
+            implicitHeight: appMixLayout.implicitHeight + Style.space(24)
             radius: Style.space(7)
             color: root.fill
             border.color: root.line
@@ -536,14 +609,33 @@ Panel {
               opacity: root.widePanel ? 1 : 0.72
             }
 
-            AppRankBars {
-              id: appRankBars
+            GridLayout {
+              id: appMixLayout
+
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
               anchors.margins: Style.space(12)
-              apps: root.visibleApps
-              colors: root.appColors
+              columns: root.widePanel ? 2 : 1
+              rowSpacing: Style.space(12)
+              columnSpacing: Style.space(14)
+
+              AppDonut {
+                Layout.fillWidth: true
+                Layout.preferredWidth: root.widePanel ? Math.max(Style.space(240), appMixCard.width * 0.34) : appMixCard.width
+                apps: root.visibleApps
+                colors: root.appColors
+                totalSeconds: root.totalFocused
+              }
+
+              AppRankBars {
+                id: appRankBars
+
+                Layout.fillWidth: true
+                Layout.preferredWidth: root.widePanel ? Math.max(0, appMixCard.width * 0.60) : appMixCard.width
+                apps: root.visibleApps
+                colors: root.appColors
+              }
             }
           }
 
@@ -739,7 +831,7 @@ Panel {
             id: primaryLabel
 
             width: parent.width
-            text: "Focused time"
+            text: root.periodScopeLabel
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -754,7 +846,7 @@ Panel {
             text: root.formatDuration(root.totalFocused)
             color: root.foreground
             font.family: root.fontFamily
-            font.pixelSize: Style.font.title
+            font.pixelSize: Style.font.title + Style.space(2)
             font.bold: true
             elide: Text.ElideRight
           }
@@ -779,7 +871,7 @@ Panel {
             spacing: 0
 
             Text {
-              text: root.focusShareText
+              text: root.peakHour.label
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -788,7 +880,7 @@ Panel {
             }
 
             Text {
-              text: "observed"
+              text: "peak hour"
               color: root.faint
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -800,7 +892,7 @@ Panel {
 
       GridLayout {
         width: parent.width
-        columns: root.metricColumns
+        columns: root.widePanel ? 4 : root.metricColumns
         rowSpacing: Style.space(8)
         columnSpacing: Style.space(12)
 
@@ -808,7 +900,7 @@ Panel {
           Layout.fillWidth: true
           label: "Period"
           value: root.periodScopeLabel
-          detail: root.observedDetailText
+          detail: root.selectedOffset === 0 ? "Current lens" : "Historical lens"
           accentColor: root.sliceColor(0, 1.0)
         }
 
@@ -818,6 +910,14 @@ Panel {
           value: root.topAppName
           detail: root.topAppValue
           accentColor: root.sliceColor(2, 1.0)
+        }
+
+        SummaryStat {
+          Layout.fillWidth: true
+          label: "Peak time"
+          value: root.peakHour.label
+          detail: root.peakHour.value + "  " + root.peakHour.detail
+          accentColor: root.sliceColor(1, 1.0)
         }
 
         SummaryStat {
@@ -1279,6 +1379,165 @@ Panel {
     }
   }
 
+  component AppDonut: Item {
+    id: donutRoot
+
+    property var apps: []
+    property var colors: []
+    property int totalSeconds: 0
+    property int hoveredIndex: -1
+
+    readonly property var segments: Model.arcSegments(apps)
+    readonly property string centerLabel: root.formatDuration(totalSeconds)
+    readonly property string centerDetail: apps.length > 0 ? String(apps[0].app || "Top app") : "Focused"
+    readonly property int chartSize: Math.min(Style.space(190), Math.max(Style.space(142), width - Style.space(24)))
+
+    Layout.minimumHeight: Style.space(232)
+    implicitHeight: Style.space(232)
+
+    onAppsChanged: donutCanvas.requestPaint()
+    onColorsChanged: donutCanvas.requestPaint()
+    onHoveredIndexChanged: donutCanvas.requestPaint()
+    onWidthChanged: donutCanvas.requestPaint()
+
+    Column {
+      anchors.fill: parent
+      anchors.margins: Style.space(12)
+      spacing: Style.space(8)
+
+      Item {
+        width: parent.width
+        height: Style.space(20)
+
+        Text {
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Top apps"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          elide: Text.ElideRight
+        }
+      }
+
+      Item {
+        width: parent.width
+        height: donutRoot.chartSize
+
+        Canvas {
+          id: donutCanvas
+
+          anchors.centerIn: parent
+          width: donutRoot.chartSize
+          height: donutRoot.chartSize
+          antialiasing: true
+
+          onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            var cx = width / 2
+            var cy = height / 2
+            var radius = Math.min(width, height) / 2 - Style.space(13)
+            var lineWidth = Math.max(Style.space(13), radius * 0.18)
+            ctx.lineCap = "round"
+
+            ctx.beginPath()
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2, false)
+            ctx.strokeStyle = root.canvasColor(root.foreground, 0.12)
+            ctx.lineWidth = lineWidth
+            ctx.stroke()
+
+            for (var i = 0; i < donutRoot.segments.length; i++) {
+              var segment = donutRoot.segments[i]
+              if (Number(segment.sweepAngle || 0) <= 0) continue
+              var start = Number(segment.startAngle || 0) * Math.PI / 180
+              var end = Number(segment.startAngle + segment.sweepAngle) * Math.PI / 180
+              var color = root.colorFromHex(String(donutRoot.colors[i] || Color.accent), i === donutRoot.hoveredIndex || donutRoot.hoveredIndex < 0 ? 0.94 : 0.46)
+              ctx.beginPath()
+              ctx.arc(cx, cy, radius, start, end, false)
+              ctx.strokeStyle = root.canvasColor(color, color.a)
+              ctx.lineWidth = i === donutRoot.hoveredIndex ? lineWidth + Style.space(3) : lineWidth
+              ctx.stroke()
+            }
+          }
+        }
+
+        Column {
+          width: parent.width * 0.66
+          anchors.centerIn: parent
+          spacing: Style.space(1)
+
+          Text {
+            width: parent.width
+            text: donutRoot.centerLabel
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+          }
+
+          Text {
+            width: parent.width
+            text: donutRoot.centerDetail
+            color: root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          hoverEnabled: true
+          onPositionChanged: function(mouse) {
+            var cx = width / 2
+            var cy = height / 2
+            var dx = mouse.x - cx
+            var dy = mouse.y - cy
+            var distance = Math.sqrt(dx * dx + dy * dy)
+            var outer = donutRoot.chartSize / 2
+            var inner = outer - Style.space(46)
+            if (distance < inner || distance > outer) {
+              donutRoot.hoveredIndex = -1
+              return
+            }
+            var angle = Math.atan2(dy, dx) * 180 / Math.PI
+            for (var i = 0; i < donutRoot.segments.length; i++) {
+              var segment = donutRoot.segments[i]
+              var start = Number(segment.startAngle || 0)
+              var sweep = Number(segment.sweepAngle || 0)
+              var normalized = angle
+              while (normalized < start) normalized += 360
+              if (normalized >= start && normalized <= start + sweep) {
+                donutRoot.hoveredIndex = i
+                return
+              }
+            }
+            donutRoot.hoveredIndex = -1
+          }
+          onExited: donutRoot.hoveredIndex = -1
+        }
+      }
+
+      Text {
+        width: parent.width
+        text: donutRoot.hoveredIndex >= 0 && donutRoot.hoveredIndex < donutRoot.apps.length
+          ? String(donutRoot.apps[donutRoot.hoveredIndex].app || "App") + "  " + root.formatDuration(Number(donutRoot.apps[donutRoot.hoveredIndex].seconds || 0)) + "  " + Number(donutRoot.apps[donutRoot.hoveredIndex].pct || 0) + "%"
+          : "Focused time share"
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
+      }
+    }
+  }
+
   component AppRankBars: Column {
     id: rankRoot
 
@@ -1342,7 +1601,7 @@ Panel {
 
           readonly property int seconds: Number(modelData.seconds || 0)
           readonly property int pct: Number(modelData.pct || 0)
-          readonly property color barColor: root.colorFromHex(String(colors[index] || Color.accent), 1.0)
+          readonly property color barColor: root.colorFromHex(String(colors[index] || Color.accent), index === 0 ? 0.88 : 0.68)
 
           Text {
             id: rankName
@@ -1351,7 +1610,7 @@ Panel {
             anchors.rightMargin: Style.space(10)
             anchors.top: parent.top
             text: String(modelData.app || "")
-            color: root.foreground
+            color: index === 0 ? root.foreground : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             font.bold: index === 0
@@ -1417,6 +1676,386 @@ Panel {
       font.pixelSize: Style.font.bodySmall
       horizontalAlignment: Text.AlignHCenter
       elide: Text.ElideRight
+    }
+  }
+
+  component FocusRing: Rectangle {
+    id: ringRoot
+
+    property string title: ""
+    property string detail: ""
+    property var hours: []
+    property real maxSeconds: 0
+    property int selectedIndex: -1
+    property int hoveredIndex: -1
+    property string hoveredText: ""
+    property bool expanded: false
+    readonly property int chartSize: expanded ? Style.space(146) : Style.space(132)
+    readonly property string selectedText: selectedIndex >= 0 && selectedIndex < hours.length
+      ? hourlyDetailText(hours[selectedIndex])
+      : ""
+    readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property var peak: Model.bestHour(hours)
+    readonly property string defaultText: peak.label !== "--" ? "Peak " + peak.label + ": " + peak.value + "  " + peak.detail : ""
+
+    function hourlyDetailText(cell) {
+      if (!cell) return ""
+      return String(cell.fullLabel || cell.label || "Hour") + ": " + root.formatDuration(Number(cell.seconds || 0)) + " focused"
+    }
+
+    function segmentIndexAt(px, py) {
+      var cx = ringCanvas.width / 2
+      var cy = ringCanvas.height / 2
+      var dx = px - ringCanvas.x - cx
+      var dy = py - ringCanvas.y - cy
+      var distance = Math.sqrt(dx * dx + dy * dy)
+      var outer = Math.min(ringCanvas.width, ringCanvas.height) / 2
+      var inner = outer - Style.space(48)
+      if (distance < inner || distance > outer) return -1
+      var degrees = Math.atan2(dy, dx) * 180 / Math.PI + 90
+      while (degrees < 0) degrees += 360
+      return Math.max(0, Math.min(23, Math.floor(degrees / 15)))
+    }
+
+    implicitHeight: expanded ? Style.space(216) : Style.space(184)
+    radius: Style.space(7)
+    color: root.fill
+    border.color: root.line
+    border.width: 1
+
+    onHoursChanged: ringCanvas.requestPaint()
+    onMaxSecondsChanged: ringCanvas.requestPaint()
+    onSelectedIndexChanged: ringCanvas.requestPaint()
+    onHoveredIndexChanged: ringCanvas.requestPaint()
+
+    Item {
+      id: ringHeader
+
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: Style.space(12)
+      height: Style.space(20)
+
+      Text {
+        anchors.left: parent.left
+        anchors.right: ringDetail.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: ringRoot.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: ringDetail
+
+        width: Math.min(implicitWidth, parent.width * 0.46)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: ringRoot.detail
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+      }
+    }
+
+    Item {
+      id: ringBody
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: ringHeader.bottom
+      anchors.bottom: ringReadout.top
+      anchors.margins: Style.space(12)
+      anchors.topMargin: Style.space(8)
+      anchors.bottomMargin: Style.space(8)
+
+      Canvas {
+        id: ringCanvas
+
+        width: ringRoot.chartSize
+        height: ringRoot.chartSize
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        antialiasing: true
+
+        onPaint: {
+          var ctx = getContext("2d")
+          ctx.reset()
+          var cx = width / 2
+          var cy = height / 2
+          var radius = Math.min(width, height) / 2 - Style.space(11)
+          var trackWidth = Style.space(10)
+          var activeWidth = Style.space(15)
+          ctx.lineCap = "round"
+
+          for (var i = 0; i < 24; i++) {
+            var start = (-90 + i * 15 + 1.7) * Math.PI / 180
+            var end = (-90 + (i + 1) * 15 - 1.7) * Math.PI / 180
+            ctx.beginPath()
+            ctx.arc(cx, cy, radius, start, end, false)
+            ctx.strokeStyle = root.canvasColor(root.foreground, 0.10)
+            ctx.lineWidth = trackWidth
+            ctx.stroke()
+          }
+
+          for (var h = 0; h < Math.min(24, ringRoot.hours.length); h++) {
+            var seconds = Number(ringRoot.hours[h].seconds || 0)
+            if (seconds <= 0 || ringRoot.maxSeconds <= 0) continue
+            var intensity = root.clamp01(seconds / ringRoot.maxSeconds)
+            var active = h === ringRoot.hoveredIndex || h === ringRoot.selectedIndex
+            var startAngle = (-90 + h * 15 + 1.7) * Math.PI / 180
+            var endAngle = (-90 + (h + 1) * 15 - 1.7) * Math.PI / 180
+            ctx.beginPath()
+            ctx.arc(cx, cy, radius, startAngle, endAngle, false)
+            ctx.strokeStyle = root.canvasColor(root.sliceColor(0, 1.0), active ? 1.0 : 0.36 + intensity * 0.54)
+            ctx.lineWidth = active ? activeWidth + Style.space(3) : activeWidth
+            ctx.stroke()
+          }
+        }
+      }
+
+      Column {
+        anchors.left: ringCanvas.right
+        anchors.leftMargin: Style.space(14)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(8)
+
+        Text {
+          width: parent.width
+          text: ringRoot.peak.label
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          text: ringRoot.peak.value + " peak focus"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          text: ringRoot.peak.detail
+          color: root.faint
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onPositionChanged: function(mouse) {
+          var index = ringRoot.segmentIndexAt(mouse.x, mouse.y)
+          ringRoot.hoveredIndex = index
+          ringRoot.hoveredText = index >= 0 && index < ringRoot.hours.length ? ringRoot.hourlyDetailText(ringRoot.hours[index]) : ""
+        }
+        onExited: {
+          ringRoot.hoveredIndex = -1
+          ringRoot.hoveredText = ""
+        }
+      }
+    }
+
+    ChartReadout {
+      id: ringReadout
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      anchors.margins: Style.space(10)
+      text: ringRoot.readoutText.length > 0 ? ringRoot.readoutText : ringRoot.defaultText
+    }
+  }
+
+  component FocusHorizon: Rectangle {
+    id: horizonRoot
+
+    property string title: ""
+    property string detail: ""
+    property var days: []
+    property real maxSeconds: 0
+    property int selectedIndex: -1
+    property int hoveredIndex: -1
+    property string hoveredText: ""
+    property bool expanded: false
+    readonly property string selectedText: selectedIndex >= 0 && selectedIndex < days.length
+      ? Model.trendDetailText(days[selectedIndex])
+      : ""
+    readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property string defaultText: Model.trendDefaultText(days)
+
+    implicitHeight: expanded ? Style.space(216) : Style.space(184)
+    radius: Style.space(7)
+    color: root.fill
+    border.color: root.line
+    border.width: 1
+
+    Item {
+      id: horizonHeader
+
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: Style.space(12)
+      height: Style.space(20)
+
+      Text {
+        anchors.left: parent.left
+        anchors.right: horizonDetail.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: horizonRoot.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: horizonDetail
+
+        width: Math.min(implicitWidth, parent.width * 0.46)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: horizonRoot.detail
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+      }
+    }
+
+    Item {
+      id: horizonPlot
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: horizonHeader.bottom
+      anchors.bottom: horizonReadout.top
+      anchors.margins: Style.space(12)
+      anchors.topMargin: Style.space(12)
+      anchors.bottomMargin: Style.space(26)
+
+      readonly property real gap: days.length > 28 ? Style.space(2) : Style.space(4)
+      readonly property real cellWidth: days.length > 0 ? Math.max(Style.space(9), (width - gap * (days.length - 1)) / days.length) : 0
+      readonly property real bandHeight: height / 3
+
+      Repeater {
+        model: 3
+
+        Rectangle {
+          required property int index
+
+          anchors.left: parent.left
+          anchors.right: parent.right
+          y: index * horizonPlot.bandHeight
+          height: 1
+          color: root.line
+          opacity: 0.34
+        }
+      }
+
+      Repeater {
+        model: days
+
+        Item {
+          required property int index
+          required property var modelData
+
+          readonly property real seconds: Number(modelData.seconds || 0)
+          readonly property real ratio: horizonRoot.maxSeconds > 0 ? root.clamp01(seconds / horizonRoot.maxSeconds) : 0
+          readonly property int bands: ratio <= 0 ? 0 : Math.max(1, Math.ceil(ratio * 3))
+          readonly property bool active: horizonRoot.hoveredIndex === index || horizonRoot.selectedIndex === index
+
+          x: index * (horizonPlot.cellWidth + horizonPlot.gap)
+          width: horizonPlot.cellWidth
+          height: horizonPlot.height
+
+          Repeater {
+            model: bands
+
+            Rectangle {
+              required property int index
+
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              anchors.bottomMargin: index * horizonPlot.bandHeight
+              height: Math.max(Style.space(5), horizonPlot.bandHeight - Style.space(3))
+              radius: Math.min(width / 2, Style.space(4))
+              color: root.sliceColor(index, active ? 0.96 : 0.34 + (index + 1) * 0.16)
+              border.color: active ? root.withAlpha(root.foreground, 0.42) : "transparent"
+              border.width: active ? 1 : 0
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onEntered: {
+              horizonRoot.hoveredIndex = index
+              horizonRoot.hoveredText = Model.trendDetailText(modelData)
+            }
+            onExited: {
+              if (horizonRoot.hoveredIndex === index) {
+                horizonRoot.hoveredIndex = -1
+                horizonRoot.hoveredText = ""
+              }
+            }
+          }
+        }
+      }
+
+      Text {
+        anchors.left: parent.left
+        anchors.top: parent.bottom
+        anchors.topMargin: Style.space(5)
+        text: days.length > 0 ? String(days[0].label || days[0].fullLabel || "") : ""
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width * 0.42
+        anchors.right: parent.right
+        anchors.top: parent.bottom
+        anchors.topMargin: Style.space(5)
+        text: days.length > 0 ? String(days[days.length - 1].label || days[days.length - 1].fullLabel || "") : ""
+        color: root.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+      }
+    }
+
+    ChartReadout {
+      id: horizonReadout
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      anchors.margins: Style.space(10)
+      text: horizonRoot.readoutText.length > 0 ? horizonRoot.readoutText : horizonRoot.defaultText
     }
   }
 
@@ -1517,7 +2156,7 @@ Panel {
       anchors.leftMargin: Style.space(12)
       anchors.rightMargin: Style.space(12)
       anchors.topMargin: Style.space(8)
-      anchors.bottomMargin: Style.space(38)
+      anchors.bottomMargin: Style.space(32)
 
       Rectangle {
         visible: trendRoot.maxSeconds > 0 && trendRoot.averageSeconds > 0
@@ -1564,7 +2203,7 @@ Panel {
               Item {
                 id: barSlot
                 width: parent.width
-                height: Math.max(Style.space(44), parent.height - Style.space(54))
+                height: Math.max(Style.space(44), parent.height - Style.space(38))
 
                 Repeater {
                   model: 3
@@ -1624,15 +2263,6 @@ Panel {
                 elide: Text.ElideRight
               }
 
-              Text {
-                width: parent.width
-                text: String(modelData.densityText || "--")
-                color: root.faint
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-              }
             }
 
             MouseArea {

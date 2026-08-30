@@ -183,7 +183,6 @@ mod tests {
             "Timeline",
             "System",
             "Daily Pattern",
-            "Focus %",
             "App Mix",
             "When Focus Happens",
             "Less focus",
@@ -231,7 +230,7 @@ mod tests {
 
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("D11:"), "selected day detail missing");
-        assert!(rendered.contains("focused while open"));
+        assert!(!rendered.contains("focused while open"));
     }
 
     #[test]
