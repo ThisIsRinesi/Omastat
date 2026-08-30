@@ -1,9 +1,9 @@
 [package]
 name = "omastat"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
-description = "Local app usage telemetry for Arch/Omarchy Hyprland desktops."
+description = "Local app focus tracking for Arch/Omarchy Hyprland desktops."
 repository = "https://github.com/ThisIsRinesi/Omastat"
 default-run = "omastat"
 

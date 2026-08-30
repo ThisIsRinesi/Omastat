@@ -1,8 +1,8 @@
 # Maintainer: rinesi
 pkgname=omastat
-pkgver=0.1.0
+pkgver=0.1.2
 pkgrel=1
-pkgdesc="Local focused/open application usage utility for Hyprland and Omarchy"
+pkgdesc="Local app focus tracking utility for Hyprland and Omarchy"
 arch=("x86_64")
 url="https://github.com/ThisIsRinesi/Omastat"
 license=("MIT")

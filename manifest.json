@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "local.omastat",
   "name": "Omastat",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "rinesi",
   "license": "MIT",
   "repository": "https://github.com/ThisIsRinesi/Omastat",
-  "description": "Local focused/open application usage for the Omarchy Quattro bar.",
+  "description": "Local app focus tracking for the Omarchy Quattro bar.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "packaging/omarchy/omastat/BarWidget.qml"

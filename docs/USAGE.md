@@ -34,7 +34,7 @@ analysis. Opening the widget panel still uses `summary` for the full analytics
 view.
 
 `insights --json` emits the same structured insight records with period
-metadata and focused/open/system totals, but leaves out the heavier app rows and
+metadata and focus/system totals, but leaves out the heavier app rows and
 daily history. Use `--lens day|week|month|year|life` and `--offset -N` to query
 the same report periods used by exports and the TUI.
 
