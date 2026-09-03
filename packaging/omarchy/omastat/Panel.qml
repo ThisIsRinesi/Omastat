@@ -1992,16 +1992,10 @@ Panel {
             required property var modelData
 
             width: parent.width
-            height: Style.space(38)
+            height: Style.space(28)
 
             readonly property int seconds: Number(modelData.seconds || 0)
             readonly property int pct: Number(modelData.pct || 0)
-            readonly property bool fromHistory: String(modelData.source || "") === "history"
-            readonly property string titleText: String(modelData.title || "")
-            readonly property string sourceText: fromHistory ? "history match" : "title match"
-            readonly property string detailText: titleText.length > 0 && titleText !== String(modelData.label || "")
-                                                 ? sourceText + "  " + titleText
-                                                 : sourceText
 
             Text {
               id: browserName
@@ -2028,17 +2022,6 @@ Panel {
               font.pixelSize: Style.font.bodySmall
               font.bold: true
               horizontalAlignment: Text.AlignRight
-              elide: Text.ElideRight
-            }
-
-            Text {
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.top: browserName.bottom
-              text: detailText
-              color: root.faint
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
 

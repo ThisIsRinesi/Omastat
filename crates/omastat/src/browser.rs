@@ -32,6 +32,13 @@ pub struct BrowserHistoryResolver {
     cache: BTreeMap<String, Option<String>>,
 }
 
+#[derive(Debug)]
+struct BrowserActivityAggregate {
+    focused_seconds: i64,
+    title: String,
+    source: BrowserActivitySource,
+}
+
 impl BrowserHistoryResolver {
     pub fn disabled() -> Self {
         Self::default()
@@ -68,10 +75,7 @@ pub fn browser_activity(
     history: &mut BrowserHistoryResolver,
     limit: usize,
 ) -> Vec<BrowserActivity> {
-    let mut grouped = BTreeMap::<(String, String, Option<String>), i64>::new();
-    let mut title_for_group = BTreeMap::<(String, String, Option<String>), String>::new();
-    let mut source_for_group =
-        BTreeMap::<(String, String, Option<String>), BrowserActivitySource>::new();
+    let mut grouped = BTreeMap::<(String, String, Option<String>), BrowserActivityAggregate>::new();
 
     for row in titles {
         if row.focused_seconds <= 0 || !is_browser_class(&row.app_class) {
@@ -91,40 +95,43 @@ pub fn browser_activity(
         };
         let label = inferred_site.clone().unwrap_or_else(|| title.clone());
         let key = (row.app_class.clone(), label, inferred_site);
-        *grouped.entry(key.clone()).or_default() += row.focused_seconds.max(0);
-        title_for_group.entry(key.clone()).or_insert(title);
-        source_for_group
+        grouped
             .entry(key)
             .and_modify(|current| {
+                current.focused_seconds += row.focused_seconds.max(0);
                 if source == BrowserActivitySource::History {
-                    *current = BrowserActivitySource::History;
+                    current.source = BrowserActivitySource::History;
                 }
             })
-            .or_insert(source);
+            .or_insert(BrowserActivityAggregate {
+                focused_seconds: row.focused_seconds.max(0),
+                title,
+                source,
+            });
     }
 
-    let total = grouped.values().copied().sum::<i64>().max(0);
+    let total = grouped
+        .values()
+        .map(|row| row.focused_seconds)
+        .sum::<i64>()
+        .max(0);
     if total <= 0 {
         return Vec::new();
     }
 
     let mut rows = grouped
         .into_iter()
-        .map(|((app_class, label, site), focused_seconds)| {
-            let source = source_for_group
-                .remove(&(app_class.clone(), label.clone(), site.clone()))
-                .unwrap_or(BrowserActivitySource::Title);
+        .map(|((app_class, label, site), aggregate)| {
+            let focused_seconds = aggregate.focused_seconds;
             BrowserActivity {
                 browser_label: crate::identity::display_name(&app_class),
-                title: title_for_group
-                    .remove(&(app_class.clone(), label.clone(), site.clone()))
-                    .unwrap_or_else(|| label.clone()),
+                title: aggregate.title,
                 app_class,
                 label,
                 site,
                 focused_seconds,
                 share: focused_seconds.max(0) as f64 / total as f64,
-                source,
+                source: aggregate.source,
             }
         })
         .collect::<Vec<_>>();
