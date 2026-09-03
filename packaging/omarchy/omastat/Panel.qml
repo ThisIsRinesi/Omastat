@@ -74,6 +74,7 @@ Panel {
   readonly property string observedDetailText: totalElapsed > 0 ? "Of " + root.formatDuration(totalElapsed) + " elapsed" : "Tracker-visible time"
   readonly property string pausedDetailText: Model.pausedDetail(totalIdle, totalLocked, totalSleep)
   readonly property string excludedDetailText: Model.excludedDetail(totalIdle, totalLocked, totalSleep, totalUnobserved)
+  readonly property var presenceSummary: Model.presenceSummary(totalIdle, totalLocked, totalSleep, totalUnobserved)
   readonly property var visibleApps: reportApps && reportApps.length > 0 ? reportApps : Model.groupedApps(Model.appList(rows), Model.DONUT_MAX_SLICES)
   readonly property var visibleBrowserActivity: Model.browserActivity(browserActivity, 6)
   readonly property var categoryMix: Model.categoryBreakdown(visibleApps, totalFocused)
@@ -106,9 +107,9 @@ Panel {
   readonly property var insightGroups: Model.insightGroups(insightRows)
   readonly property bool hasFocusedData: totalFocused > 0 || visibleApps.length > 0
   readonly property bool showBreakdown: totalFocused + totalObserved + totalExcluded > 0
-  readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.52, Style.space(860)) : Style.space(820)
+  readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.46, Style.space(760)) : Style.space(760)
   readonly property real targetPanelHeight: Screen.height > 0 ? Math.min(Screen.height * 0.84, Style.space(860)) : Style.space(760)
-  readonly property bool widePanel: panel.width >= Style.space(760)
+  readonly property bool widePanel: panel.width >= Style.space(700)
   readonly property bool showActivityChart: selectedLens === "month" ? monthMax > 0 : activityMax > 0
   readonly property bool showHeatmapChart: selectedLens !== "day" && heatMax > 0
   readonly property bool showHourlyChart: selectedLens === "day" && hourlyMax > 0
@@ -694,13 +695,13 @@ Panel {
           }
 
           SectionHeader {
-            text: "Tracking Quality"
-            visible: root.showBreakdown
+            text: "Outside Focus"
+            visible: root.totalPaused > 0 || root.totalUnobserved > 0
           }
 
           TimeBreakdownStrip {
             width: parent.width
-            visible: root.showBreakdown
+            visible: root.totalPaused > 0 || root.totalUnobserved > 0
             focusedSeconds: root.totalFocused
             observedSeconds: root.totalObserved
             pausedSeconds: root.totalPaused
@@ -816,7 +817,6 @@ Panel {
 
     readonly property int otherTrackedSeconds: Math.max(0, root.totalObserved - root.totalFocused - root.totalPaused)
     readonly property int elapsedSeconds: Math.max(1, root.totalObserved + root.totalUnobserved)
-    readonly property bool showExcludedBar: root.totalPaused > 0 || root.totalUnobserved > 0
 
     implicitHeight: summaryColumn.implicitHeight + Style.space(20)
     radius: Style.space(7)
@@ -951,12 +951,10 @@ Panel {
 
         SummaryStat {
           Layout.fillWidth: true
-          label: "Coverage"
-          value: root.totalUnobserved > 0 ? root.formatDuration(root.totalUnobserved) + " gap" : "Complete"
-          detail: root.totalUnobserved > 0
-            ? root.excludedDetailText
-            : (root.pausedDetailText.length > 0 ? "Paused " + root.pausedDetailText : "No excluded time")
-          accentColor: root.totalUnobserved > 0 ? Color.urgent : root.sliceColor(1, 1.0)
+          label: String(root.presenceSummary.label || "Away")
+          value: String(root.presenceSummary.value || "--")
+          detail: String(root.presenceSummary.detail || "")
+          accentColor: String(root.presenceSummary.tone || "") === "gap" ? Color.urgent : root.sliceColor(3, 1.0)
         }
       }
 
@@ -964,7 +962,7 @@ Panel {
         width: parent.width
         height: Style.space(10)
         spacing: 0
-        visible: root.showBreakdown && summaryRoot.showExcludedBar
+        visible: false
         clip: true
 
         Rectangle {
@@ -1375,7 +1373,7 @@ Panel {
     onTrackerOffSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: Style.space(128)
+    implicitHeight: Style.space(118)
     radius: Style.space(7)
     color: root.fill
     border.color: root.line
@@ -1406,7 +1404,7 @@ Panel {
           anchors.right: observedBreakdownLabel.left
           anchors.rightMargin: Style.space(10)
           anchors.verticalCenter: parent.verticalCenter
-          text: "Elapsed breakdown"
+          text: "Focused vs excluded"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1467,14 +1465,14 @@ Panel {
         columnSpacing: Style.space(8)
 
         BreakdownLegend { label: "Focused"; value: root.formatDuration(focusedSeconds) + (observedSeconds > 0 ? "  " + Model.percent(focusedShare) : ""); colorValue: root.sliceColor(0, 0.95) }
-        BreakdownLegend { label: "Paused"; value: root.formatDuration(pausedSeconds); colorValue: root.sliceColor(3, 0.95) }
-        BreakdownLegend { label: "Other Tracked"; value: root.formatDuration(breakdownRoot.otherTrackedSeconds); colorValue: root.sliceColor(1, 0.65) }
+        BreakdownLegend { label: "Away"; value: root.formatDuration(pausedSeconds); colorValue: root.sliceColor(3, 0.95) }
+        BreakdownLegend { label: "Background"; value: root.formatDuration(breakdownRoot.otherTrackedSeconds); colorValue: root.sliceColor(1, 0.65) }
         BreakdownLegend { label: "Tracker Off"; value: root.formatDuration(trackerOffSeconds); colorValue: trackerOffSeconds > 0 ? Color.urgent : root.faint }
       }
 
       Text {
         width: parent.width
-        text: root.excludedDetailText.length > 0 ? root.excludedDetailText : "No tracker gaps"
+        text: root.excludedDetailText.length > 0 ? root.excludedDetailText : "No excluded time"
         color: root.faint
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

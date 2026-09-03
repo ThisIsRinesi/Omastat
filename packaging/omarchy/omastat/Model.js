@@ -34,6 +34,50 @@ function pausedDetail(idleSeconds, lockedSeconds, sleepSeconds) {
   return parts.join("  ")
 }
 
+function presenceSummary(idleSeconds, lockedSeconds, sleepSeconds, unobservedSeconds) {
+  var idle = Number(idleSeconds || 0)
+  var locked = Number(lockedSeconds || 0)
+  var sleep = Number(sleepSeconds || 0)
+  var trackerOff = Number(unobservedSeconds || 0)
+  var excluded = Math.max(0, idle + locked + sleep + trackerOff)
+
+  if (excluded > 0) {
+    var label = "Not counted"
+    var value = fmt(excluded)
+    var detail = excludedDetail(idle, locked, sleep, trackerOff) || "Outside focused time"
+    var maxPart = Math.max(idle, locked, sleep, trackerOff)
+    if (maxPart > 0 && maxPart / excluded >= 0.6) {
+      if (locked === maxPart) {
+        label = "Locked"
+        value = fmt(locked)
+      } else if (idle === maxPart) {
+        label = "Away"
+        value = fmt(idle)
+      } else if (sleep === maxPart) {
+        label = "Sleep"
+        value = fmt(sleep)
+      } else {
+        label = "Tracker off"
+        value = fmt(trackerOff)
+      }
+      detail = "Not counted " + fmt(excluded)
+    }
+    return {
+      label: label,
+      value: value,
+      detail: detail,
+      tone: trackerOff > 0 ? "gap" : "away"
+    }
+  }
+
+  return {
+    label: "Not counted",
+    value: "None",
+    detail: "No away or tracker gaps",
+    tone: "clear"
+  }
+}
+
 function optionalNumber(object, key) {
   if (!object || object[key] === undefined || object[key] === null) return null
   var value = Number(object[key])

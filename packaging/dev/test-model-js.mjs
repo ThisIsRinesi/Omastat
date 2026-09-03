@@ -52,6 +52,26 @@ assert.equal(
   ]),
   false,
 );
+const clearPresence = context.presenceSummary(0, 0, 0, 0);
+assert.equal(clearPresence.label, "Not counted");
+assert.equal(clearPresence.value, "None");
+assert.equal(clearPresence.detail, "No away or tracker gaps");
+assert.equal(clearPresence.tone, "clear");
+const awayPresence = context.presenceSummary(1800, 600, 0, 0);
+assert.equal(awayPresence.label, "Away");
+assert.equal(awayPresence.value, "30m");
+assert.equal(awayPresence.detail, "Not counted 40m");
+assert.equal(awayPresence.tone, "away");
+const lockedPresence = context.presenceSummary(180, 47520, 0, 0);
+assert.equal(lockedPresence.label, "Locked");
+assert.equal(lockedPresence.value, "13h 12m");
+assert.equal(lockedPresence.detail, "Not counted 13h 15m");
+assert.equal(lockedPresence.tone, "away");
+const gapPresence = context.presenceSummary(0, 0, 0, 900);
+assert.equal(gapPresence.label, "Tracker off");
+assert.equal(gapPresence.value, "15m");
+assert.equal(gapPresence.detail, "Not counted 15m");
+assert.equal(gapPresence.tone, "gap");
 
 const heatmap = context.heatmapCells([
   { weekday: 2, hour: 9, focused_seconds: 1800 },
