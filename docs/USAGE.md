@@ -141,6 +141,7 @@ title_blocklist = []
 [tracking]
 reconcile_seconds = 300
 session_poll_seconds = 60
+idle_timeout_seconds = 180
 terminal_resolve_seconds = 5
 heartbeat_seconds = 30
 pause_on_session_idle = true
@@ -169,6 +170,13 @@ Set `title_capture = "all"` only if you want focused intervals to include
 cleaned window titles. `title_allowlist` and `title_blocklist` are optional
 case-insensitive substring filters applied to the app class and cleaned title;
 blocklist matches win over allowlist matches.
+
+Idle tracking uses Wayland `ext-idle-notify-v1` when the compositor exposes it.
+`idle_timeout_seconds` controls how long the seat must have no keyboard, mouse,
+or touch input before Omastat records idle time. When the Wayland monitor is not
+available, Omastat falls back to Omarchy/logind session status polling; logind's
+idle-since timestamp is used when available so idle intervals can still be
+backdated to the real session transition.
 
 When title capture is enabled, browser windows can be summarized by page or
 inferred site in the widget panel. Set `browser_history = true` to let Omastat

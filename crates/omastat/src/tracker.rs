@@ -62,6 +62,7 @@ impl FocusedInterval {
 
 struct SessionPauseInterval {
     kind: SessionIntervalKind,
+    source: Option<String>,
     interval_id: i64,
 }
 
@@ -121,6 +122,10 @@ impl Tracker {
         let mut sleep_monitor_retry = time::interval(Duration::from_secs(60));
         sleep_monitor_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
         sleep_monitor_retry.tick().await;
+        let mut idle_monitor = self.connect_idle_monitor().await;
+        let mut idle_monitor_retry = time::interval(Duration::from_secs(60));
+        idle_monitor_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        idle_monitor_retry.tick().await;
 
         loop {
             let mut stream = match EventStream::connect().await {
@@ -188,8 +193,24 @@ impl Tracker {
                             }
                         }
                     }
+                    idle_event = next_idle_event(&mut idle_monitor), if self.config.tracking.pause_on_session_idle => {
+                        match idle_event {
+                            Ok(Some(event)) => self.apply_idle_event(event).await?,
+                            Ok(None) => {
+                                warn!("Wayland idle monitor disconnected");
+                                idle_monitor = None;
+                            }
+                            Err(error) => {
+                                warn!("Wayland idle monitor failed: {error:#}");
+                                idle_monitor = None;
+                            }
+                        }
+                    }
                     _ = sleep_monitor_retry.tick(), if sleep_monitor.is_none() => {
                         sleep_monitor = self.connect_sleep_monitor().await;
+                    }
+                    _ = idle_monitor_retry.tick(), if idle_monitor.is_none() && self.config.tracking.pause_on_session_idle => {
+                        idle_monitor = self.connect_idle_monitor().await;
                     }
                     _ = &mut ctrl_c => {
                         self.shutdown()?;
@@ -451,11 +472,12 @@ impl Tracker {
         &mut self,
         kind: Option<SessionIntervalKind>,
         source: Option<&str>,
+        transition_at: i64,
         now: i64,
     ) -> Result<()> {
         let current = self.state.session_pause.as_ref().map(|pause| pause.kind);
         if current == kind {
-            return self.set_focus_paused_at(kind.is_some(), now);
+            return Ok(());
         }
 
         if let Some(previous) = self.state.session_pause.take() {
@@ -464,11 +486,17 @@ impl Tracker {
         }
 
         if let Some(kind) = kind {
-            let interval_id = self.storage.start_session_interval(kind, source, now)?;
-            self.state.session_pause = Some(SessionPauseInterval { kind, interval_id });
+            let interval_id = self
+                .storage
+                .start_session_interval(kind, source, transition_at)?;
+            self.state.session_pause = Some(SessionPauseInterval {
+                kind,
+                source: source.map(str::to_string),
+                interval_id,
+            });
         }
 
-        self.set_focus_paused_at(kind.is_some(), now)
+        self.set_focus_paused_at(kind.is_some(), transition_at)
     }
 
     async fn refresh_session_status(&mut self) -> Result<()> {
@@ -477,8 +505,13 @@ impl Tracker {
         }
         match session::status().await {
             Ok(status) => {
+                if self.wayland_idle_pause_is_authoritative(&status) {
+                    return Ok(());
+                }
                 let pause_kind = self.session_pause_kind(&status);
-                self.set_session_pause(pause_kind, Some(status.source), clock::unix_now())?;
+                let now = clock::unix_now();
+                let transition_at = self.session_pause_transition_at(pause_kind, &status, now);
+                self.set_session_pause(pause_kind, Some(status.source), transition_at, now)?;
             }
             Err(error) => {
                 debug!("session status unavailable: {error:#}");
@@ -495,6 +528,31 @@ impl Tracker {
             return Some(SessionIntervalKind::Idle);
         }
         None
+    }
+
+    fn wayland_idle_pause_is_authoritative(&self, status: &session::SessionStatus) -> bool {
+        self.state.session_pause.as_ref().is_some_and(|pause| {
+            pause.kind == SessionIntervalKind::Idle
+                && pause.source.as_deref() == Some("wayland-idle")
+                && !status.locked
+                && !status.audio_playing
+        })
+    }
+
+    fn session_pause_transition_at(
+        &self,
+        pause_kind: Option<SessionIntervalKind>,
+        status: &session::SessionStatus,
+        now: i64,
+    ) -> i64 {
+        if pause_kind == Some(SessionIntervalKind::Idle)
+            && let Some(idle_since) = status.idle_since_unix
+            && idle_since > 0
+            && idle_since <= now
+        {
+            return idle_since;
+        }
+        now
     }
 
     async fn apply_sleep_event(&mut self, event: session::SleepEvent) -> Result<()> {
@@ -519,6 +577,63 @@ impl Tracker {
                 None
             }
         }
+    }
+
+    async fn connect_idle_monitor(&self) -> Option<session::IdleEventMonitor> {
+        match session::IdleEventMonitor::connect(self.config.tracking.idle_timeout_seconds).await {
+            Ok(monitor) => {
+                debug!("Wayland idle monitor connected");
+                Some(monitor)
+            }
+            Err(error) => {
+                debug!("Wayland idle monitor unavailable: {error:#}");
+                None
+            }
+        }
+    }
+
+    async fn apply_idle_event(&mut self, event: session::IdleEvent) -> Result<()> {
+        if self.state.sleep_pause.is_some() {
+            return Ok(());
+        }
+        match event {
+            session::IdleEvent::Idled { since_unix } => {
+                let now = clock::unix_now();
+                match session::status().await {
+                    Ok(status) if status.locked && self.config.tracking.pause_on_session_locked => {
+                        self.set_session_pause(
+                            Some(SessionIntervalKind::Locked),
+                            Some(status.source),
+                            now,
+                            now,
+                        )?;
+                    }
+                    Ok(status) if status.audio_playing => {
+                        debug!("Wayland idle event ignored while audio is playing");
+                    }
+                    Ok(_) | Err(_) => {
+                        self.set_session_pause(
+                            Some(SessionIntervalKind::Idle),
+                            Some("wayland-idle"),
+                            since_unix.min(now),
+                            now,
+                        )?;
+                    }
+                }
+            }
+            session::IdleEvent::Resumed { at_unix } => {
+                if self
+                    .state
+                    .session_pause
+                    .as_ref()
+                    .is_some_and(|pause| pause.kind == SessionIntervalKind::Idle)
+                {
+                    self.set_session_pause(None, None, at_unix, at_unix)?;
+                }
+                self.refresh_session_status().await?;
+            }
+        }
+        Ok(())
     }
 
     fn start_sleep_at(&mut self, now: i64) -> Result<()> {
@@ -739,6 +854,15 @@ async fn recv_terminate_signal(signal: &mut Option<TerminateSignal>) {
 async fn next_sleep_event(
     monitor: &mut Option<session::SleepEventMonitor>,
 ) -> Result<Option<session::SleepEvent>> {
+    match monitor {
+        Some(monitor) => monitor.next_event().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn next_idle_event(
+    monitor: &mut Option<session::IdleEventMonitor>,
+) -> Result<Option<session::IdleEvent>> {
     match monitor {
         Some(monitor) => monitor.next_event().await,
         None => std::future::pending().await,
@@ -1018,7 +1142,10 @@ mod tests {
         let mut tracker = Tracker::new(storage, config);
 
         tracker
-            .set_session_pause(Some(SessionIntervalKind::Idle), Some("test"), 100)
+            .set_session_pause(Some(SessionIntervalKind::Idle), Some("test"), 90, 100)
+            .unwrap();
+        tracker
+            .set_session_pause(Some(SessionIntervalKind::Idle), Some("test"), 150, 150)
             .unwrap();
         assert_eq!(
             tracker
@@ -1031,10 +1158,37 @@ mod tests {
             vec![SessionIntervalKind::Idle]
         );
 
-        tracker.set_session_pause(None, None, 220).unwrap();
+        tracker.set_session_pause(None, None, 220, 220).unwrap();
         let totals = tracker.storage.session_totals_between(0, 300).unwrap();
-        assert_eq!(totals.idle_seconds, 120);
+        assert_eq!(totals.idle_seconds, 130);
         assert_eq!(totals.locked_seconds, 0);
+    }
+
+    #[test]
+    fn wayland_idle_pause_survives_non_idle_poll_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+
+        tracker
+            .set_session_pause(
+                Some(SessionIntervalKind::Idle),
+                Some("wayland-idle"),
+                100,
+                180,
+            )
+            .unwrap();
+
+        let status = SessionStatus {
+            idle: false,
+            idle_since_unix: None,
+            locked: false,
+            stay_awake: false,
+            audio_playing: false,
+            source: "loginctl",
+        };
+        assert!(tracker.wayland_idle_pause_is_authoritative(&status));
     }
 
     #[test]
@@ -1089,6 +1243,7 @@ mod tests {
         let tracker = Tracker::new(storage, config);
         let mut status = SessionStatus {
             idle: true,
+            idle_since_unix: None,
             locked: false,
             stay_awake: false,
             audio_playing: true,

@@ -40,6 +40,8 @@ pub struct TrackingConfig {
     pub reconcile_seconds: u64,
     #[serde(default = "default_session_poll_seconds")]
     pub session_poll_seconds: u64,
+    #[serde(default = "default_idle_timeout_seconds")]
+    pub idle_timeout_seconds: u64,
     #[serde(default = "default_terminal_resolve_seconds")]
     pub terminal_resolve_seconds: u64,
     #[serde(default = "default_heartbeat_seconds")]
@@ -181,6 +183,12 @@ impl Config {
             "tracking.session_poll_seconds",
             self.tracking.session_poll_seconds,
             15,
+        );
+        warn_below_runtime_minimum(
+            &mut warnings,
+            "tracking.idle_timeout_seconds",
+            self.tracking.idle_timeout_seconds,
+            30,
         );
         warn_below_runtime_minimum(
             &mut warnings,
@@ -377,6 +385,7 @@ impl Default for TrackingConfig {
         Self {
             reconcile_seconds: default_reconcile_seconds(),
             session_poll_seconds: default_session_poll_seconds(),
+            idle_timeout_seconds: default_idle_timeout_seconds(),
             terminal_resolve_seconds: default_terminal_resolve_seconds(),
             heartbeat_seconds: default_heartbeat_seconds(),
             pause_on_session_idle: default_pause_on_session_idle(),
@@ -391,6 +400,10 @@ fn default_reconcile_seconds() -> u64 {
 
 fn default_session_poll_seconds() -> u64 {
     60
+}
+
+fn default_idle_timeout_seconds() -> u64 {
+    180
 }
 
 fn default_terminal_resolve_seconds() -> u64 {
