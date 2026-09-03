@@ -111,6 +111,54 @@ function groupedApps(apps, maxSlices) {
   return head
 }
 
+function categoryTitle(category) {
+  var value = String(category || "neutral").replace(/[-_]+/g, " ")
+  if (value === "mixed") return "Other"
+  if (value === "neutral") return "Unsorted"
+  var parts = value.split(" ")
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i].length > 0) parts[i] = parts[i].charAt(0).toUpperCase() + parts[i].slice(1)
+  }
+  return parts.join(" ")
+}
+
+function categoryBreakdown(apps, totalSeconds) {
+  var buckets = {}
+  var order = []
+  var total = Number(totalSeconds || 0)
+  var list = apps || []
+  for (var i = 0; i < list.length; i++) {
+    var seconds = Number(list[i].seconds || 0)
+    if (seconds <= 0) continue
+    var key = String(list[i].category || "neutral")
+    if (!buckets[key]) {
+      buckets[key] = {
+        key: key,
+        label: categoryTitle(key),
+        seconds: 0,
+        pct: 0,
+        apps: 0,
+        topApp: ""
+      }
+      order.push(key)
+    }
+    buckets[key].seconds += seconds
+    buckets[key].apps += 1
+    if (!buckets[key].topApp) buckets[key].topApp = String(list[i].app || "")
+  }
+
+  var out = []
+  for (var j = 0; j < order.length; j++) {
+    var bucket = buckets[order[j]]
+    bucket.pct = total > 0 ? Math.round(100 * bucket.seconds / total) : 0
+    out.push(bucket)
+  }
+  out.sort(function(left, right) {
+    return Number(right.seconds || 0) - Number(left.seconds || 0)
+  })
+  return out
+}
+
 function previousDateKey(key) {
   var parts = String(key || "").split("-")
   if (parts.length !== 3) return ""
@@ -129,6 +177,14 @@ function parseDateKey(key) {
   if (parts.length !== 3) return null
   var date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
   return isNaN(date.getTime()) ? null : date
+}
+
+function dayOffsetFromToday(key, todayKey) {
+  var selected = parseDateKey(key)
+  var today = parseDateKey(todayKey)
+  if (!selected || !today) return null
+  var msPerDay = 24 * 60 * 60 * 1000
+  return Math.round((selected.getTime() - today.getTime()) / msPerDay)
 }
 
 function totalForDay(daily, key) {
@@ -255,6 +311,19 @@ function trendDefaultText(days) {
   return parts.join("  ")
 }
 
+function trendAverageText(days) {
+  var list = days || []
+  if (list.length <= 0) return ""
+  var total = 0
+  var active = 0
+  for (var i = 0; i < list.length; i++) {
+    var seconds = Number(list[i].seconds || 0)
+    total += seconds
+    if (seconds > 0) active += 1
+  }
+  return "avg " + fmt(Math.round(total / list.length)) + "  " + active + "/" + list.length + " active"
+}
+
 function cumulativeCells(cells) {
   var list = cells || []
   var total = 0
@@ -338,6 +407,78 @@ function consistencyStats(daily) {
     bestDayLabel: best && best.seconds > 0 ? best.label : "--",
     bestDaySeconds: best ? best.seconds : 0
   }
+}
+
+function yearRetroFacts(daily, totalSeconds, periodLabel) {
+  var list = daily || []
+  var stats = consistencyStats(list)
+  var months = []
+  for (var m = 0; m < 12; m++) months.push({ index: m, label: MONTH_LABELS[m], seconds: 0, activeDays: 0 })
+
+  var weekdayTotals = []
+  for (var w = 0; w < 7; w++) weekdayTotals.push({ weekday: w, label: WEEKDAY_LABELS[w], seconds: 0, activeDays: 0 })
+
+  for (var i = 0; i < list.length; i++) {
+    var date = parseDateKey(list[i].date)
+    var focused = dayFocusedSeconds(list[i])
+    if (!date) continue
+    var month = months[date.getMonth()]
+    month.seconds += focused
+    if (focused > 0) month.activeDays += 1
+    var weekday = weekdayTotals[(date.getDay() + 6) % 7]
+    weekday.seconds += focused
+    if (focused > 0) weekday.activeDays += 1
+  }
+
+  function bestBySeconds(items) {
+    var best = null
+    for (var j = 0; j < items.length; j++) {
+      if (!best || Number(items[j].seconds || 0) > Number(best.seconds || 0)) best = items[j]
+    }
+    return best && Number(best.seconds || 0) > 0 ? best : null
+  }
+
+  var bestMonth = bestBySeconds(months)
+  var bestWeekday = bestBySeconds(weekdayTotals)
+  var activeShare = stats.totalDays > 0 ? stats.activeDays / stats.totalDays : 0
+  var facts = []
+  facts.push({
+    label: "Active days",
+    value: stats.activeDays + " / " + stats.totalDays,
+    detail: activeShare > 0 ? percent(activeShare) + " of loaded " + String(periodLabel || "year") : "No focused days yet",
+    tone: activeShare >= 0.6 ? "positive" : "info"
+  })
+  facts.push({
+    label: "Longest streak",
+    value: stats.longestStreak + "d",
+    detail: "Consecutive focused days",
+    tone: stats.longestStreak >= 7 ? "positive" : "info"
+  })
+  facts.push({
+    label: "Top month",
+    value: bestMonth ? bestMonth.label : "--",
+    detail: bestMonth ? fmt(bestMonth.seconds) + " across " + bestMonth.activeDays + " active days" : "No monthly peak yet",
+    tone: "info"
+  })
+  facts.push({
+    label: "Weekday rhythm",
+    value: bestWeekday ? bestWeekday.label : "--",
+    detail: bestWeekday ? fmt(bestWeekday.seconds) + " total focus" : "No weekday rhythm yet",
+    tone: "info"
+  })
+  facts.push({
+    label: "Peak day",
+    value: stats.bestDayLabel,
+    detail: stats.bestDaySeconds > 0 ? fmt(stats.bestDaySeconds) + " focused" : "No peak day yet",
+    tone: "positive"
+  })
+  facts.push({
+    label: "Daily pace",
+    value: fmt(stats.dailyAverageSeconds),
+    detail: totalSeconds > 0 ? fmt(totalSeconds) + " total in " + String(periodLabel || "this year") : "No yearly focus yet",
+    tone: "neutral"
+  })
+  return facts
 }
 
 function monthCells(daily, lens) {

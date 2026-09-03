@@ -357,10 +357,11 @@ BarWidget {
 
     var top = report.apps.length > 0 ? report.apps[0] : report.rows[0]
     displayText = root.glyph + " " + formatDuration(report.totalFocused)
-    tooltip = String(report.periodLabel || "Today") + ": " + formatDuration(report.totalFocused) + " focused"
+    tooltip = String(report.periodLabel || "Today") + "\nFocused: " + formatDuration(report.totalFocused)
       + (report.totalObserved > 0 ? "\nObserved: " + formatDuration(report.totalObserved) : "")
       + "\nTop: " + topAppLabel(top)
       + " (" + formatDuration(topAppSeconds(top)) + ")"
+      + (report.totalUnobserved > 0 ? "\nTracker off: " + formatDuration(report.totalUnobserved) : "")
     if (report.widgetInsight && report.widgetInsight.text)
       tooltip += "\nInsight: " + String(report.widgetInsight.text)
     statusText = report.widgetInsight && report.widgetInsight.text

@@ -30,6 +30,21 @@ assert.equal(grouped[2].app, "Other");
 assert.equal(grouped[2].seconds, 50);
 assert.equal(grouped[2].pct, 36);
 
+const categories = context.categoryBreakdown(
+  [
+    { app: "Code", category: "productive", seconds: 3600 },
+    { app: "Browser", category: "research", seconds: 1800 },
+    { app: "Chat", category: "productive", seconds: 900 },
+    { app: "Other", category: "mixed", seconds: 300 },
+  ],
+  6600,
+);
+assert.equal(categories.length, 3);
+assert.equal(categories[0].label, "Productive");
+assert.equal(categories[0].seconds, 4500);
+assert.equal(categories[0].pct, 68);
+assert.equal(categories[2].label, "Other");
+
 const heatmap = context.heatmapCells([
   { weekday: 2, hour: 9, focused_seconds: 1800 },
   { weekday: 2, hour: 10, seconds: 900 },
@@ -179,6 +194,7 @@ const trend = context.trendDays(
 );
 assert.equal(trend[0].observed_seconds, 5400);
 assert.equal(trend[0].densityText, "67%");
+assert.equal(context.trendAverageText(trend), "avg 1h  1/1 active");
 
 const yearBuckets = context.activityCells(
   [
@@ -201,3 +217,25 @@ const lifeBuckets = context.activityCells(
   "life",
 );
 assert.equal(lifeBuckets.length, 13);
+
+assert.equal(context.dayOffsetFromToday("2026-08-12", "2026-08-15"), -3);
+assert.equal(context.dayOffsetFromToday("2026-08-15", "2026-08-15"), 0);
+assert.equal(context.dayOffsetFromToday("bad", "2026-08-15"), null);
+
+const retro = context.yearRetroFacts(
+  [
+    { date: "2026-01-05", label: "Jan 5", focused_seconds: 3600 },
+    { date: "2026-01-06", label: "Jan 6", focused_seconds: 7200 },
+    { date: "2026-02-02", label: "Feb 2", focused_seconds: 1800 },
+  ],
+  12600,
+  "2026",
+);
+assert.equal(retro.length, 6);
+assert.deepEqual(
+  Array.from(retro, (item) => item.label),
+  ["Active days", "Longest streak", "Top month", "Weekday rhythm", "Peak day", "Daily pace"],
+);
+assert.equal(retro[0].value, "3 / 3");
+assert.equal(retro[2].value, "Jan");
+assert.equal(retro[4].value, "Jan 6");
