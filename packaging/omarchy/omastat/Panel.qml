@@ -106,9 +106,9 @@ Panel {
   readonly property var insightGroups: Model.insightGroups(insightRows)
   readonly property bool hasFocusedData: totalFocused > 0 || visibleApps.length > 0
   readonly property bool showBreakdown: totalFocused + totalObserved + totalExcluded > 0
-  readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.75, Style.space(1180)) : Style.space(1080)
-  readonly property real targetPanelHeight: Screen.height > 0 ? Math.min(Screen.height * 0.88, Style.space(980)) : Style.space(820)
-  readonly property bool widePanel: panel.width >= Style.space(900)
+  readonly property real targetPanelWidth: Screen.width > 0 ? Math.min(Screen.width * 0.52, Style.space(860)) : Style.space(820)
+  readonly property real targetPanelHeight: Screen.height > 0 ? Math.min(Screen.height * 0.84, Style.space(860)) : Style.space(760)
+  readonly property bool widePanel: panel.width >= Style.space(760)
   readonly property bool showActivityChart: selectedLens === "month" ? monthMax > 0 : activityMax > 0
   readonly property bool showHeatmapChart: selectedLens !== "day" && heatMax > 0
   readonly property bool showHourlyChart: selectedLens === "day" && hourlyMax > 0
@@ -510,7 +510,7 @@ Panel {
 
           CategoryComposition {
             width: parent.width
-            visible: root.categoryMix.length > 1
+            visible: Model.hasMeaningfulCategories(root.categoryMix)
             categories: root.categoryMix
           }
 
@@ -590,7 +590,7 @@ Panel {
           }
 
           SectionHeader {
-            text: "Focus Mix"
+            text: "Most Used"
           }
 
           Rectangle {
@@ -816,11 +816,12 @@ Panel {
 
     readonly property int otherTrackedSeconds: Math.max(0, root.totalObserved - root.totalFocused - root.totalPaused)
     readonly property int elapsedSeconds: Math.max(1, root.totalObserved + root.totalUnobserved)
+    readonly property bool showExcludedBar: root.totalPaused > 0 || root.totalUnobserved > 0
 
-    implicitHeight: summaryColumn.implicitHeight + Style.space(24)
+    implicitHeight: summaryColumn.implicitHeight + Style.space(20)
     radius: Style.space(7)
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.075)
-    border.color: root.sliceColor(0, root.refreshRunning ? 0.56 : 0.28)
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.058)
+    border.color: root.sliceColor(0, root.refreshRunning ? 0.48 : 0.22)
     border.width: 1
     clip: true
 
@@ -840,7 +841,7 @@ Panel {
       anchors.right: parent.right
       anchors.rightMargin: Style.space(14)
       anchors.verticalCenter: parent.verticalCenter
-      spacing: Style.space(10)
+      spacing: Style.space(9)
 
       Item {
         width: parent.width
@@ -918,7 +919,7 @@ Panel {
 
       GridLayout {
         width: parent.width
-        columns: root.widePanel ? 4 : root.metricColumns
+        columns: root.narrowPanel ? 1 : 2
         rowSpacing: Style.space(8)
         columnSpacing: Style.space(12)
 
@@ -963,7 +964,7 @@ Panel {
         width: parent.width
         height: Style.space(10)
         spacing: 0
-        visible: root.showBreakdown
+        visible: root.showBreakdown && summaryRoot.showExcludedBar
         clip: true
 
         Rectangle {

@@ -159,6 +159,16 @@ function categoryBreakdown(apps, totalSeconds) {
   return out
 }
 
+function hasMeaningfulCategories(categories) {
+  var list = categories || []
+  for (var i = 0; i < list.length; i++) {
+    var key = String(list[i].key || "")
+    var seconds = Number(list[i].seconds || 0)
+    if (seconds > 0 && key !== "" && key !== "neutral" && key !== "mixed") return true
+  }
+  return false
+}
+
 function previousDateKey(key) {
   var parts = String(key || "").split("-")
   if (parts.length !== 3) return ""

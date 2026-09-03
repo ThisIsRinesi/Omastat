@@ -44,6 +44,14 @@ assert.equal(categories[0].label, "Productive");
 assert.equal(categories[0].seconds, 4500);
 assert.equal(categories[0].pct, 68);
 assert.equal(categories[2].label, "Other");
+assert.equal(context.hasMeaningfulCategories(categories), true);
+assert.equal(
+  context.hasMeaningfulCategories([
+    { key: "neutral", seconds: 3600 },
+    { key: "mixed", seconds: 300 },
+  ]),
+  false,
+);
 
 const heatmap = context.heatmapCells([
   { weekday: 2, hour: 9, focused_seconds: 1800 },
