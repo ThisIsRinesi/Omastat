@@ -72,6 +72,13 @@ pub struct TitleTotals {
     pub focused_seconds: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserDomainTotals {
+    pub app_class: String,
+    pub domain: String,
+    pub focused_seconds: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TimelineInterval {
     pub kind: IntervalKind,
@@ -225,10 +232,22 @@ pub struct RawSystemInterval {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RawBrowserDomainInterval {
+    pub source: String,
+    pub app_class: String,
+    pub domain: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub local_start: String,
+    pub local_end: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RawExportRows {
     pub intervals: Vec<RawInterval>,
     pub session_intervals: Vec<RawSessionInterval>,
     pub system_intervals: Vec<RawSystemInterval>,
+    pub browser_domain_intervals: Vec<RawBrowserDomainInterval>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,11 +258,13 @@ pub struct PurgeReport {
     pub intervals_deleted: i64,
     pub session_intervals_deleted: i64,
     pub system_intervals_deleted: i64,
+    pub browser_domain_intervals_deleted: i64,
     pub daemon_events_deleted: i64,
     pub daemon_runs_deleted: i64,
     pub intervals_trimmed: i64,
     pub session_intervals_trimmed: i64,
     pub system_intervals_trimmed: i64,
+    pub browser_domain_intervals_trimmed: i64,
     pub vacuumed: bool,
 }
 
@@ -350,6 +371,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         description: "enforce one active interval per tracked state",
         up: migrate_0008_add_active_interval_invariants,
+    },
+    Migration {
+        version: 9,
+        description: "record browser domain intervals",
+        up: migrate_0009_create_browser_domain_intervals,
     },
 ];
 
@@ -595,6 +621,69 @@ impl Storage {
             params![ended_at, id],
         )?;
         ensure_row_was_closeable(&self.conn, "unobserved_intervals", id, updated)?;
+        Ok(())
+    }
+
+    pub fn record_browser_domain(
+        &mut self,
+        source: &str,
+        app_class: &str,
+        domain: &str,
+        started_at: i64,
+    ) -> Result<()> {
+        let source = source.trim();
+        let app_class = app_class.trim();
+        let domain = domain.trim();
+        if source.is_empty() || app_class.is_empty() || domain.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.transaction()?;
+        let current = tx
+            .query_row(
+                "
+                SELECT id, domain, started_at
+                FROM browser_domain_intervals
+                WHERE source = ?1
+                  AND ended_at IS NULL
+                ORDER BY started_at DESC, id DESC
+                LIMIT 1
+                ",
+                params![source],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some((id, current_domain, current_started_at)) = current {
+            if current_domain == domain {
+                tx.commit()?;
+                return Ok(());
+            }
+            tx.execute(
+                "
+                UPDATE browser_domain_intervals
+                SET ended_at = MAX(started_at, ?1)
+                WHERE id = ?2
+                  AND ended_at IS NULL
+                ",
+                params![started_at.max(current_started_at), id],
+            )?;
+        }
+
+        tx.execute(
+            "
+            INSERT INTO browser_domain_intervals (source, app_class, domain, started_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ",
+            params![source, app_class, domain, started_at],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1271,6 +1360,67 @@ impl Storage {
                 Ok(TitleTotals {
                     app_class: row.get(0)?,
                     title: row.get(1)?,
+                    focused_seconds: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn browser_domain_totals_between(
+        &self,
+        start: i64,
+        end: i64,
+        limit_per_app: usize,
+    ) -> Result<Vec<BrowserDomainTotals>> {
+        let mut stmt = self.conn.prepare(
+            "
+            WITH domain_totals AS (
+                SELECT
+                    focused.app_class,
+                    browser.domain,
+                    SUM(
+                        MAX(
+                            0,
+                            MIN(COALESCE(focused.ended_at, ?2), COALESCE(browser.ended_at, ?2), ?2)
+                              - MAX(focused.started_at, browser.started_at, ?1)
+                        )
+                    ) AS focused_seconds
+                FROM intervals AS focused
+                JOIN browser_domain_intervals AS browser
+                  ON browser.app_class = focused.app_class
+                 AND browser.started_at < ?2
+                 AND COALESCE(browser.ended_at, ?2) > ?1
+                 AND focused.started_at < COALESCE(browser.ended_at, ?2)
+                 AND COALESCE(focused.ended_at, ?2) > browser.started_at
+                WHERE focused.kind = 'focused'
+                  AND focused.started_at < ?2
+                  AND COALESCE(focused.ended_at, ?2) > ?1
+                GROUP BY focused.app_class, browser.domain
+            ),
+            ranked AS (
+                SELECT
+                    app_class,
+                    domain,
+                    focused_seconds,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY app_class
+                        ORDER BY focused_seconds DESC, domain ASC
+                    ) AS domain_rank
+                FROM domain_totals
+                WHERE focused_seconds > 0
+            )
+            SELECT app_class, domain, focused_seconds
+            FROM ranked
+            WHERE domain_rank <= ?3
+            ORDER BY app_class ASC, focused_seconds DESC, domain ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end, limit_per_app.max(1) as i64], |row| {
+                Ok(BrowserDomainTotals {
+                    app_class: row.get(0)?,
+                    domain: row.get(1)?,
                     focused_seconds: row.get(2)?,
                 })
             })?
@@ -2083,6 +2233,7 @@ fn validate_required_schema(conn: &Connection) -> rusqlite::Result<()> {
         "SELECT id, started_at, last_heartbeat_at, stopped_at, stop_kind FROM daemon_runs LIMIT 0",
         "SELECT id, run_id, kind, occurred_at, detail FROM daemon_events LIMIT 0",
         "SELECT id, kind, source, started_at, ended_at FROM unobserved_intervals LIMIT 0",
+        "SELECT id, source, app_class, domain, started_at, ended_at FROM browser_domain_intervals LIMIT 0",
     ] {
         conn.prepare(statement)?;
     }
@@ -2092,6 +2243,7 @@ fn validate_required_schema(conn: &Connection) -> rusqlite::Result<()> {
         "idx_session_intervals_one_active_kind",
         "idx_unobserved_intervals_one_active_kind",
         "idx_daemon_runs_one_active",
+        "idx_browser_domain_intervals_one_active_source",
     ] {
         if !index_exists(conn, index)? {
             return Err(rusqlite::Error::InvalidParameterName(format!(
@@ -2367,6 +2519,30 @@ fn migrate_0008_add_active_interval_invariants(tx: &Transaction<'_>) -> rusqlite
     )
 }
 
+fn migrate_0009_create_browser_domain_intervals(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS browser_domain_intervals (
+            id INTEGER PRIMARY KEY,
+            source TEXT NOT NULL,
+            app_class TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            CHECK (ended_at IS NULL OR ended_at >= started_at)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_domain_intervals_one_active_source
+            ON browser_domain_intervals(source)
+            WHERE ended_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_browser_domain_intervals_app_time
+            ON browser_domain_intervals(app_class, started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_browser_domain_intervals_source_time
+            ON browser_domain_intervals(source, started_at, ended_at);
+        ",
+    )
+}
+
 fn add_column_if_missing(
     tx: &Transaction<'_>,
     table: &str,
@@ -2583,6 +2759,38 @@ impl Storage {
                 Ok(RawSystemInterval {
                     kind,
                     source: row.get(1)?,
+                    started_at,
+                    ended_at,
+                    local_start: local_timestamp(started_at),
+                    local_end: ended_at.map(local_timestamp),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn raw_browser_domain_intervals_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<RawBrowserDomainInterval>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT source, app_class, domain, started_at, ended_at
+            FROM browser_domain_intervals
+            WHERE started_at < ?2
+              AND COALESCE(ended_at, ?2) > ?1
+            ORDER BY started_at ASC, COALESCE(ended_at, ?2) ASC, id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |row| {
+                let started_at = row.get::<_, i64>(3)?;
+                let ended_at = row.get::<_, Option<i64>>(4)?;
+                Ok(RawBrowserDomainInterval {
+                    source: row.get(0)?,
+                    app_class: row.get(1)?,
+                    domain: row.get(2)?,
                     started_at,
                     ended_at,
                     local_start: local_timestamp(started_at),
@@ -2810,6 +3018,7 @@ impl Storage {
             intervals: self.raw_intervals_between(start, end)?,
             session_intervals: self.raw_session_intervals_between(start, end)?,
             system_intervals: self.raw_system_intervals_between(start, end)?,
+            browser_domain_intervals: self.raw_browser_domain_intervals_between(start, end)?,
         })
     }
 
@@ -2827,11 +3036,13 @@ impl Storage {
             intervals_deleted: 0,
             session_intervals_deleted: 0,
             system_intervals_deleted: 0,
+            browser_domain_intervals_deleted: 0,
             daemon_events_deleted: 0,
             daemon_runs_deleted: 0,
             intervals_trimmed: 0,
             session_intervals_trimmed: 0,
             system_intervals_trimmed: 0,
+            browser_domain_intervals_trimmed: 0,
             vacuumed: false,
         };
 
@@ -2854,6 +3065,12 @@ impl Storage {
                 cutoff_ts,
                 "ended_at IS NOT NULL AND ended_at <= ?1",
             )?;
+            report.browser_domain_intervals_deleted = purge_delete_count(
+                &self.conn,
+                "browser_domain_intervals",
+                cutoff_ts,
+                "ended_at IS NOT NULL AND ended_at <= ?1",
+            )?;
             report.daemon_events_deleted =
                 purge_delete_count(&self.conn, "daemon_events", cutoff_ts, "occurred_at < ?1")?;
             report.daemon_runs_deleted = purge_delete_count(
@@ -2867,6 +3084,8 @@ impl Storage {
                 purge_trim_count(&self.conn, "session_intervals", cutoff_ts)?;
             report.system_intervals_trimmed =
                 purge_trim_count(&self.conn, "unobserved_intervals", cutoff_ts)?;
+            report.browser_domain_intervals_trimmed =
+                purge_trim_count(&self.conn, "browser_domain_intervals", cutoff_ts)?;
             return Ok(report);
         }
 
@@ -2886,6 +3105,10 @@ impl Storage {
                         "DELETE FROM unobserved_intervals WHERE ended_at IS NOT NULL AND ended_at <= ?1",
                         params![cutoff],
                     )? as i64;
+                    report.browser_domain_intervals_deleted = tx.execute(
+                        "DELETE FROM browser_domain_intervals WHERE ended_at IS NOT NULL AND ended_at <= ?1",
+                        params![cutoff],
+                    )? as i64;
                     report.daemon_events_deleted = tx.execute(
                         "DELETE FROM daemon_events WHERE occurred_at < ?1",
                         params![cutoff],
@@ -2899,6 +3122,8 @@ impl Storage {
                         trim_table_start(&tx, "session_intervals", cutoff)?;
                     report.system_intervals_trimmed =
                         trim_table_start(&tx, "unobserved_intervals", cutoff)?;
+                    report.browser_domain_intervals_trimmed =
+                        trim_table_start(&tx, "browser_domain_intervals", cutoff)?;
                 }
                 None => {
                     report.intervals_deleted = tx.execute("DELETE FROM intervals", [])? as i64;
@@ -2906,6 +3131,8 @@ impl Storage {
                         tx.execute("DELETE FROM session_intervals", [])? as i64;
                     report.system_intervals_deleted =
                         tx.execute("DELETE FROM unobserved_intervals", [])? as i64;
+                    report.browser_domain_intervals_deleted =
+                        tx.execute("DELETE FROM browser_domain_intervals", [])? as i64;
                     report.daemon_events_deleted =
                         tx.execute("DELETE FROM daemon_events", [])? as i64;
                     report.daemon_runs_deleted = tx.execute("DELETE FROM daemon_runs", [])? as i64;
@@ -3283,17 +3510,24 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
         assert!(interval_columns.iter().any(|column| column == "monitor"));
+        let browser_domain_columns = table_columns(&storage.conn, "browser_domain_intervals");
+        assert!(
+            browser_domain_columns
+                .iter()
+                .any(|column| column == "domain")
+        );
         for index in [
             "idx_intervals_one_active_focused",
             "idx_intervals_one_active_open_per_app",
             "idx_session_intervals_one_active_kind",
             "idx_unobserved_intervals_one_active_kind",
             "idx_daemon_runs_one_active",
+            "idx_browser_domain_intervals_one_active_source",
         ] {
             assert!(index_exists(&storage.conn, index).unwrap(), "{index}");
         }
@@ -3364,6 +3598,76 @@ mod tests {
     }
 
     #[test]
+    fn records_browser_domain_changes_by_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        storage
+            .record_browser_domain("omastat-zen", "zen", "github.com", 100)
+            .unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "github.com", 110)
+            .unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "chatgpt.com", 150)
+            .unwrap();
+
+        let rows = storage
+            .conn
+            .prepare(
+                "SELECT domain, started_at, ended_at FROM browser_domain_intervals ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("github.com".to_string(), 100, Some(150)),
+                ("chatgpt.com".to_string(), 150, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_domain_totals_overlap_focused_browser_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+
+        storage
+            .record_browser_domain("omastat-zen", "zen", "github.com", 90)
+            .unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "chatgpt.com", 180)
+            .unwrap();
+        let focused = storage
+            .start_interval(IntervalKind::Focused, "zen", None, None, 120)
+            .unwrap();
+        storage.close_interval(focused, 240).unwrap();
+
+        let rows = storage.browser_domain_totals_between(100, 250, 8).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].domain, "chatgpt.com");
+        assert_eq!(rows[0].focused_seconds, 60);
+        assert_eq!(rows[1].domain, "github.com");
+        assert_eq!(rows[1].focused_seconds, 60);
+    }
+
+    #[test]
     fn migrates_legacy_database_without_workspace_monitor_columns() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("test.db");
@@ -3385,7 +3689,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
@@ -3416,7 +3720,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
     }
 
@@ -3470,7 +3774,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
         let sleep = storage
             .start_system_interval(SystemIntervalKind::Sleep, Some("test"), 200)
@@ -3772,7 +4076,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("test.db");
         let config = Config::default();
-        let storage = Storage::open(Some(&db), &config).unwrap();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
 
         let focused = storage
             .start_interval_with_metadata(
@@ -3795,6 +4099,12 @@ mod tests {
             .start_system_interval(SystemIntervalKind::Sleep, Some("logind"), 160)
             .unwrap();
         storage.close_system_interval(sleep, 190).unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "github.com", 120)
+            .unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "chatgpt.com", 170)
+            .unwrap();
 
         let raw = storage.raw_export_between(0, 300).unwrap();
 
@@ -3803,6 +4113,8 @@ mod tests {
         assert_eq!(raw.session_intervals.len(), 1);
         assert_eq!(raw.system_intervals.len(), 1);
         assert_eq!(raw.system_intervals[0].kind, SystemIntervalKind::Sleep);
+        assert_eq!(raw.browser_domain_intervals.len(), 2);
+        assert_eq!(raw.browser_domain_intervals[0].domain, "github.com");
     }
 
     #[test]
@@ -3824,12 +4136,19 @@ mod tests {
             .start_system_interval(SystemIntervalKind::Unobserved, Some("test"), 100)
             .unwrap();
         storage.close_system_interval(system, 150).unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "github.com", 100)
+            .unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "chatgpt.com", 300)
+            .unwrap();
 
         let report = storage.purge_before(Some(200), false, false).unwrap();
 
         assert_eq!(report.intervals_deleted, 1);
         assert_eq!(report.intervals_trimmed, 1);
         assert_eq!(report.system_intervals_deleted, 1);
+        assert_eq!(report.browser_domain_intervals_trimmed, 1);
         let rows = storage.totals_between(0, 400).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].app_class, "overlap");
@@ -3969,7 +4288,7 @@ mod tests {
         assert_eq!(
             diagnostic.schema_status,
             StorageSchemaStatus::Current {
-                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7, 8]
+                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
             }
         );
     }

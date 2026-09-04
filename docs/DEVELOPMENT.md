@@ -18,6 +18,7 @@ cargo run -p omastat -- digest --lens week
 cargo run -p omastat -- widget-insight --json
 cargo run -p omastat -- purge --older-than-days 90 --dry-run
 cargo run -p omastat -- tui
+packaging/browser-extension/install.sh
 packaging/dev/check-widget-qml.sh
 packaging/dev/capture-widget-panel.sh
 ```
@@ -76,9 +77,33 @@ Omarchy is installed, so invalid plugin data is caught with the QML checks.
 
 `packaging/dev/reinstall-and-restart.sh` validates the source plugin, copies it
 to `~/.config/omarchy/plugins/local.omastat/`, validates the installed copy,
-then asks the running shell to rescan plugin data and confirm discovery. If the
-IPC reload is unavailable or Omarchy still cannot see the plugin, it falls back
-to `omarchy restart shell`.
+installs the Zen/Firefox browser domain extension and native host, then asks
+the running shell to rescan plugin data and confirm discovery. If the IPC
+reload is unavailable or Omarchy still cannot see the plugin, it falls back to
+`omarchy restart shell`.
+
+## Browser Extension
+
+The domain-only browser extension lives in:
+
+```text
+packaging/browser-extension/domain-tracker/
+```
+
+It sends only active-tab domains to the native messaging host
+`io.github.thisisrinesi.omastat`; the host runs `omastat native-host` through a
+wrapper installed at `~/.local/bin/omastat-native-host`.
+
+Install or refresh the local browser integration with:
+
+```bash
+packaging/browser-extension/install.sh
+```
+
+The installer builds separate Zen and Firefox XPI files under
+`${XDG_DATA_HOME:-~/.local/share}/omastat/browser-extension/`, copies native
+messaging manifests into Zen/Firefox locations, and places the XPI into each
+detected profile. Restart the browser after changing extension files.
 
 Capture the live Omarchy panel for visual review with:
 

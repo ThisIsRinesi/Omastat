@@ -1,0 +1,17 @@
+{
+  "manifest_version": 2,
+  "name": "Omastat Domain Tracker",
+  "version": "0.1.0",
+  "description": "Reports only the active tab domain to local Omastat.",
+  "permissions": ["tabs", "nativeMessaging"],
+  "background": {
+    "scripts": ["config.js", "background.js"],
+    "persistent": false
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "omastat-domain-tracker@thisisrinesi.github.io",
+      "strict_min_version": "109.0"
+    }
+  }
+}

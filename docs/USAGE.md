@@ -134,6 +134,7 @@ Default config values:
 ```toml
 [privacy]
 title_capture = "off"
+browser_domains = true
 browser_history = false
 title_allowlist = []
 title_blocklist = []
@@ -178,10 +179,31 @@ available, Omastat falls back to Omarchy/logind session status polling; logind's
 idle-since timestamp is used when available so idle intervals can still be
 backdated to the real session transition.
 
-When title capture is enabled, browser windows can be summarized by page or
-inferred site in the widget panel. Set `browser_history = true` to let Omastat
-enrich Zen Browser titles from local `~/.zen/*/places.sqlite` history files.
-History enrichment is read-only, local, best-effort, and ignored unless
+Browser domain tracking is the preferred browser breakdown path. With
+`browser_domains = true`, the optional Zen/Firefox extension sends only the
+active tab domain to `omastat native-host`; Omastat counts that domain only
+where it overlaps focused browser window time. The extension does not send tab
+titles, full URLs, page contents, or history.
+
+Install the native host and profile extension with:
+
+```bash
+packaging/browser-extension/install.sh
+```
+
+Restart Zen/Firefox after installing. The development reinstall script runs the
+same browser-extension install step.
+
+Firefox release builds require signed add-ons. If Zen enforces the same policy
+and refuses the local XPI, the native host is still installed but the extension
+must be loaded temporarily for development or signed for regular use.
+
+Set `title_capture = "all"` only if you want focused intervals to include
+cleaned window titles. When title capture is enabled and no direct domain rows
+exist for a period, browser windows can fall back to page/title inference in
+the widget panel. Set `browser_history = true` to let Omastat enrich Zen
+Browser titles from local `~/.zen/*/places.sqlite` history files. History
+enrichment is read-only, local, best-effort, and ignored unless
 `title_capture = "all"` is also enabled.
 
 App aliases change display labels in reports, exports, and the TUI while raw

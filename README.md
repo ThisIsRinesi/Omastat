@@ -12,6 +12,7 @@ terminal dashboard, HTML exports, and an Omarchy Quattro widget.
 ```bash
 cargo install --path crates/omastat --locked
 packaging/systemd/install-user-service.sh
+packaging/browser-extension/install.sh
 omastat doctor
 ```
 
@@ -41,6 +42,8 @@ right-click to toggle icon-only mode.
   focus.
 - Terminal windows can be attributed to the foreground process, such as `btop`
   or `opencode`, instead of only the terminal emulator.
+- Optional Zen/Firefox browser extension reports only the active tab domain, so
+  browser focus breakdowns do not need window titles or browser history.
 - Steam app IDs and common desktop classes are normalized to readable names.
 - Omarchy Quattro widget with a QML analytics panel for day, week, month, year,
   and lifetime totals, app mix, activity trends, heatmaps, consistency stats,
@@ -67,6 +70,7 @@ From a checkout or release tarball:
 ```bash
 cargo install --path crates/omastat --locked
 packaging/systemd/install-user-service.sh
+packaging/browser-extension/install.sh
 ```
 
 Check the daemon:
@@ -110,6 +114,19 @@ omastat export-data --lens month --format csv --output ~/omastat-month-csv
 
 More command examples and configuration notes are in [docs/USAGE.md](docs/USAGE.md).
 
+## Browser Domains
+
+The browser integration is local and domain-only. The extension listens for the
+active tab in Zen/Firefox and sends `github.com`-style host names to
+`omastat native-host`; Omastat then counts those domains only where they
+overlap with focused browser window time. It does not receive tab titles, full
+URLs, page contents, or browsing history.
+
+Run `packaging/browser-extension/install.sh` after installing the binary, then
+restart Zen/Firefox. The development reinstall script runs this step too.
+Firefox release builds require signed add-ons, so if Zen enforces that policy,
+use a temporary development load or a signed XPI for regular browser startup.
+
 ## skwd-wall Theme
 
 Omastat can read skwd-wall/Matugen colors from the default skwd cache paths, or
@@ -118,16 +135,16 @@ from a dedicated Omastat output. The template and integration notes are in
 
 ## Privacy
 
-By default, Omastat stores application class names, timing intervals, and
-workspace/monitor context when Hyprland provides it. It does not store window
-titles, page names, file names, screenshots, or browser history.
+By default, Omastat stores application class names, timing intervals, browser
+domains supplied by the optional local extension, and workspace/monitor context
+when Hyprland provides it. It does not store window titles, page names, file
+names, screenshots, full URLs, page contents, or browser history.
 
 Optional title capture can be enabled explicitly in the config file when richer
-replay labels and browser focus breakdowns are worth the extra local data. Zen
-Browser history enrichment is also opt-in and read-only. Optional title
-allowlists and blocklists can restrict captured titles further, and `omastat
-purge` can remove older local telemetry after a dry-run review. See
-[docs/USAGE.md](docs/USAGE.md).
+replay labels are worth the extra local data. Zen Browser history enrichment is
+also opt-in and read-only. Optional title allowlists and blocklists can restrict
+captured titles further, and `omastat purge` can remove older local telemetry
+after a dry-run review. See [docs/USAGE.md](docs/USAGE.md).
 
 ## Development
 

@@ -4,6 +4,7 @@ use omastat::{
     cli::{self, Cli, Commands, DataExportFormatArg},
     config::Config,
     export::{self, DataExportOptions, ExportOptions},
+    native_host,
     steam::SteamResolver,
     storage::{Storage, StorageOpenMode},
     tui,
@@ -21,6 +22,10 @@ async fn main() -> Result<()> {
 
     if let Commands::Doctor = &cli.command {
         cli::doctor(&config, cli.database.as_deref()).await?;
+        return Ok(());
+    }
+    if let Commands::NativeHost = &cli.command {
+        native_host::run(&config, cli.database.as_deref())?;
         return Ok(());
     }
     config.log_warnings();
@@ -173,6 +178,7 @@ async fn main() -> Result<()> {
             cli::print_title_repair(&repair, cli.json)?;
         }
         Commands::Doctor => unreachable!("doctor is handled before storage opens"),
+        Commands::NativeHost => unreachable!("native-host is handled before storage opens"),
     }
 
     Ok(())

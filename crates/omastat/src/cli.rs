@@ -154,6 +154,8 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Run the browser native messaging host.
+    NativeHost,
     /// Check environment, IPC, config, and storage paths.
     Doctor,
 }
@@ -540,16 +542,20 @@ pub fn print_purge_report(report: &PurgeReport, json: bool) -> Result<()> {
         println!("Cutoff: all local telemetry rows");
     }
     println!(
-        "Deleted: {} app, {} session, {} system, {} daemon events, {} daemon runs",
+        "Deleted: {} app, {} session, {} system, {} browser-domain, {} daemon events, {} daemon runs",
         report.intervals_deleted,
         report.session_intervals_deleted,
         report.system_intervals_deleted,
+        report.browser_domain_intervals_deleted,
         report.daemon_events_deleted,
         report.daemon_runs_deleted
     );
     println!(
-        "Trimmed: {} app, {} session, {} system",
-        report.intervals_trimmed, report.session_intervals_trimmed, report.system_intervals_trimmed
+        "Trimmed: {} app, {} session, {} system, {} browser-domain",
+        report.intervals_trimmed,
+        report.session_intervals_trimmed,
+        report.system_intervals_trimmed,
+        report.browser_domain_intervals_trimmed
     );
     if report.vacuumed {
         println!("Vacuum: completed");

@@ -1,4 +1,4 @@
-use crate::storage::TitleTotals;
+use crate::storage::{BrowserDomainTotals, TitleTotals};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
@@ -22,6 +22,7 @@ pub struct BrowserActivity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BrowserActivitySource {
+    Domain,
     History,
     Title,
 }
@@ -145,6 +146,46 @@ pub fn browser_activity(
     rows
 }
 
+pub fn browser_activity_from_domains(
+    domains: &[BrowserDomainTotals],
+    limit: usize,
+) -> Vec<BrowserActivity> {
+    let total = domains
+        .iter()
+        .map(|row| row.focused_seconds.max(0))
+        .sum::<i64>();
+    if total <= 0 {
+        return Vec::new();
+    }
+
+    let mut rows = domains
+        .iter()
+        .filter(|row| row.focused_seconds > 0 && is_browser_class(&row.app_class))
+        .map(|row| {
+            let domain = normalize_domain(&row.domain).unwrap_or_else(|| row.domain.clone());
+            let label = display_site(&domain);
+            BrowserActivity {
+                app_class: row.app_class.clone(),
+                browser_label: crate::identity::display_name(&row.app_class),
+                label,
+                title: String::new(),
+                site: Some(domain),
+                focused_seconds: row.focused_seconds,
+                share: row.focused_seconds as f64 / total as f64,
+                source: BrowserActivitySource::Domain,
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .focused_seconds
+            .cmp(&left.focused_seconds)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    rows.truncate(limit.max(1));
+    rows
+}
+
 fn is_browser_class(app_class: &str) -> bool {
     matches!(
         app_class.to_ascii_lowercase().as_str(),
@@ -249,6 +290,41 @@ fn host_from_url(url: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
+pub fn normalize_domain(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let host = if value.contains("://") {
+        host_from_url(value)?
+    } else {
+        value
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .split('@')
+            .next_back()
+            .unwrap_or("")
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    };
+    let host = host
+        .trim_end_matches('.')
+        .strip_prefix("www.")
+        .unwrap_or(&host);
+    if host.is_empty()
+        || host == "localhost"
+        || host.chars().any(char::is_whitespace)
+        || !host.contains('.')
+    {
+        return None;
+    }
+    Some(host.to_string())
+}
+
 fn display_site(host: &str) -> String {
     let host = host.strip_prefix("www.").unwrap_or(host);
     let known = [
@@ -289,8 +365,11 @@ fn title_case(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserActivitySource, BrowserHistoryResolver, browser_activity, host_from_url};
-    use crate::storage::TitleTotals;
+    use super::{
+        BrowserActivitySource, BrowserHistoryResolver, browser_activity,
+        browser_activity_from_domains, host_from_url, normalize_domain,
+    };
+    use crate::storage::{BrowserDomainTotals, TitleTotals};
 
     #[test]
     fn groups_browser_titles_by_inferred_site() {
@@ -322,10 +401,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builds_domain_activity_without_titles() {
+        let rows = browser_activity_from_domains(
+            &[
+                domain("zen", "www.github.com", 120),
+                domain("zen", "chatgpt.com", 60),
+            ],
+            8,
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "GitHub");
+        assert_eq!(rows[0].site.as_deref(), Some("github.com"));
+        assert_eq!(rows[0].title, "");
+        assert_eq!(rows[0].source, BrowserActivitySource::Domain);
+    }
+
+    #[test]
+    fn normalizes_domains_without_full_urls() {
+        assert_eq!(
+            normalize_domain("https://www.example.com/path").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            normalize_domain("sub.example.com:443").as_deref(),
+            Some("sub.example.com")
+        );
+        assert_eq!(normalize_domain("localhost"), None);
+    }
+
     fn title(app_class: &str, title: &str, focused_seconds: i64) -> TitleTotals {
         TitleTotals {
             app_class: app_class.to_string(),
             title: title.to_string(),
+            focused_seconds,
+        }
+    }
+
+    fn domain(app_class: &str, domain: &str, focused_seconds: i64) -> BrowserDomainTotals {
+        BrowserDomainTotals {
+            app_class: app_class.to_string(),
+            domain: domain.to_string(),
             focused_seconds,
         }
     }

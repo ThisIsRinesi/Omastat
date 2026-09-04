@@ -60,6 +60,8 @@ cargo install --path "$repo_root/crates/omastat" --locked
 if command -v hours-played >/dev/null 2>&1; then
   cargo uninstall hours-played >/dev/null 2>&1 || true
 fi
+chmod +x "$repo_root/packaging/browser-extension/install.sh"
+"$repo_root/packaging/browser-extension/install.sh"
 
 mkdir -p "$service_dir"
 install -m 0644 "$repo_root/packaging/systemd/omastat.service" "$service_dir/omastat.service"

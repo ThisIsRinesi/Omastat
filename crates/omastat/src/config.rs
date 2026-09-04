@@ -26,12 +26,18 @@ pub struct ConfigWarning {
 pub struct PrivacyConfig {
     #[serde(default)]
     pub title_capture: TitleCapture,
+    #[serde(default = "default_browser_domains")]
+    pub browser_domains: bool,
     #[serde(default)]
     pub browser_history: bool,
     #[serde(default)]
     pub title_allowlist: Vec<String>,
     #[serde(default)]
     pub title_blocklist: Vec<String>,
+}
+
+fn default_browser_domains() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -359,6 +365,7 @@ impl Default for PrivacyConfig {
     fn default() -> Self {
         Self {
             title_capture: TitleCapture::Off,
+            browser_domains: default_browser_domains(),
             browser_history: false,
             title_allowlist: Vec::new(),
             title_blocklist: Vec::new(),
@@ -523,6 +530,20 @@ mod tests {
             config.goals.app_budgets[0].daily_limit_seconds(),
             Some(1800)
         );
+        assert!(config.privacy.browser_domains);
+    }
+
+    #[test]
+    fn browser_domain_capture_can_be_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+            [privacy]
+            browser_domains = false
+            "#,
+        )
+        .unwrap();
+
+        assert!(!config.privacy.browser_domains);
     }
 
     #[test]

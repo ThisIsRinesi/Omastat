@@ -857,6 +857,14 @@ fn browser_activity_for_period(
     start_ts: i64,
     end_ts: i64,
 ) -> Result<Vec<BrowserActivity>> {
+    if config.privacy.browser_domains {
+        let domains = storage.browser_domain_totals_between(start_ts, end_ts, 32)?;
+        let rows = browser::browser_activity_from_domains(&domains, 8);
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+    }
+
     if !config.capture_titles() {
         return Ok(Vec::new());
     }

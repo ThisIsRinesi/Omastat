@@ -7,6 +7,7 @@ pub mod export;
 pub mod hyprland;
 pub mod identity;
 pub mod insights;
+pub mod native_host;
 pub mod report;
 pub mod session;
 pub mod steam;
