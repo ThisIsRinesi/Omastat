@@ -52,6 +52,8 @@ Panel {
   readonly property color track: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.10)
   readonly property color fill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.06)
   readonly property color line: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.18)
+  readonly property color hairline: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.12)
+  readonly property color noFill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.0)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var availableLenses: [
@@ -336,10 +338,9 @@ Panel {
             width: Style.space(42)
             height: width
             visible: !root.narrowPanel
-            radius: Style.space(8)
-            color: root.fill
-            border.color: root.line
-            border.width: 1
+            radius: width / 2
+            color: root.track
+            border.width: 0
             anchors.verticalCenter: parent.verticalCenter
 
             Text {
@@ -486,7 +487,7 @@ Panel {
 
           Row {
             width: parent.width
-            spacing: Style.space(8)
+            spacing: 0
 
             Repeater {
               model: root.availableLenses
@@ -495,7 +496,7 @@ Panel {
                 required property var modelData
 
                 width: root.availableLenses.length > 0
-                  ? (parent.width - parent.spacing * (root.availableLenses.length - 1)) / root.availableLenses.length
+                  ? parent.width / root.availableLenses.length
                   : 0
                 label: root.compactLensLabel(modelData.label)
                 lens: String(modelData.lens || "day")
@@ -599,10 +600,9 @@ Panel {
 
             width: parent.width
             implicitHeight: appMixLayout.implicitHeight + Style.space(24)
-            radius: Style.space(7)
-            color: root.fill
-            border.color: root.line
-            border.width: 1
+            radius: 0
+            color: root.noFill
+            border.width: 0
             visible: root.visibleApps.length > 0
             clip: true
 
@@ -613,6 +613,14 @@ Panel {
               width: Style.space(3)
               color: root.sliceColor(0, 0.72)
               opacity: root.widePanel ? 1 : 0.72
+            }
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              height: 1
+              color: root.hairline
             }
 
             GridLayout {
@@ -766,11 +774,10 @@ Panel {
     signal selectedLens(string lens)
 
     height: Style.space(34)
-    radius: Style.space(6)
-    color: selected ? root.sliceColor(0, 0.22) : root.track
-    border.color: selected ? root.sliceColor(0, 0.82) : root.line
-    border.width: 1
-    scale: selected ? 1.0 : 0.985
+    radius: 0
+    color: root.noFill
+    border.width: 0
+    scale: 1.0
 
     Behavior on color {
       ColorAnimation { duration: 140 }
@@ -792,6 +799,14 @@ Panel {
       font.pixelSize: Style.font.bodySmall
       font.bold: true
       elide: Text.ElideRight
+    }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: selected ? Style.space(2) : 1
+      color: selected ? root.sliceColor(0, 0.92) : root.hairline
     }
 
     MouseArea {
@@ -819,10 +834,9 @@ Panel {
     readonly property int elapsedSeconds: Math.max(1, root.totalObserved + root.totalUnobserved)
 
     implicitHeight: summaryColumn.implicitHeight + Style.space(20)
-    radius: Style.space(7)
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.058)
-    border.color: root.sliceColor(0, root.refreshRunning ? 0.48 : 0.22)
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
     clip: true
 
     Rectangle {
@@ -831,6 +845,14 @@ Panel {
       anchors.bottom: parent.bottom
       width: Style.space(3)
       color: root.errorText !== "" ? Color.urgent : root.sliceColor(0, 0.92)
+    }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
     }
 
     Column {
@@ -887,9 +909,8 @@ Panel {
           implicitWidth: focusShareColumn.implicitWidth + Style.space(20)
           implicitHeight: focusShareColumn.implicitHeight + Style.space(10)
           radius: Style.space(6)
-          color: root.sliceColor(1, 0.16)
-          border.color: root.sliceColor(1, 0.36)
-          border.width: 1
+          color: root.sliceColor(1, 0.10)
+          border.width: 0
 
           Column {
             id: focusShareColumn
@@ -1051,18 +1072,14 @@ Panel {
     }
   }
 
-  component MetricTile: Rectangle {
+  component MetricTile: Item {
     property string label: ""
     property string value: ""
     property string detail: ""
     property color accentColor: root.accent
 
     Layout.minimumWidth: Style.space(118)
-    implicitHeight: Style.space(76)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    implicitHeight: Style.space(62)
 
     Rectangle {
       width: Style.space(3)
@@ -1111,6 +1128,14 @@ Panel {
         elide: Text.ElideRight
       }
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component ConsistencyMetrics: GridLayout {
@@ -1118,7 +1143,7 @@ Panel {
 
     columns: columnsValue
     rowSpacing: Style.space(8)
-    columnSpacing: Style.space(8)
+    columnSpacing: Style.space(14)
 
     MetricTile {
       Layout.fillWidth: true
@@ -1171,10 +1196,9 @@ Panel {
     }
 
     implicitHeight: categoryColumn.implicitHeight + Style.space(24)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     Column {
       id: categoryColumn
@@ -1261,6 +1285,14 @@ Panel {
         }
       }
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component YearRetro: Rectangle {
@@ -1269,10 +1301,9 @@ Panel {
     property var facts: []
 
     implicitHeight: retroColumn.implicitHeight + Style.space(24)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     Rectangle {
       anchors.left: parent.left
@@ -1346,6 +1377,14 @@ Panel {
         }
       }
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component TimeBreakdownStrip: Rectangle {
@@ -1374,10 +1413,9 @@ Panel {
     Component.onCompleted: restartReveal()
 
     implicitHeight: Style.space(118)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     NumberAnimation {
       id: breakdownReveal
@@ -1478,6 +1516,14 @@ Panel {
         font.pixelSize: Style.font.caption
         elide: Text.ElideRight
       }
+    }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
     }
   }
 
@@ -1924,10 +1970,9 @@ Panel {
     }
 
     implicitHeight: browserColumn.implicitHeight + Style.space(24)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
     clip: true
 
     Rectangle {
@@ -2044,6 +2089,14 @@ Panel {
         }
       }
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component EmptyState: Rectangle {
@@ -2052,10 +2105,9 @@ Panel {
 
     width: parent ? parent.width : implicitWidth
     implicitHeight: Style.space(58)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: urgent ? Color.urgent : root.line
-    border.width: 1
+    radius: 0
+    color: urgent ? root.withAlpha(Color.urgent, 0.08) : root.noFill
+    border.width: 0
 
     Text {
       anchors.centerIn: parent
@@ -2108,10 +2160,9 @@ Panel {
     }
 
     implicitHeight: expanded ? Style.space(216) : Style.space(184)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     onHoursChanged: ringCanvas.requestPaint()
     onMaxSecondsChanged: ringCanvas.requestPaint()
@@ -2271,6 +2322,14 @@ Panel {
       anchors.margins: Style.space(10)
       text: ringRoot.readoutText.length > 0 ? ringRoot.readoutText : ringRoot.defaultText
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component FocusTrendLine: Rectangle {
@@ -2290,7 +2349,6 @@ Panel {
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
     readonly property string defaultText: Model.trendDefaultText(days)
-    readonly property string averageText: Model.trendAverageText(days)
     readonly property real averageSeconds: {
       var list = days || []
       if (list.length <= 0) return 0
@@ -2322,10 +2380,9 @@ Panel {
     }
 
     implicitHeight: expanded ? Style.space(216) : Style.space(184)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     onDaysChanged: requestPaint()
     onMaxSecondsChanged: requestPaint()
@@ -2404,18 +2461,6 @@ Panel {
         y: Math.round(lineRoot.pointY(lineRoot.averageSeconds))
         height: 1
         color: root.withAlpha(root.foreground, 0.26)
-      }
-
-      Text {
-        visible: lineRoot.averageText.length > 0 && lineRoot.maxSeconds > 0
-        anchors.right: parent.right
-        y: Math.max(0, Math.min(parent.height - implicitHeight, Math.round(lineRoot.pointY(lineRoot.averageSeconds)) - implicitHeight - Style.space(3)))
-        text: lineRoot.averageText
-        color: root.faint
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignRight
-        elide: Text.ElideRight
       }
 
       Canvas {
@@ -2545,6 +2590,14 @@ Panel {
       anchors.margins: Style.space(10)
       text: lineRoot.readoutText.length > 0 ? lineRoot.readoutText : lineRoot.defaultText
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component MonthRhythm: Rectangle {
@@ -2584,10 +2637,9 @@ Panel {
     Component.onCompleted: restartReveal()
 
     implicitHeight: compact ? Style.space(398) : Style.space(304)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     NumberAnimation {
       id: monthRhythmReveal
@@ -2889,6 +2941,14 @@ Panel {
       anchors.margins: Style.space(10)
       text: monthRhythmRoot.readoutText.length > 0 ? monthRhythmRoot.readoutText : monthRhythmRoot.defaultText
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component MonthHeatmap: Rectangle {
@@ -2928,10 +2988,9 @@ Panel {
     Component.onCompleted: restartReveal()
 
     implicitHeight: Style.space(108) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     NumberAnimation {
       id: monthReveal
@@ -3078,6 +3137,14 @@ Panel {
       anchors.margins: Style.space(10)
       text: monthRoot.readoutText.length > 0 ? monthRoot.readoutText : monthRoot.defaultText
     }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
+    }
   }
 
   component HeatmapGrid: Rectangle {
@@ -3114,11 +3181,10 @@ Panel {
     onMaxSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: Math.max(expanded ? Style.space(216) : Style.space(184), Style.space(118) + gridHeight)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    implicitHeight: Math.max(expanded ? Style.space(232) : Style.space(196), Style.space(136) + gridHeight)
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     NumberAnimation {
       id: heatReveal
@@ -3172,11 +3238,11 @@ Panel {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: heatHeader.bottom
-      anchors.bottom: parent.bottom
+      anchors.bottom: heatReadout.top
       anchors.leftMargin: Style.space(12)
       anchors.rightMargin: Style.space(12)
       anchors.topMargin: Style.space(8)
-      anchors.bottomMargin: Style.space(12)
+      anchors.bottomMargin: Style.space(10)
 
       Row {
         id: hourLabels
@@ -3332,13 +3398,22 @@ Panel {
     }
 
     ChartReadout {
+      id: heatReadout
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: parent.bottom
-      anchors.leftMargin: Style.space(86)
+      anchors.leftMargin: Style.space(10)
       anchors.rightMargin: Style.space(10)
-      anchors.bottomMargin: Style.space(26)
-      text: heatRoot.readoutText.length > 0 ? heatRoot.readoutText : heatRoot.defaultText
+      anchors.bottomMargin: Style.space(10)
+      text: heatRoot.readoutText.length > 0 ? heatRoot.readoutText : (heatRoot.cramped ? "" : heatRoot.defaultText)
+    }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
     }
   }
 
@@ -3351,9 +3426,9 @@ Panel {
     implicitHeight: visible ? Style.space(24) : 0
     height: visible ? Style.space(24) : 0
     radius: Style.space(5)
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
-    border.color: root.line
-    border.width: 1
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+    border.width: 0
+    clip: true
     opacity: visible ? 1 : 0
     scale: visible ? 1 : 0.98
 
@@ -3433,8 +3508,8 @@ Panel {
 
           width: parent.width
           columns: root.widePanel ? 3 : (root.compactPanel ? 1 : 2)
-          rowSpacing: Style.space(8)
-          columnSpacing: Style.space(8)
+          rowSpacing: Style.space(2)
+          columnSpacing: Style.space(14)
 
           Repeater {
             model: (modelData.rows || []).slice(0, root.widePanel ? 6 : (root.compactPanel ? 3 : 4))
@@ -3466,10 +3541,9 @@ Panel {
     property string tone: ""
 
     implicitHeight: Style.space(88)
-    radius: Style.space(7)
-    color: root.fill
-    border.color: root.line
-    border.width: 1
+    radius: 0
+    color: root.noFill
+    border.width: 0
 
     Rectangle {
       width: Style.space(3)
@@ -3541,6 +3615,14 @@ Panel {
         maximumLineCount: 1
         elide: Text.ElideRight
       }
+    }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: 1
+      color: root.hairline
     }
   }
 }

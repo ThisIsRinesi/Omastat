@@ -570,7 +570,7 @@ fn document(page_title: &str, dashboard: &DashboardPayload) -> String {
       <h1 data-bind="lens_title">{lens_title}</h1>
       <p class="subhead"><span data-bind="period">{period}</span> · <span data-bind="range">{range}</span> · generated <span data-bind="generated">{generated}</span></p>
     </div>
-    <div class="focus-total">
+    <div class="focus-summary">
       <small>Focused time</small>
       <strong data-bind="focused">{focused}</strong>
       <span data-bind="focus_context">{focus_context}</span>
@@ -970,7 +970,7 @@ fn lens_cards_html_from_periods(periods: &[DashboardPeriodPayload]) -> String {
         })
         .map(|period| {
             format!(
-                r#"<article class="lens-card">
+                r#"<article class="lens-row">
   <div class="lens-label">{}</div>
   <div>
     <div class="lens-total">{}</div>
@@ -1198,8 +1198,8 @@ fn stylesheet() -> &'static str {
   color-scheme: dark;
   --bg: #0e1014;
   --bg-grid: rgba(255,255,255,0.035);
-  --panel: #171a20;
-  --panel-2: #1d2028;
+  --panel: transparent;
+  --panel-2: rgba(255,255,255,0.045);
   --ink: #f4f2ec;
   --muted: #a8acb8;
   --soft: #d4d7df;
@@ -1212,28 +1212,14 @@ fn stylesheet() -> &'static str {
   --purple: #9d83f7;
   --orange: #f59f53;
   --red: #ff6f7f;
-  --shadow: 0 18px 50px rgba(0, 0, 0, 0.26);
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   color: var(--ink);
-  background:
-    linear-gradient(180deg, rgba(67,217,232,0.05), transparent 28rem),
-    linear-gradient(135deg, #0e1014 0%, #121722 54%, #171219 100%);
+  background: #0e1014;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
-}
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(var(--bg-grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
-  background-size: 40px 40px;
-  mask-image: linear-gradient(to bottom, black, transparent 72%);
 }
 .dashboard {
   position: relative;
@@ -1243,17 +1229,21 @@ body::before {
 }
 .dashboard-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  gap: 28px;
   align-items: end;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line-strong);
 }
 .control-bar {
   display: grid;
   grid-template-columns: minmax(320px, 0.95fr) minmax(280px, 0.8fr) minmax(320px, 0.95fr);
-  gap: 16px;
+  gap: 22px;
   align-items: end;
-  margin-bottom: 16px;
+  margin-bottom: 22px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
 }
 .control-bar > div {
   min-width: 0;
@@ -1261,24 +1251,25 @@ body::before {
 .segmented {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 0;
   margin-top: 8px;
   min-width: 0;
 }
 .segmented button {
   appearance: none;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255,255,255,0.055);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
   color: var(--soft);
   cursor: pointer;
   min-height: 38px;
-  padding: 8px 13px;
+  padding: 8px 14px;
   font: inherit;
   font-size: 0.82rem;
   font-weight: 900;
   letter-spacing: 0;
-  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
 }
 .segmented button span,
 .segmented button small {
@@ -1291,17 +1282,15 @@ body::before {
   margin-top: 3px;
 }
 .segmented button:hover {
-  transform: translateY(-1px);
-  border-color: rgba(67,217,232,0.45);
+  border-color: rgba(67,217,232,0.62);
 }
 .segmented button.active {
-  color: #071014;
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--cyan), var(--green));
-  box-shadow: 0 0 24px rgba(67,217,232,0.22);
+  color: var(--ink);
+  border-color: var(--cyan);
+  background: rgba(67,217,232,0.08);
 }
 .segmented button.active small {
-  color: rgba(7,16,20,0.72);
+  color: var(--muted);
 }
 .period-nav {
   display: grid;
@@ -1314,8 +1303,8 @@ body::before {
 .period-rail button {
   appearance: none;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255,255,255,0.055);
+  border-radius: 4px;
+  background: transparent;
   color: var(--soft);
   cursor: pointer;
   min-height: 38px;
@@ -1335,7 +1324,6 @@ body::before {
 }
 .period-nav button:hover:not(:disabled),
 .period-rail button:hover {
-  transform: translateY(-1px);
   border-color: rgba(246,196,90,0.5);
 }
 .period-nav button:disabled {
@@ -1371,22 +1359,21 @@ body::before {
   margin-top: 3px;
 }
 .period-rail button.active {
-  color: #071014;
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--yellow), var(--pink));
-  box-shadow: 0 0 24px rgba(246,196,90,0.18);
+  color: var(--ink);
+  border-color: var(--yellow);
+  background: rgba(246,196,90,0.08);
 }
 .period-rail button.active small {
-  color: rgba(7,16,20,0.68);
+  color: var(--muted);
 }
-.panel, .number-card, .focus-total {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: linear-gradient(145deg, rgba(29, 32, 40, 0.96), rgba(18, 20, 25, 0.96));
-  box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,0.06);
+.panel, .stat-cell, .focus-summary {
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
   animation: reveal-up 300ms cubic-bezier(.2,.8,.2,1) both;
 }
-.eyebrow, .kicker, .number-card small, .focus-total small, footer, .mini-label {
+.eyebrow, .kicker, .stat-cell small, .focus-summary small, footer, .mini-label {
   color: var(--muted);
   text-transform: uppercase;
   font-size: 0.72rem;
@@ -1397,8 +1384,8 @@ h1, h2, p { margin: 0; }
 h1 {
   max-width: 900px;
   margin-top: 8px;
-  font-size: clamp(2.6rem, 6vw, 5.6rem);
-  line-height: 0.92;
+  font-size: clamp(2.4rem, 5vw, 4.9rem);
+  line-height: 0.96;
   letter-spacing: 0;
 }
 h2 {
@@ -1411,57 +1398,55 @@ h2 {
   color: var(--soft);
   font-size: 0.98rem;
 }
-.focus-total {
-  min-height: 156px;
-  padding: 22px;
+.focus-summary {
+  min-height: 132px;
+  padding: 18px 0 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  background:
-    linear-gradient(145deg, rgba(246,196,90,0.2), rgba(67,217,232,0.08)),
-    linear-gradient(145deg, rgba(32,36,45,0.98), rgba(18,20,25,0.98));
 }
-.focus-total strong {
+.focus-summary strong {
   display: block;
   margin: 12px 0 8px;
   font-size: clamp(3rem, 5vw, 4.9rem);
   line-height: 0.88;
 }
-.focus-total span {
+.focus-summary span {
   color: #ffe4a8;
   font-weight: 850;
 }
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0 18px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--line);
 }
 .metric-grid > [data-slot] {
   display: contents;
 }
-.number-card {
-  min-height: 112px;
-  padding: 16px;
+.stat-cell {
+  min-height: 88px;
+  padding: 14px 0 16px;
   overflow: hidden;
 }
-.number-card strong {
+.stat-cell strong {
   display: block;
-  margin-top: 14px;
-  font-size: 1.85rem;
+  margin-top: 10px;
+  font-size: 1.55rem;
   line-height: 0.95;
   overflow-wrap: anywhere;
 }
-.number-card span {
+.stat-cell span {
   display: block;
   margin-top: 8px;
-  color: #dfd1c3;
+  color: var(--soft);
   font-weight: 750;
 }
 .grid {
   display: grid;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: 18px 26px;
+  margin-bottom: 22px;
   transition: opacity 180ms ease, transform 180ms ease;
 }
 .grid-main { grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.75fr); }
@@ -1475,8 +1460,8 @@ h2 {
   transform: translateY(5px);
 }
 .just-swapped .panel,
-.just-swapped .number-card,
-.just-swapped .focus-total {
+.just-swapped .stat-cell,
+.just-swapped .focus-summary {
   animation: panel-rise 380ms ease both;
 }
 @keyframes panel-rise {
@@ -1497,7 +1482,7 @@ h2 {
 }
 .panel {
   min-width: 0;
-  padding: 18px;
+  padding: 16px 0 0;
 }
 .panel-heading {
   display: flex;
@@ -1516,10 +1501,12 @@ h2 {
   line-height: 1.35;
 }
 .chart-frame {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(6, 8, 12, 0.34);
-  padding: 12px;
+  border: 0;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 0;
 }
 .chart-frame svg { width: 100%; height: auto; display: block; overflow: visible; }
 .chart-frame rect {
@@ -1556,7 +1543,6 @@ h2 {
   width: 12px;
   height: 12px;
   border-radius: 6px;
-  box-shadow: 0 0 16px currentColor;
 }
 .ranked-list, .title-list, .lens-list, .insight-list, .metric-list {
   display: grid;
@@ -1573,7 +1559,7 @@ h2 {
   height: 30px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line-strong);
+  border: 0;
   color: var(--cyan);
   font-weight: 950;
 }
@@ -1595,12 +1581,11 @@ h2 {
 .rank-bar {
   grid-column: 2 / -1;
   height: 10px;
-  border: 1px solid var(--line);
+  border: 0;
   background: rgba(255,255,255,0.08);
 }
 .rank-fill {
   height: 100%;
-  box-shadow: 0 0 18px currentColor;
   transform-origin: left center;
   animation: fill-in 620ms cubic-bezier(.2,.8,.2,1) both;
 }
@@ -1614,9 +1599,9 @@ h2 {
   gap: 10px;
   align-items: center;
   min-height: 36px;
-  padding: 8px 10px;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.035);
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: transparent;
 }
 .table-head {
   min-height: 30px;
@@ -1624,7 +1609,7 @@ h2 {
   font-size: 0.72rem;
   font-weight: 950;
   text-transform: uppercase;
-  background: rgba(255,255,255,0.065);
+  background: transparent;
 }
 .table-rank {
   color: var(--cyan);
@@ -1669,8 +1654,8 @@ h2 {
   width: 100%;
   height: 18px;
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 999px;
+  border: 0;
+  border-radius: 0;
   background: rgba(255,255,255,0.08);
   margin-bottom: 16px;
 }
@@ -1696,15 +1681,15 @@ h2 {
 .hist-track {
   position: relative;
   min-height: 150px;
-  border: 1px solid var(--line);
+  border: 0;
+  border-bottom: 1px solid var(--line);
   background: rgba(255,255,255,0.055);
 }
 .hist-fill {
   position: absolute;
   inset-inline: 0;
   bottom: 0;
-  background: linear-gradient(180deg, var(--cyan), var(--purple));
-  box-shadow: 0 0 20px rgba(67,217,232,0.28);
+  background: var(--cyan);
   transform-origin: center bottom;
   animation: reveal-bar 650ms cubic-bezier(.2,.8,.2,1) both;
 }
@@ -1811,15 +1796,16 @@ h2 {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
-.lens-card {
+.lens-row {
   display: grid;
   grid-template-columns: 76px 1fr;
   gap: 12px;
   align-items: center;
-  padding: 12px;
-  border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.1);
-  background: rgba(255,255,255,0.045);
+  padding: 10px 0;
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: transparent;
 }
 .lens-label {
   color: var(--cyan);
@@ -1894,7 +1880,7 @@ fn number_cards(cards: &[NumberCard<'_>]) -> String {
         .iter()
         .map(|card| {
             format!(
-                r#"<article class="number-card"><small>{}</small><strong>{}</strong><span>{}</span></article>"#,
+                r#"<article class="stat-cell"><small>{}</small><strong>{}</strong><span>{}</span></article>"#,
                 escape_html(card.label),
                 escape_html(card.value),
                 escape_html(card.note),

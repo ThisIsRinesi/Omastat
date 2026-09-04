@@ -6,6 +6,7 @@ plugin_id="local.omastat"
 widget_dir="$repo_root/packaging/omarchy/omastat"
 service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
+export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 
 validate_omarchy_plugin() {
   local dir="$1"

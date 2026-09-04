@@ -12,6 +12,7 @@ region=""
 lens=""
 keep_open=0
 open_panel=1
+export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 
 while (($#)); do
   case "$1" in
@@ -79,7 +80,7 @@ for tool in quickshell grim; do
 done
 
 if ((open_panel)); then
-  if ! quickshell ipc -p "$shell_path" call local.omastat open; then
+  if ! quickshell ipc -n -p "$shell_path" call local.omastat open; then
     cat >&2 <<'EOF'
 could not open local.omastat through Quickshell IPC.
 Make sure the plugin is installed, enabled, and the shell has loaded it:
@@ -88,7 +89,7 @@ EOF
     exit 1
   fi
   if [[ -n "$lens" ]]; then
-    quickshell ipc -p "$shell_path" call local.omastat "$lens"
+    quickshell ipc -n -p "$shell_path" call local.omastat "$lens"
   fi
   sleep "$delay"
 fi
@@ -101,7 +102,7 @@ else
 fi
 
 if ((open_panel)) && ((! keep_open)); then
-  quickshell ipc -p "$shell_path" call local.omastat close || true
+  quickshell ipc -n -p "$shell_path" call local.omastat close || true
 fi
 
 printf '%s\n' "$output"
