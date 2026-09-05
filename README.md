@@ -1,207 +1,166 @@
 # Omastat
 
-Omastat is a local app focus tracker for Arch/Omarchy desktops running
-Hyprland. It records focused window time to a local SQLite database, keeps
-open-window telemetry as secondary context, and turns that into CLI reports, a
-terminal dashboard, HTML exports, and an Omarchy Quattro widget.
+**Your computer use, in perspective.**
 
-![Omastat day analytics widget](docs/assets/widget-day.png)
+Omastat is a personal activity dashboard that lives in your Omarchy bar. Click
+its widget to see where your time went, explore an app or website, and notice
+the routines that emerge over time. Tracking runs in the background and stays
+on your machine.
 
-## Quick Start
+Built for **Arch Linux, Hyprland, and the Omarchy Quattro shell**.
+
+![The Omastat widget showing a week of app use, daily trends, and personal insights](docs/assets/widget-week.png)
+
+## Start with a glance. Follow your curiosity.
+
+The bar shows your focused time. Open it for the full dashboard:
+
+- **See the bigger picture.** Switch between day, week, month, year, and lifetime,
+  or step back through earlier periods.
+- **Find where your time went.** Select a slice of the app chart, or search the
+  Apps and Websites lists. The dashboard follows your selection.
+- **Explore your rhythm.** See your busiest hours, daily trends, monthly calendar,
+  and the times of the week you tend to use an activity.
+- **Understand your visits.** Inspect time spent, days used, visit counts, and
+  typical visit length. Brief returns are grouped together; time away isn't
+  added to your usage.
+- **Notice habits you recognize.** Read insights in everyday language and open
+  their evidence to see what supports them.
+
+### Habits, with the evidence behind them
+
+An evening game can be a routine even when you don't start at exactly the same
+minute. Omastat looks for recurring use across flexible time windows, including
+recent habits and longer-running routines. Days with too much missing tracking
+are left out of the comparison.
+
+![Slay the Spire 2 selected in the widget, with an evening routine found on 10 of 14 days](docs/assets/widget-routine.png)
+
+*Selecting Slay the Spire 2 reveals an evening routine, its timing, and how often
+it appeared. Routine evidence looks across recent history; the charts show the
+selected period.*
+
+Insights take time to develop. A fresh install starts collecting from that point
+on, and early hints are labeled accordingly. Open **How we know** on an insight to inspect its supporting details.
+
+### Today and the month ahead
+
+![The day view showing app shares and a 24-hour activity ring](docs/assets/widget-day.png)
+
+*The day view shows your app mix and when you were active.*
+
+![The month view showing daily trends, calendar days, and weekday balance](docs/assets/widget-month.png)
+
+*The month view brings daily usage and weekday balance together. Scroll the
+panel to explore more activity and charts.*
+
+These are live screenshots with the current desktop theme and real local
+activity. Your colors and totals will follow your own setup.
+
+## Install
+
+You'll need a running Hyprland session, the Omarchy Quattro shell with plugin
+support, Git, and a Rust toolchain with Cargo and a C compiler. The widget uses
+the `omastat` binary and its background user service; install both before adding
+the plugin.
 
 ```bash
+git clone https://github.com/ThisIsRinesi/Omastat.git
+cd Omastat
 cargo install --path crates/omastat --locked
 packaging/systemd/install-user-service.sh
-packaging/browser-extension/install.sh
 omastat doctor
-```
 
-For the Omarchy bar widget:
-
-```bash
 omarchy plugin add https://github.com/ThisIsRinesi/Omastat.git
 omarchy plugin enable local.omastat
 ```
 
-Click the widget for the analytics panel, middle-click to refresh, and
-right-click to toggle icon-only mode.
+Make sure `~/.cargo/bin` is on your session's `PATH`. The widget appears on the
+right side of the bar by default. Activity begins accumulating while the service
+runs; no manual timer is needed.
 
-## Screenshots
+| Control | Action |
+| --- | --- |
+| Click the bar widget | Open the dashboard |
+| Middle-click the bar widget | Refresh |
+| Right-click the bar widget | Toggle icon-only mode |
+| Select an app, website, or chart slice | Explore that activity |
+| All activity | Return to the overview |
+| Tab, then Enter or Space | Navigate and select controls |
+| `/` | Search activities |
+| `R` | Refresh the dashboard |
+| Escape | Return to all activity or close the panel |
 
-![Omastat week focus heatmap](docs/assets/widget-week.png)
+Widget settings include refresh frequency and dashboard width. Narrower panels
+stack their content into one column.
 
-![Omastat month calendar analytics](docs/assets/widget-month.png)
+### Optional: website breakdowns
 
-## Features
-
-- Focused time by application.
-- Idle, locked, asleep, and desktop/portal focus are excluded from focused time.
-- Daemon outages and restart recovery gaps are marked as unobserved excluded
-  time instead of being counted as active focus.
-- Active audio playback keeps idle video or music sessions counted as active
-  focus.
-- Terminal windows can be attributed to the foreground process, such as `btop`
-  or `opencode`, instead of only the terminal emulator.
-- Optional Zen/Firefox browser extension reports only the active tab domain, so
-  browser focus breakdowns do not need window titles or browser history.
-- Steam app IDs and common desktop classes are normalized to readable names.
-- Omarchy Quattro widget with a QML analytics panel for day, week, month, year,
-  and lifetime totals, searchable apps and websites, activity trends, heatmaps,
-  visit statistics, and expandable pattern evidence.
-- Rich terminal dashboard with app composition pies, focus-flow charts, hourly
-  peaks, heatmaps, workspace focus, focus block stats, and idle, locked, sleep,
-  and unobserved signal gauges.
-- Structured insights, goals, budgets, weekly digests, and one-line widget
-  facts reuse the same local analysis engine.
-- App aliases and categories can be configured locally for cleaner labels and
-  custom groups and optional CLI budgets.
-- Raw and aggregate JSON/CSV exports include local timestamps, app totals,
-  daily totals, insights, and excluded system gaps.
-- Retention purges support dry-run review, cutoff trimming, and optional
-  SQLite vacuuming.
-- TUI colors follow Noctalia, skwd-wall/Matugen, or the current Omarchy theme
-  when those files are present.
-- Static HTML overview export for shareable day, week, month, year, and lifetime dashboards.
-
-## Install From Source
-
-From a checkout or release tarball:
+App tracking works without a browser extension. To add domain-level breakdowns
+for Zen or Firefox, install the local browser integration, then restart your
+browser:
 
 ```bash
-cargo install --path crates/omastat --locked
-packaging/systemd/install-user-service.sh
 packaging/browser-extension/install.sh
 ```
 
-Check the daemon:
+The installer needs `zip`. Firefox release builds require signed add-ons; browsers
+that enforce signing need a signed XPI for persistent use, or a temporary
+extension load for development. For a temporary load, open `about:debugging#/runtime/this-firefox`, choose
+**Load Temporary Add-on**, and select the generated XPI under
+`~/.local/share/omastat/browser-extension/`.
 
-```bash
-omastat doctor
-omastat today
-```
+The extension reports domains such as `github.com`, and Omastat counts them only
+while the browser is focused. Website time is part of browser time. The extension
+doesn't send full URLs, tab titles, page contents, or browsing history.
 
-The Arch packaging recipe is in [packaging/arch/PKGBUILD](packaging/arch/PKGBUILD).
+## What gets counted—and what stays private
 
-## Omarchy Widget
+Omastat measures the app you're using in the foreground. Idle, locked, sleep,
+and missing recordings are excluded. Active audio playback can keep an otherwise
+idle media session counted. Steam names and terminal foreground processes help
+make the activity list more recognizable.
 
-The Quattro widget requires the `omastat` binary on `PATH` and the user service
-running. Install the plugin from GitHub:
+Your data lives in a local SQLite database. There is no account or cloud service.
+By default, records contain app identifiers, timing, workspace/monitor context,
+and domains if you enable the browser integration. Omastat does not take
+screenshots or record window titles, file names, full URLs, or page contents by
+default.
 
-```bash
-omarchy plugin add https://github.com/ThisIsRinesi/Omastat.git
-omarchy plugin enable local.omastat
-```
+Title capture and read-only browser history enrichment are separate, explicit
+opt-ins. You can export your records or remove older data with `omastat purge`,
+including a dry run before deletion. See [configuration and privacy](docs/USAGE.md).
 
-It appears in the right bar section by default. Move it later with:
+## Beyond the widget
 
-```bash
-omarchy bar move local.omastat --section right
-```
-
-## Explore Your Habits
-
-The widget opens a larger dashboard with charts and insights side by side: a
-selectable app/website donut, a 24-hour rhythm ring, shaded usage trends, a
-monthly calendar with weekly totals, and weekday/hour heatmaps. Selecting an
-activity updates the detailed charts and its supporting insights.
-The widget settings include a dashboard width control; smaller widths stack
-the content into one column. Search the **Apps** or **Websites** list and select an activity to inspect its
-foreground time, days used, visits, typical visit duration, and time-of-week
-patterns. Select **All activity** to return to the overview. Click an insight
-to explore its supporting dates and sample counts.
-
-Routines look for everyday, weekday, weekend, and specific-weekday habits in
-one- and two-hour local-time windows, checked every 15 minutes. Both foreground
-use and foreground visit starts can establish a pattern. The preceding 56
-completed days form the established baseline; a 14-day baseline catches recent
-habits and labels them explicitly. Baselines are independent of the chart lens,
-and historical reports never use observations after their cutoff.
-
-Everyday/weekday/weekend routines need five matching dates, at least seven
-eligible dates, and a 60% recurrence rate. Specific-weekday routines need three
-matching weeks. Each occurrence needs five foreground minutes, and each eligible
-window needs 90% recorded coverage. Missing recordings and substantial
-unattributed browser time do not count as days you chose not to use an activity.
-The detector avoids arbitrary time claims about activity spread across the whole
-day, combines duplicate findings, and diversifies the overview across activities.
-
-Expanded evidence shows matching and eligible dates, timing windows, and whether
-the pattern is recent or established. Confidence is low below seven occurrences,
-medium from seven, and high only with 14 occurrences spanning at least four weeks
-and 75% recurrence. Visit starts mean foreground visits, not application launches;
-starts clipped by a recording boundary are excluded from start-time evidence.
-
-A visit groups returns to the same app or website within five minutes. Only
-foreground seconds contribute to duration; idle, lock, sleep, and recording
-gaps break visits. “Typical visit” is the median recorded foreground duration
-within the selected period. Website time is a subset of browser time.
-
-Use **Tab** to navigate controls, **Enter/Space** to select, **/** to search,
-**R** to refresh, and **Escape** to return to all activity or close the panel.
-
-## Usage
+The same local data is available through a terminal dashboard, command-line
+reports, and exports:
 
 ```bash
 omastat today
-omastat week
-omastat summary
-omastat summary --lens week --offset -1
-omastat widget-summary --lens day
-omastat insights --json
-omastat activity-detail --lens week --app zen
-omastat activity-detail --lens month --domain github.com
+omastat insights
 omastat tui
-omastat export --lens month --output ~/Pictures/omastat-month.html
+omastat export --lens month --output ~/omastat-month.html
 omastat export-data --lens month --format csv --output ~/omastat-month-csv
 ```
 
-More command examples and configuration notes are in [docs/USAGE.md](docs/USAGE.md).
-
-## Browser Domains
-
-The browser integration is local and domain-only. The extension listens for the
-active tab in Zen/Firefox and sends `github.com`-style host names to
-`omastat native-host`; Omastat then counts those domains only where they
-overlap with focused browser window time. It does not receive tab titles, full
-URLs, page contents, or browsing history.
-
-Run `packaging/browser-extension/install.sh` after installing the binary, then
-restart Zen/Firefox. The development reinstall script runs this step too. The extension confirms
-its active domain every 30 seconds; unconfirmed attribution expires after
-90 seconds. Blank/internal pages and browser focus loss clear the previous
-domain. Existing closed historical records are preserved.
-Firefox release builds require signed add-ons, so if Zen enforces that policy,
-use a temporary development load or a signed XPI for regular browser startup.
-
-## skwd-wall Theme
-
-Omastat can read skwd-wall/Matugen colors from the default skwd cache paths, or
-from a dedicated Omastat output. The template and integration notes are in
-[packaging/skwd-wall](packaging/skwd-wall).
-
-## Privacy
-
-By default, Omastat stores application class names, timing intervals, browser
-domains supplied by the optional local extension, and workspace/monitor context
-when Hyprland provides it. It does not store window titles, page names, file
-names, screenshots, full URLs, page contents, or browser history.
-
-Optional title capture can be enabled explicitly in the config file when richer
-replay labels are worth the extra local data. Zen Browser history enrichment is
-also opt-in and read-only. Optional title allowlists and blocklists can restrict
-captured titles further, and `omastat purge` can remove older local telemetry
-after a dry-run review. See [docs/USAGE.md](docs/USAGE.md).
+[Usage and configuration](docs/USAGE.md) covers historical periods, JSON/CSV
+exports, aliases, categories, goals, budgets, digests, and retention. Terminal
+theme integration is documented in [skwd-wall setup](packaging/skwd-wall).
 
 ## Development
 
 ```bash
-cargo test
-cargo run -p omastat -- doctor
-cargo run -p omastat --bin omastatd
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+packaging/dev/check-widget-qml.sh
 ```
 
-Development workflow notes are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+See the [development guide](docs/DEVELOPMENT.md) for local installation, widget
+checks, and screenshot tooling, or the [insights audit](docs/INSIGHTS_AUDIT.md)
+for detection rules and performance measurements. An Arch packaging recipe is
+available in [packaging/arch/PKGBUILD](packaging/arch/PKGBUILD).
 
 ## License
 
-MIT
+[MIT](LICENSE)
