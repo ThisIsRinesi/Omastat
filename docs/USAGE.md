@@ -267,3 +267,28 @@ the system D-Bus and holds a short sleep delay inhibitor when available so it
 can close active focus/open/session intervals before suspend. The matching
 resume signal closes the sleep interval and rebuilds live Hyprland state from a
 fresh snapshot.
+
+## Activity details
+
+```bash
+omastat activity-detail --lens week --app zen
+omastat activity-detail --lens month --offset -1 --domain github.com
+```
+
+Exactly one of `--app` or `--domain` is required. Use the stable `key` from
+`summary` → `activity_analytics.activities`; labels are for display. Details
+are JSON with activity statistics, daily totals, a weekday/hour heatmap,
+and structured insights including occurrence dates and eligible sample counts.
+An unknown activity returns empty statistics and charts for the requested
+period. Privacy settings control whether website records are included.
+
+`summary` includes additive `activity_analytics` metadata and searchable
+activity statistics. The existing top-app grouping remains available for
+other clients. The widget requests detail aggregates on demand and discards
+responses for superseded selections.
+
+Recorded coverage includes known inactivity and sleep, but excludes gaps in
+recording. Lifetime elapsed time starts at retained recording history. A
+stale daemon's unfinished focus ends at its last confirmed heartbeat rather
+than growing until the next restart. Raw interval exports retain stored
+start/end values; aggregate reports apply the liveness boundary.

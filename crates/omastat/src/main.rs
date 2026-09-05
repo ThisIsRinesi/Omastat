@@ -76,6 +76,27 @@ async fn main() -> Result<()> {
                 cli::summary_report(&storage, &mut steam, &config, lens.into(), offset, days)?;
             cli::print_summary(&report)?;
         }
+        Commands::ActivityDetail {
+            lens,
+            offset,
+            app,
+            domain,
+        } => {
+            let (kind, key) = if let Some(app) = app {
+                ("app", app)
+            } else {
+                ("domain", domain.unwrap())
+            };
+            cli::print_json(&omastat::report::activity_detail(
+                &storage,
+                &mut steam,
+                &config,
+                lens.into(),
+                offset,
+                kind,
+                &key,
+            )?)?;
+        }
         Commands::Insights { lens, offset } => {
             let report = cli::insights_report(&storage, &mut steam, &config, lens.into(), offset)?;
             cli::print_insights(&report, cli.json)?;

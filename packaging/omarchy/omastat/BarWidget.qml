@@ -1,12 +1,90 @@
 import QtQuick
 import Quickshell.Io
 import qs.Commons
-import qs.Ui
+import qs.Ui as Ui
 import "Model.js" as Model
 
-BarWidget {
+Ui.BarWidget {
   id: root
   moduleName: "local.omastat"
+
+  property var activityAnalytics: ({})
+  property string selectedActivityKind: ""
+  property string selectedActivityKey: ""
+  property var activityDetail: null
+  property string detailError: ""
+  property bool detailRunning: false
+  property bool detailQueued: false
+  property string loadingDetailKey: ""
+  property string detailOutput: ""
+  property bool detailOutputReady: false
+  property bool detailExitReady: false
+  property int detailExitCode: 0
+  property var detailCache: ({})
+  function detailKey() {
+    return currentKey + ":" + Model.dateKey(new Date()) + ":" + selectedActivityKind + ":" + selectedActivityKey
+  }
+  onActivityAnalyticsChanged: scheduleInjectPanel()
+  onActivityDetailChanged: scheduleInjectPanel()
+  onSelectedActivityKindChanged: scheduleInjectPanel()
+  onSelectedActivityKeyChanged: scheduleInjectPanel()
+  onDetailRunningChanged: scheduleInjectPanel()
+  onDetailErrorChanged: scheduleInjectPanel()
+
+  Process {
+    id: detailProcess
+    onExited: function(code) { root.detailExitCode = code; root.detailExitReady = true; root.finishDetail() }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { root.detailOutput = text; root.detailOutputReady = true; root.finishDetail() }
+    }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) console.warn("omastat detail", text.trim()) }
+  }
+
+  function setActivity(kind, key) {
+    selectedActivityKind = kind === "domain" ? "domain" : (kind === "app" ? "app" : "")
+    selectedActivityKey = selectedActivityKind ? String(key || "") : ""
+    activityDetail = null
+    detailError = ""
+    var cached = detailCache[detailKey()]
+    if (cached && Date.now() - cached.at < fullReportTtlMs) activityDetail = cached.data
+    if (selectedActivityKey) refreshDetail()
+    scheduleInjectPanel()
+  }
+
+  function refreshDetail() {
+    if (!selectedActivityKey) return
+    if (detailRunning) { detailQueued = true; return }
+    loadingDetailKey = detailKey()
+    detailOutputReady = false
+    detailExitReady = false
+    detailOutput = ""
+    detailError = ""
+    detailRunning = true
+    detailProcess.command = ["bash", "-lc", 'PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; exec omastat activity-detail "$@"', "omastat",
+      "--lens", selectedLens, "--offset", String(selectedOffset), "--" + selectedActivityKind, selectedActivityKey]
+    detailProcess.running = true
+  }
+
+  function finishDetail() {
+    if (!detailExitReady || !detailOutputReady) return
+    if (loadingDetailKey === detailKey() && selectedActivityKey) {
+      try {
+        if (detailExitCode !== 0) throw new Error("Activity query failed")
+        var parsed = JSON.parse(detailOutput)
+        if (!parsed || !Array.isArray(parsed.activities) || !Array.isArray(parsed.daily) || !Array.isArray(parsed.heatmap)) throw new Error("Invalid activity report")
+        activityDetail = parsed
+        var cache = detailCache
+        cache[loadingDetailKey] = { at: Date.now(), data: parsed }
+        var keys = Object.keys(cache).sort(function(a,b) { return cache[b].at - cache[a].at })
+        for (var i = cacheMaxEntries; i < keys.length; i++) delete cache[keys[i]]
+        detailCache = cache
+      } catch (error) { detailError = "Could not refresh this activity. " + (activityDetail ? "Showing the last result." : "Try again.") }
+    }
+    detailRunning = false
+    if (detailQueued) { detailQueued = false; refreshDetail() }
+    scheduleInjectPanel()
+  }
 
   property string displayText: "󰔟"
   property string tooltip: "Omastat"
@@ -137,7 +215,7 @@ BarWidget {
     }
   }
 
-  WidgetButton {
+  Ui.WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
@@ -185,6 +263,9 @@ BarWidget {
 
     selectedLens = nextLens
     selectedOffset = nextOffset
+    activityDetail = null
+    detailError = ""
+    refreshDetail()
     var key = reportKey(selectedLens, selectedOffset)
     var livePeriod = selectedOffset === 0
     var cached = cachedReport(key)
@@ -265,6 +346,8 @@ BarWidget {
   }
 
   function applyReport(report, markUpdated) {
+    activityAnalytics = report.activityAnalytics || {}
+    if (selectedActivityKey && root.opened) refreshDetail()
     rows = report.rows
     reportApps = report.apps
     browserActivity = report.browserActivity
@@ -292,6 +375,7 @@ BarWidget {
 
   function applyWidgetSummary(summary, markUpdated) {
     if (!root.opened) {
+      activityAnalytics = {}
       rows = []
       reportApps = []
       browserActivity = []
@@ -323,6 +407,7 @@ BarWidget {
   }
 
   function beginPeriodLoad(lens, offset) {
+    activityAnalytics = {}
     rows = []
     reportApps = []
     browserActivity = []
@@ -392,6 +477,12 @@ BarWidget {
     if ("selectedLens" in target) target.selectedLens = root.selectedLens
     if ("selectedOffset" in target) target.selectedOffset = root.selectedOffset
     if ("refreshRunning" in target) target.refreshRunning = root.refreshRunning
+    target.activityAnalytics = root.activityAnalytics
+    target.activityDetail = root.activityDetail
+    target.selectedActivityKind = root.selectedActivityKind
+    target.selectedActivityKey = root.selectedActivityKey
+    target.detailRunning = root.detailRunning
+    target.detailError = root.detailError
     if ("rows" in target) target.rows = root.rows
     if ("reportApps" in target) target.reportApps = root.reportApps
     if ("browserActivity" in target) target.browserActivity = root.browserActivity
@@ -530,6 +621,7 @@ BarWidget {
     var elapsed = numericField(object, "total_elapsed_seconds", Math.max(0, numericField(object, "query_end_ts", 0) - numericField(object, "query_start_ts", 0)))
     var unobserved = numericField(object, "total_unobserved_seconds", 0)
     return {
+      activityAnalytics: object.activity_analytics || {},
       rows: rows,
       apps: Array.isArray(object.apps) ? normalizeApps(object.apps) : [],
       browserActivity: Array.isArray(object.browser_activity) ? normalizeBrowserActivity(object.browser_activity) : [],
@@ -772,10 +864,10 @@ BarWidget {
     var kind = String(item && item.kind || "")
     switch (kind) {
       case "top-app": return "Top app"
-      case "same-weekday-pace": return "Usual pace"
+      case "same-weekday-pace": return "Compared with this time"
       case "usually-active-now": return "Now pattern"
       case "usual-app-now": return "Usual app now"
-      case "app-routine": return "Routine"
+      case "app-routine": return String(item.title || "Routine")
       case "focus-momentum": return "Focus momentum"
       case "day-comparison": {
         var title = String(item && item.title || "")
@@ -784,7 +876,7 @@ BarWidget {
         return title.indexOf("previous") >= 0 || comparison.indexOf("Previous") >= 0 ? "Compared with previous day" : "Compared with yesterday"
       }
       case "period-comparison": return "Compared with last period"
-      case "best-day": return "Best day"
+      case "best-day": return "Most-used day"
       case "worst-active-day": return "Lightest day"
       case "current-streak": return "Current streak"
       case "longest-streak": return "Best streak"
@@ -848,13 +940,11 @@ BarWidget {
   }
 
   function insightPriority(item) {
-    var tone = String(item && item.tone || "")
-    var category = String(item && item.category || "")
-    if (tone === "caution" || tone === "negative") return 0
-    if (category === "system-signals") return 1
-    if (tone === "positive") return 2
-    if (tone === "info") return 3
-    return 4
+    var kind = String(item && item.kind || "")
+    if (kind === "app-routine") return 0
+    if (kind === "same-weekday-pace" || kind === "period-comparison") return 1
+    if (String(item && item.category || "") === "patterns") return 2
+    return 3
   }
 
   function rewrittenDetail(detail) {

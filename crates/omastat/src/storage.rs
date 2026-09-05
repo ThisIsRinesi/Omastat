@@ -377,6 +377,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "record browser domain intervals",
         up: migrate_0009_create_browser_domain_intervals,
     },
+    Migration {
+        version: 10,
+        description: "expire browser attribution without confirmation",
+        up: migrate_0010_browser_confirmation,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,6 +457,7 @@ impl Storage {
                 .with_context(|| format!("failed to open database {} read-only", path.display()))?;
             let storage = Self { conn, path };
             storage.validate_schema()?;
+            storage.prepare_report_views(_config)?;
             return Ok(storage);
         }
 
@@ -467,7 +473,89 @@ impl Storage {
             .with_context(|| format!("failed to open database {}", path.display()))?;
         let mut storage = Self { conn, path };
         storage.migrate()?;
+        storage.prepare_report_views(_config)?;
         Ok(storage)
+    }
+
+    fn prepare_report_views(&self, config: &Config) -> Result<()> {
+        // TEMP views work on read-only connections and never change stored telemetry.
+        let grace = config.tracking.heartbeat_seconds.max(15).saturating_mul(3);
+        self.conn.execute_batch(&format!("
+            CREATE TEMP VIEW report_live_end AS
+            SELECT CASE WHEN stopped_at IS NOT NULL THEN stopped_at
+                        WHEN last_heartbeat_at < unixepoch() - {grace} THEN last_heartbeat_at
+                        ELSE NULL END AS ended_at
+            FROM daemon_runs ORDER BY id DESC LIMIT 1;
+            CREATE TEMP VIEW report_intervals AS
+            SELECT id, kind, app_class, window_address, title, workspace, monitor, started_at,
+                   COALESCE(ended_at, MAX(started_at, (SELECT ended_at FROM report_live_end))) AS ended_at
+            FROM main.intervals;
+            CREATE TEMP VIEW report_sessions AS
+            SELECT id, kind, source, started_at,
+                   COALESCE(ended_at, MAX(started_at, (SELECT ended_at FROM report_live_end))) AS ended_at
+            FROM main.session_intervals;
+        "))?;
+        Ok(())
+    }
+
+    pub fn recording_start(&self) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MIN(started_at) FROM (
+            SELECT started_at FROM intervals UNION ALL SELECT started_at FROM session_intervals
+            UNION ALL SELECT started_at FROM unobserved_intervals)",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Union of known observation windows, excluding explicitly unobserved gaps.
+    pub fn observation_windows(&self, start: i64, end: i64) -> Result<Vec<(i64, i64)>> {
+        if end <= start {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare("SELECT MAX(started_at, ?1), MIN(COALESCE(ended_at, ?2), ?2) FROM (
+            SELECT started_at, COALESCE(stopped_at,
+                CASE WHEN id = (SELECT MAX(id) FROM daemon_runs)
+                     THEN (SELECT ended_at FROM report_live_end) ELSE last_heartbeat_at END) AS ended_at
+            FROM daemon_runs
+            UNION ALL SELECT started_at, ended_at FROM report_intervals
+            UNION ALL SELECT started_at, ended_at FROM report_sessions
+            UNION ALL SELECT started_at, ended_at FROM unobserved_intervals WHERE kind = 'sleep'
+        ) WHERE started_at < ?2 AND COALESCE(ended_at, ?2) > ?1")?;
+        let spans = stmt
+            .query_map(params![start, end], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(i64, i64)>>>()?;
+        let spans = merge_windows(spans);
+        let mut gaps = self.conn.prepare(
+            "SELECT started_at, COALESCE(ended_at, ?2) FROM unobserved_intervals
+            WHERE kind = 'unobserved' AND started_at < ?2 AND COALESCE(ended_at, ?2) > ?1",
+        )?;
+        let gaps = gaps
+            .query_map(params![start, end], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(i64, i64)>>>()?;
+        let spans = crate::activity::subtract_windows(&spans, &merge_windows(gaps));
+        Ok(spans)
+    }
+
+    pub fn observed_seconds_between(&self, start: i64, end: i64) -> Result<i64> {
+        Ok(self
+            .observation_windows(start, end)?
+            .iter()
+            .map(|(a, b)| b - a)
+            .sum())
+    }
+
+    pub fn pause_windows(&self, start: i64, end: i64) -> Result<Vec<(i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT MAX(started_at, ?1), MIN(COALESCE(ended_at, ?2), ?2)
+            FROM (SELECT started_at, ended_at FROM report_sessions
+                  UNION ALL SELECT started_at, ended_at FROM unobserved_intervals)
+            WHERE started_at < ?2 AND COALESCE(ended_at, ?2) > ?1",
+        )?;
+        Ok(merge_windows(
+            stmt.query_map(params![start, end], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        ))
     }
 
     pub fn path(&self) -> &Path {
@@ -629,60 +717,59 @@ impl Storage {
         source: &str,
         app_class: &str,
         domain: &str,
-        started_at: i64,
+        at: i64,
     ) -> Result<()> {
-        let source = source.trim();
-        let app_class = app_class.trim();
-        let domain = domain.trim();
-        if source.is_empty() || app_class.is_empty() || domain.is_empty() {
+        self.record_browser_state(source, app_class, Some(domain), at)
+    }
+
+    pub fn record_browser_state(
+        &mut self,
+        source: &str,
+        app_class: &str,
+        domain: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        if source.trim().is_empty() || app_class.trim().is_empty() {
             return Ok(());
         }
-
         let tx = self.conn.transaction()?;
-        let current = tx
-            .query_row(
-                "
-                SELECT id, domain, started_at
-                FROM browser_domain_intervals
-                WHERE source = ?1
-                  AND ended_at IS NULL
-                ORDER BY started_at DESC, id DESC
-                LIMIT 1
-                ",
-                params![source],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-
-        if let Some((id, current_domain, current_started_at)) = current {
-            if current_domain == domain {
-                tx.commit()?;
-                return Ok(());
-            }
-            tx.execute(
-                "
-                UPDATE browser_domain_intervals
-                SET ended_at = MAX(started_at, ?1)
-                WHERE id = ?2
-                  AND ended_at IS NULL
-                ",
-                params![started_at.max(current_started_at), id],
-            )?;
+        let latest: Option<i64> = tx.query_row("SELECT MAX(COALESCE(last_confirmed_at, started_at))
+            FROM (SELECT last_confirmed_at, started_at FROM browser_domain_intervals WHERE app_class = ?1
+                  UNION ALL SELECT updated_at, updated_at FROM browser_activity_state WHERE app_class = ?1)", [app_class], |r| r.get(0))?;
+        if latest.is_some_and(|last| at < last) {
+            return Ok(());
         }
-
         tx.execute(
-            "
-            INSERT INTO browser_domain_intervals (source, app_class, domain, started_at)
-            VALUES (?1, ?2, ?3, ?4)
-            ",
-            params![source, app_class, domain, started_at],
+            "INSERT INTO browser_activity_state (app_class,updated_at) VALUES (?1,?2)
+            ON CONFLICT(app_class) DO UPDATE SET updated_at=excluded.updated_at",
+            params![app_class, at],
         )?;
+        // One focused browser window wins, even with multiple extension sources.
+        let current: Option<(i64, String, i64)> = tx.query_row(
+            "SELECT id, domain, COALESCE(last_confirmed_at, started_at) FROM browser_domain_intervals
+             WHERE app_class = ?1 AND source = ?2 AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+            params![app_class, source], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let (Some(domain), Some((id, current_domain, confirmed))) = (domain, current.as_ref())
+            && domain == current_domain
+            && at - confirmed <= 90
+        {
+            tx.execute(
+                "UPDATE browser_domain_intervals SET last_confirmed_at = ?1 WHERE id = ?2",
+                params![at, id],
+            )?;
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE browser_domain_intervals SET ended_at = MAX(started_at,
+            MIN(?1, COALESCE(last_confirmed_at + 90, ?1)))
+            WHERE app_class = ?2 AND ended_at IS NULL",
+            params![at, app_class],
+        )?;
+        if let Some(domain) = domain.filter(|d| !d.is_empty()) {
+            tx.execute("INSERT INTO browser_domain_intervals (source,app_class,domain,started_at,last_confirmed_at)
+                VALUES (?1,?2,?3,?4,?4)", params![source,app_class,domain,at])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1000,7 +1087,7 @@ impl Storage {
                 kind,
                 MAX(started_at, ?1) AS bounded_start,
                 MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
-            FROM intervals
+            FROM report_intervals
             WHERE started_at < ?2
               AND COALESCE(ended_at, ?2) > ?1
             ",
@@ -1035,7 +1122,7 @@ impl Storage {
                 kind,
                 MAX(started_at, ?1) AS bounded_start,
                 MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
-            FROM session_intervals
+            FROM report_sessions
             WHERE started_at < ?2
               AND COALESCE(ended_at, ?2) > ?1
             ",
@@ -1098,12 +1185,19 @@ impl Storage {
             }
         }
 
+        let observations = self.observation_windows(range_start.timestamp(), query_end)?;
         for (index, window) in boundaries.windows(2).enumerate() {
             let elapsed = query_end.min(window[1]) - window[0];
             output[index].elapsed_seconds = elapsed.max(0);
-            output[index].observed_seconds = output[index]
+            output[index].observed_seconds = observations
+                .iter()
+                .skip_while(|(_, b)| *b <= window[0])
+                .take_while(|(a, _)| *a < window[1])
+                .map(|(a, b)| (query_end.min(window[1]).min(*b) - window[0].max(*a)).max(0))
+                .sum();
+            output[index].unobserved_seconds = output[index]
                 .elapsed_seconds
-                .saturating_sub(output[index].unobserved_seconds.max(0));
+                .saturating_sub(output[index].observed_seconds);
         }
 
         Ok(output)
@@ -1285,7 +1379,7 @@ impl Storage {
                     app_class,
                     title,
                     MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
-                FROM intervals
+                FROM report_intervals
                 WHERE kind = 'focused'
                   AND title IS NOT NULL
                   AND trim(title) <> ''
@@ -1328,7 +1422,7 @@ impl Storage {
                         app_class,
                         title,
                         MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
-                    FROM intervals
+                    FROM report_intervals
                     WHERE kind = 'focused'
                       AND title IS NOT NULL
                       AND trim(title) <> ''
@@ -1373,59 +1467,110 @@ impl Storage {
         end: i64,
         limit_per_app: usize,
     ) -> Result<Vec<BrowserDomainTotals>> {
-        let mut stmt = self.conn.prepare(
-            "
-            WITH domain_totals AS (
-                SELECT
-                    focused.app_class,
-                    browser.domain,
-                    SUM(
-                        MAX(
-                            0,
-                            MIN(COALESCE(focused.ended_at, ?2), COALESCE(browser.ended_at, ?2), ?2)
-                              - MAX(focused.started_at, browser.started_at, ?1)
-                        )
-                    ) AS focused_seconds
-                FROM intervals AS focused
-                JOIN browser_domain_intervals AS browser
-                  ON browser.app_class = focused.app_class
-                 AND browser.started_at < ?2
-                 AND COALESCE(browser.ended_at, ?2) > ?1
-                 AND focused.started_at < COALESCE(browser.ended_at, ?2)
-                 AND COALESCE(focused.ended_at, ?2) > browser.started_at
-                WHERE focused.kind = 'focused'
-                  AND focused.started_at < ?2
-                  AND COALESCE(focused.ended_at, ?2) > ?1
-                GROUP BY focused.app_class, browser.domain
-            ),
-            ranked AS (
-                SELECT
+        let mut totals = BTreeMap::<(String, String), i64>::new();
+        for (app, interval) in self.browser_focused_intervals(start, end)? {
+            *totals.entry((app, interval.app_class)).or_default() +=
+                interval.ended_at - interval.started_at;
+        }
+        let mut rows = totals
+            .into_iter()
+            .map(
+                |((app_class, domain), focused_seconds)| BrowserDomainTotals {
                     app_class,
                     domain,
                     focused_seconds,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY app_class
-                        ORDER BY focused_seconds DESC, domain ASC
-                    ) AS domain_rank
-                FROM domain_totals
-                WHERE focused_seconds > 0
+                },
             )
-            SELECT app_class, domain, focused_seconds
-            FROM ranked
-            WHERE domain_rank <= ?3
-            ORDER BY app_class ASC, focused_seconds DESC, domain ASC
-            ",
-        )?;
-        let rows = stmt
-            .query_map(params![start, end, limit_per_app.max(1) as i64], |row| {
-                Ok(BrowserDomainTotals {
-                    app_class: row.get(0)?,
-                    domain: row.get(1)?,
-                    focused_seconds: row.get(2)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| {
+            a.app_class
+                .cmp(&b.app_class)
+                .then(b.focused_seconds.cmp(&a.focused_seconds))
+                .then(a.domain.cmp(&b.domain))
+        });
+        let mut counts = BTreeMap::<String, usize>::new();
+        rows.retain(|r| {
+            let n = counts.entry(r.app_class.clone()).or_default();
+            *n += 1;
+            *n <= limit_per_app.max(1)
+        });
         Ok(rows)
+    }
+
+    /// Foreground-only domain slices. Latest attribution wins overlaps from older sources.
+    pub fn browser_focused_intervals(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(String, TimelineInterval)>> {
+        let mut stmt = self.conn.prepare("SELECT browser.id, focused.app_class, browser.domain,
+            MAX(focused.started_at,browser.started_at,?1),
+            MIN(COALESCE(focused.ended_at,?2),COALESCE(browser.ended_at,?2),
+                COALESCE(browser.last_confirmed_at + 90, browser.ended_at, browser.started_at),?2), browser.started_at
+            FROM report_intervals focused JOIN browser_domain_intervals browser
+              ON browser.app_class = focused.app_class
+             AND browser.started_at < COALESCE(focused.ended_at,?2)
+             AND COALESCE(browser.ended_at,?2) > focused.started_at
+            WHERE focused.kind = 'focused' AND focused.started_at < ?2 AND COALESCE(focused.ended_at,?2) > ?1
+              AND browser.started_at < ?2 AND COALESCE(browser.ended_at,?2) > ?1")?;
+        let rows = stmt
+            .query_map(params![start, end], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut events = BTreeMap::<String, Vec<(i64, bool, usize)>>::new();
+        for (i, (_, app, _, a, b, _)) in rows.iter().enumerate() {
+            if b > a {
+                let e = events.entry(app.clone()).or_default();
+                e.push((*a, true, i));
+                e.push((*b, false, i));
+            }
+        }
+        let mut output: Vec<(String, TimelineInterval)> = Vec::new();
+        for (app, mut events) in events {
+            events.sort_unstable();
+            let mut active = BTreeSet::new();
+            let mut cursor = start;
+            for (at, add, i) in events {
+                if at > cursor
+                    && let Some(&(_, _, selected)) = active.last()
+                {
+                    let row: &(i64, String, String, i64, i64, i64) = &rows[selected];
+                    if let Some((last_app, last)) = output.last_mut()
+                        && last_app == &app
+                        && last.app_class == row.2
+                        && last.ended_at == cursor
+                    {
+                        last.ended_at = at;
+                    } else {
+                        output.push((
+                            app.clone(),
+                            TimelineInterval {
+                                kind: IntervalKind::Focused,
+                                app_class: row.2.clone(),
+                                started_at: cursor,
+                                ended_at: at,
+                            },
+                        ));
+                    }
+                }
+                let key = (rows[i].5, rows[i].0, i);
+                if add {
+                    active.insert(key);
+                } else {
+                    active.remove(&key);
+                }
+                cursor = at;
+            }
+        }
+        Ok(output)
     }
 
     pub fn focused_app_daily_totals_between(
@@ -1497,6 +1642,23 @@ impl Storage {
         workspace_limit: usize,
         app_workspace_limit: usize,
     ) -> Result<FocusedRollups> {
+        self.focused_rollups_from_metadata(
+            start,
+            end,
+            workspace_limit,
+            app_workspace_limit,
+            &self.focused_interval_metadata_between(start, end)?,
+        )
+    }
+
+    pub(crate) fn focused_rollups_from_metadata(
+        &self,
+        start: i64,
+        end: i64,
+        workspace_limit: usize,
+        app_workspace_limit: usize,
+        intervals: &[FocusedIntervalMetadata],
+    ) -> Result<FocusedRollups> {
         let mut heatmap = BTreeMap::<(u32, u32), i64>::new();
         for weekday in 0..7 {
             for hour in 0..24 {
@@ -1534,7 +1696,13 @@ impl Storage {
         let mut app_workspaces = BTreeMap::<(String, String), i64>::new();
         let mut focus_intervals = Vec::new();
 
-        for interval in self.focused_interval_metadata_between(start, end)? {
+        for original in intervals {
+            if original.ended_at <= start || original.started_at >= end {
+                continue;
+            }
+            let mut interval = original.clone();
+            interval.started_at = interval.started_at.max(start);
+            interval.ended_at = interval.ended_at.min(end);
             let duration = interval.ended_at.saturating_sub(interval.started_at);
             if duration <= 0 {
                 continue;
@@ -1684,7 +1852,7 @@ impl Storage {
                 SELECT
                     trim(workspace) AS workspace,
                     MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
-                FROM intervals
+                FROM report_intervals
                 WHERE kind = 'focused'
                   AND workspace IS NOT NULL
                   AND trim(workspace) <> ''
@@ -1725,7 +1893,7 @@ impl Storage {
                     trim(workspace) AS workspace,
                     app_class,
                     MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
-                FROM intervals
+                FROM report_intervals
                 WHERE kind = 'focused'
                   AND workspace IS NOT NULL
                   AND trim(workspace) <> ''
@@ -1763,7 +1931,7 @@ impl Storage {
                 SELECT
                     kind,
                     MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
-                FROM session_intervals
+                FROM report_sessions
                 WHERE started_at < ?2
                   AND COALESCE(ended_at, ?2) > ?1
             )
@@ -2519,6 +2687,27 @@ fn migrate_0008_add_active_interval_invariants(tx: &Transaction<'_>) -> rusqlite
     )
 }
 
+fn migrate_0010_browser_confirmation(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch("ALTER TABLE browser_domain_intervals ADD COLUMN last_confirmed_at INTEGER;
+        CREATE TABLE browser_activity_state (app_class TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);")
+}
+
+pub(crate) fn merge_windows(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    spans.retain(|(a, b)| b > a);
+    spans.sort_unstable();
+    let mut result: Vec<(i64, i64)> = Vec::new();
+    for (a, b) in spans {
+        if let Some(last) = result.last_mut()
+            && a <= last.1
+        {
+            last.1 = last.1.max(b);
+        } else {
+            result.push((a, b));
+        }
+    }
+    result
+}
+
 fn migrate_0009_create_browser_domain_intervals(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch(
         "
@@ -2582,11 +2771,11 @@ fn unknown_migration_version(applied: &BTreeSet<i64>) -> Option<i64> {
 }
 
 #[derive(Debug, Clone)]
-struct FocusedIntervalMetadata {
-    app_class: String,
-    workspace: Option<String>,
-    started_at: i64,
-    ended_at: i64,
+pub(crate) struct FocusedIntervalMetadata {
+    pub app_class: String,
+    pub workspace: Option<String>,
+    pub started_at: i64,
+    pub ended_at: i64,
 }
 
 impl Storage {
@@ -2629,7 +2818,7 @@ impl Storage {
                 app_class,
                 MAX(started_at, ?1) AS bounded_start,
                 MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
-            FROM intervals
+            FROM report_intervals
             WHERE kind = 'focused'
               AND started_at < ?2
               AND COALESCE(ended_at, ?2) > ?1
@@ -2801,7 +2990,7 @@ impl Storage {
         Ok(rows)
     }
 
-    fn focused_interval_metadata_between(
+    pub(crate) fn focused_interval_metadata_between(
         &self,
         start: i64,
         end: i64,
@@ -2813,7 +3002,7 @@ impl Storage {
                 workspace,
                 MAX(started_at, ?1) AS bounded_start,
                 MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
-            FROM intervals
+            FROM report_intervals
             WHERE kind = 'focused'
               AND started_at < ?2
               AND COALESCE(ended_at, ?2) > ?1
@@ -2915,7 +3104,7 @@ impl Storage {
                     app_class,
                     kind,
                     MAX(0, MIN(COALESCE(ended_at, ?2), ?2) - MAX(started_at, ?1)) AS overlap_seconds
-                FROM intervals
+                FROM report_intervals
                 WHERE started_at < ?2
                   AND COALESCE(ended_at, ?2) > ?1
             )
@@ -2945,7 +3134,7 @@ impl Storage {
                 app_class,
                 MAX(started_at, ?1) AS bounded_start,
                 MIN(COALESCE(ended_at, ?2), ?2) AS bounded_end
-            FROM intervals
+            FROM report_intervals
             WHERE started_at < ?2
               AND COALESCE(ended_at, ?2) > ?1
             ORDER BY bounded_start ASC, bounded_end ASC, id ASC
@@ -3126,6 +3315,7 @@ impl Storage {
                         trim_table_start(&tx, "browser_domain_intervals", cutoff)?;
                 }
                 None => {
+                    tx.execute("DELETE FROM browser_activity_state", [])?;
                     report.intervals_deleted = tx.execute("DELETE FROM intervals", [])? as i64;
                     report.session_intervals_deleted =
                         tx.execute("DELETE FROM session_intervals", [])? as i64;
@@ -3510,7 +3700,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
@@ -3689,7 +3879,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
@@ -3720,7 +3910,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
     }
 
@@ -3774,7 +3964,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
         let sleep = storage
             .start_system_interval(SystemIntervalKind::Sleep, Some("test"), 200)
@@ -4140,6 +4330,12 @@ mod tests {
             .record_browser_domain("omastat-zen", "zen", "github.com", 100)
             .unwrap();
         storage
+            .record_browser_domain("omastat-zen", "zen", "github.com", 180)
+            .unwrap();
+        storage
+            .record_browser_domain("omastat-zen", "zen", "github.com", 250)
+            .unwrap();
+        storage
             .record_browser_domain("omastat-zen", "zen", "chatgpt.com", 300)
             .unwrap();
 
@@ -4288,7 +4484,7 @@ mod tests {
         assert_eq!(
             diagnostic.schema_status,
             StorageSchemaStatus::Current {
-                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             }
         );
     }
@@ -4518,6 +4714,16 @@ mod tests {
             .unwrap();
         let started_at = (day_start + chrono::Duration::hours(1)).timestamp();
         let ended_at = (day_start + chrono::Duration::hours(2)).timestamp();
+        let observed = storage
+            .start_interval(
+                IntervalKind::Focused,
+                "editor",
+                None,
+                None,
+                day_start.timestamp(),
+            )
+            .unwrap();
+        storage.close_interval(observed, started_at).unwrap();
 
         storage
             .conn
@@ -4628,6 +4834,16 @@ mod tests {
             .unwrap();
         let started_at = (day_start + chrono::Duration::hours(1)).timestamp();
         let ended_at = (day_start + chrono::Duration::hours(2)).timestamp();
+        let observed = storage
+            .start_interval(
+                IntervalKind::Focused,
+                "editor",
+                None,
+                None,
+                day_start.timestamp(),
+            )
+            .unwrap();
+        storage.close_interval(observed, started_at).unwrap();
 
         let idle = storage
             .start_session_interval(SessionIntervalKind::Idle, Some("test"), started_at)

@@ -13,6 +13,7 @@ function controller() {
     Model,
     Qt: { callLater() {}, formatTime: () => "12:00:00" },
     reportProcess: { running: false },
+    detailProcess: { running: false },
     panelLoader: { item: null },
     opened: false,
     glyph: "timer",
@@ -118,3 +119,42 @@ for (const output of ["", "not JSON", "{}", "null", '{"total_focused_seconds":"6
 }
 
 console.log("Widget controller regression checks passed");
+
+function detailPayload(key) {
+  return JSON.stringify({ activities: [{ kind: "app", key, focused_seconds: 600 }], daily: [], heatmap: [], insights: [] });
+}
+function deliverDetail(c, output, code = 0, exitFirst = false) {
+  const stdout = () => { c.detailOutput = output; c.detailOutputReady = true; c.finishDetail(); };
+  const exit = () => { c.detailExitCode = code; c.detailExitReady = true; c.finishDetail(); };
+  if (exitFirst) { exit(); stdout(); } else { stdout(); exit(); }
+}
+for (const exitFirst of [false, true]) {
+  const c = controller();
+  c.setActivity("app", "editor");
+  c.setActivity("domain", "example.com");
+  deliverDetail(c, detailPayload("editor"), 0, exitFirst);
+  assert.equal(c.activityDetail, null, "superseded activity cannot populate the selection");
+  assert.equal(c.detailRunning, true, "latest selection is queued");
+  deliverDetail(c, detailPayload("example.com"), 0, exitFirst);
+  assert.equal(c.activityDetail.activities[0].key, "example.com");
+  c.refreshDetail();
+  deliverDetail(c, "not json");
+  assert.equal(c.activityDetail.activities[0].key, "example.com", "refresh failure preserves detail");
+  assert.ok(c.detailError);
+  c.refreshDetail();
+  deliverDetail(c, detailPayload("example.com"));
+  assert.equal(c.detailError, "");
+  c.setActivity("app", "literal'$(touch /tmp/never)`name`");
+  assert.equal(c.detailProcess.command.at(-1), "literal'$(touch /tmp/never)`name`", "activity identifiers are process arguments, never shell code");
+  c.setActivity("", "");
+  deliverDetail(c, detailPayload("old"));
+  assert.equal(c.activityDetail, null, "returning to all activity discards outstanding detail");
+}
+{
+  const c = controller();
+  c.setActivity("app", "editor");
+  c.loadingDetailKey = "yesterday";
+  deliverDetail(c, detailPayload("editor"));
+  assert.equal(c.activityDetail, null, "results from a prior date are discarded");
+}
+console.log("Activity detail controller checks passed");

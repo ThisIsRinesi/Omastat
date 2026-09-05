@@ -7,7 +7,9 @@
   "license": "MIT",
   "repository": "https://github.com/ThisIsRinesi/Omastat",
   "description": "Local app focus tracking for the Omarchy Quattro bar.",
-  "kinds": ["bar-widget"],
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
@@ -15,12 +17,18 @@
     "displayName": "Omastat",
     "description": "Shows focused time, app mix, heatmaps, and insights in a QML analytics panel.",
     "category": "Utilities",
-    "aliases": ["omastat", "usage", "time", "focus"],
+    "aliases": [
+      "omastat",
+      "usage",
+      "time",
+      "focus"
+    ],
     "defaultSection": "right",
     "allowMultiple": false,
     "defaults": {
       "refreshIntervalSec": 60,
-      "iconOnly": false
+      "iconOnly": false,
+      "panelWidth": 1160
     },
     "schema": [
       {
@@ -37,6 +45,15 @@
         "type": "boolean",
         "label": "Icon-only mode",
         "defaultValue": false
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Dashboard width",
+        "min": 380,
+        "max": 1600,
+        "step": 20,
+        "defaultValue": 1160
       }
     ]
   }

@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod analytics;
 pub mod browser;
 pub mod cli;
@@ -9,6 +10,7 @@ pub mod identity;
 pub mod insights;
 pub mod native_host;
 pub mod report;
+mod routines;
 pub mod session;
 pub mod steam;
 pub mod storage;

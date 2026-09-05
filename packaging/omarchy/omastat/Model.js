@@ -332,7 +332,7 @@ function weekTrendSummary(daily, todayKey) {
   var parts = []
   var today = totalForDay(daily, todayKey)
   if (today > 0) parts.push("Today " + fmt(today))
-  if (stats.bestDaySeconds > 0) parts.push("Best " + stats.bestDayLabel + " " + fmt(stats.bestDaySeconds))
+  if (stats.bestDaySeconds > 0) parts.push("Peak " + stats.bestDayLabel + " " + fmt(stats.bestDaySeconds))
   parts.push("Average " + fmt(stats.dailyAverageSeconds))
   parts.push(stats.activeDays + "/" + stats.totalDays + " active")
   return parts.join("  ")
@@ -359,7 +359,7 @@ function trendDefaultText(days) {
     if (!best || seconds > Number(best.seconds || 0)) best = list[i]
   }
   var parts = []
-  if (best && Number(best.seconds || 0) > 0) parts.push("Best " + String(best.fullLabel || best.label || "day") + ": " + fmt(best.seconds))
+  if (best && Number(best.seconds || 0) > 0) parts.push("Peak " + String(best.fullLabel || best.label || "day") + ": " + fmt(best.seconds))
   parts.push("Average " + fmt(list.length > 0 ? Math.round(total / list.length) : 0))
   parts.push(active + "/" + list.length + " active")
   return parts.join("  ")
@@ -733,7 +733,7 @@ function monthDefaultText(cells, weekly) {
     if (!best || Number(list[i].seconds || 0) > Number(best.seconds || 0)) best = list[i]
   }
   if (!best || Number(best.seconds || 0) <= 0) return weekly ? "No focused weekly buckets" : "No focused days"
-  return (weekly ? "Best week " : "Best day ") + String(best.label || best.date || "") + ": " + fmt(best.seconds)
+  return (weekly ? "Most-used week " : "Most-used day ") + String(best.label || best.date || "") + ": " + fmt(best.seconds)
 }
 
 var WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -869,322 +869,7 @@ function heatCellDetailText(cell) {
   return weekday + " " + hourLabel(cell.hour) + ": " + fmt(Number(cell.seconds || 0)) + " focused"
 }
 
-function insights(rows, daily, todayKey, totalSeconds) {
-  var total = Number(totalSeconds || 0)
-  if (total <= 0) return []
-
-  var out = []
-  var apps = appList(rows)
-  if (apps.length > 0) {
-    out.push({
-      label: "Top app",
-      value: apps[0].app + " - " + fmt(apps[0].seconds) + " (" + apps[0].pct + "%)",
-      category: "apps",
-      tone: "neutral",
-      detail: "Largest share of focused time in this period."
-    })
-  }
-
-  var yesterday = totalForDay(daily, previousDateKey(todayKey))
-  if (yesterday > 0) {
-    out.push({
-      label: "Compared with yesterday",
-      value: fmtDelta(total - yesterday),
-      category: "patterns",
-      tone: total >= yesterday ? "positive" : "negative",
-      detail: "Compares this period with the previous local day."
-    })
-  }
-
-  var stats = consistencyStats(daily)
-  if (stats.bestDaySeconds > 0) {
-    out.push({
-      label: "Best day",
-      value: stats.bestDayLabel + " - " + fmt(stats.bestDaySeconds),
-      category: "patterns",
-      tone: "positive",
-      detail: "Highest focused day in the loaded history."
-    })
-  }
-
-  return out
-}
-
-function enrichedInsights(baseInsights, apps, daily, heatmap, lens, totalSeconds, totalElapsedSeconds) {
-  var out = []
-  var seen = {}
-
-  function add(item) {
-    if (!item) return
-    var label = String(item.label || item.title || "")
-    var value = String(item.value || "")
-    if (label.length === 0 && value.length === 0) return
-    var key = label + "|" + value
-    if (seen[key]) return
-    seen[key] = true
-    out.push({
-      kind: String(item.kind || ""),
-      title: String(item.title || ""),
-      label: label,
-      value: value,
-      detail: String(item.detail || item.explanation || ""),
-      category: String(item.category || "patterns"),
-      confidence: String(item.confidence || ""),
-      tone: String(item.tone || "neutral"),
-      evidence: item.evidence && typeof item.evidence === "object" ? item.evidence : {},
-      supporting: item.supporting && typeof item.supporting === "object" ? item.supporting : {}
-    })
-  }
-
-  var list = baseInsights || []
-  for (var i = 0; i < list.length; i++) add(list[i])
-
-  var generated = generatedInsights(apps, daily, heatmap, lens, totalSeconds, totalElapsedSeconds)
-  for (var j = 0; j < generated.length; j++) add(generated[j])
-
-  out.sort(function(left, right) {
-    return insightPriorityValue(left) - insightPriorityValue(right)
-  })
-  return out
-}
-
-function usualPace(insights) {
-  var list = insights || []
-  for (var i = 0; i < list.length; i++) {
-    var item = list[i] || {}
-    if (String(item.kind || "") !== "same-weekday-pace") continue
-    var support = item.supporting && typeof item.supporting === "object" ? item.supporting : {}
-    var baseline = Number(support.baseline_seconds || 0)
-    var points = Number(item.evidence && item.evidence.data_points || 0)
-    var weekday = String(support.weekday_label || "this day")
-    return {
-      available: true,
-      label: "Usual pace",
-      value: String(item.title || item.value || item.label || "Usual pace"),
-      detail: baseline > 0
-        ? "Typical " + weekday + " " + fmt(baseline) + (points > 0 ? " across " + points + " days" : "")
-        : String(item.detail || item.explanation || ""),
-      tone: String(item.tone || "info")
-    }
-  }
-  return {
-    available: false,
-    label: "Period",
-    value: "",
-    detail: ""
-  }
-}
-
-function nowHabit(insights) {
-  var active = null
-  var app = null
-  var list = insights || []
-  for (var i = 0; i < list.length; i++) {
-    var item = list[i] || {}
-    var kind = String(item.kind || "")
-    if (kind === "usually-active-now") active = item
-    else if (kind === "usual-app-now") app = item
-  }
-  if (!active) {
-    return {
-      available: false,
-      label: "Peak time",
-      value: "",
-      detail: ""
-    }
-  }
-
-  var support = active.supporting && typeof active.supporting === "object" ? active.supporting : {}
-  var slot = String(active.value || support.hour_label || "Now")
-  var appLabel = app ? String(app.value || app.label || "") : ""
-  return {
-    available: true,
-    label: "Now",
-    value: String(active.title || active.label || "Usually active"),
-    detail: appLabel.length > 0 ? appLabel + " most often" : slot,
-    tone: String(active.tone || "info")
-  }
-}
-
-function generatedInsights(apps, daily, heatmap, lens, totalSeconds, totalElapsedSeconds) {
-  var out = []
-  var total = Number(totalSeconds || 0)
-  if (total <= 0) return out
-
-  var projection = monthProjectionInsight(daily, lens)
-  if (projection) out.push(projection)
-
-  var window = primeFocusWindowInsight(heatmap, total)
-  if (window) out.push(window)
-
-  var weekday = consistentWeekdayInsight(daily)
-  if (weekday) out.push(weekday)
-
-  var anchor = attentionAnchorInsight(apps, total)
-  if (anchor) out.push(anchor)
-
-  var volatility = dayVolatilityInsight(daily)
-  if (volatility) out.push(volatility)
-
-  var elapsed = Number(totalElapsedSeconds || 0)
-  if (elapsed > 0) {
-    out.push({
-      label: "Calendar capture",
-      value: percent(total / elapsed),
-      detail: fmt(total) + " focused inside " + fmt(elapsed) + " elapsed.",
-      category: "system-signals",
-      tone: total / elapsed >= 0.25 ? "positive" : "info"
-    })
-  }
-
-  return out
-}
-
-function monthProjectionInsight(daily, lens) {
-  if (String(lens || "") !== "month") return null
-  var list = daily || []
-  if (list.length < 5) return null
-  var lastDate = parseDateKey(list[list.length - 1].date)
-  if (!lastDate) return null
-  var daysInMonth = new Date(lastDate.getFullYear(), lastDate.getMonth() + 1, 0).getDate()
-  var total = 0
-  for (var i = 0; i < list.length; i++) total += dayFocusedSeconds(list[i])
-  var projected = Math.round(total / list.length * daysInMonth)
-  return {
-    label: "Projected month",
-    value: fmt(projected),
-    detail: "Current daily pace across " + list.length + " loaded days.",
-    category: "patterns",
-    tone: projected >= total ? "info" : "neutral"
-  }
-}
-
-function primeFocusWindowInsight(heatmap, totalSeconds) {
-  var hours = hourlyCells(heatmap)
-  var best = null
-  var runStart = -1
-  var runSeconds = 0
-  for (var i = 0; i <= hours.length; i++) {
-    var seconds = i < hours.length ? Number(hours[i].seconds || 0) : 0
-    if (seconds > 0) {
-      if (runStart < 0) runStart = i
-      runSeconds += seconds
-    } else if (runStart >= 0) {
-      var runEnd = i - 1
-      if (!best || runSeconds > best.seconds) best = { start: runStart, end: runEnd, seconds: runSeconds }
-      runStart = -1
-      runSeconds = 0
-    }
-  }
-  if (!best || best.seconds <= 0) return null
-  var share = Number(totalSeconds || 0) > 0 ? best.seconds / Number(totalSeconds || 1) : 0
-  return {
-    label: "Prime window",
-    value: hourLabel(best.start) + "-" + hourLabel((best.end + 1) % 24),
-    detail: fmt(best.seconds) + " focused, " + percent(share) + " of this period.",
-    category: "patterns",
-    tone: "info"
-  }
-}
-
-function consistentWeekdayInsight(daily) {
-  var list = daily || []
-  if (list.length < 7) return null
-  var buckets = []
-  for (var i = 0; i < 7; i++) buckets.push({ weekday: i, total: 0, active: 0, days: 0 })
-  for (var j = 0; j < list.length; j++) {
-    var date = parseDateKey(list[j].date)
-    if (!date) continue
-    var weekday = (date.getDay() + 6) % 7
-    var focused = dayFocusedSeconds(list[j])
-    buckets[weekday].total += focused
-    buckets[weekday].days += 1
-    if (focused > 0) buckets[weekday].active += 1
-  }
-  var best = null
-  for (var k = 0; k < buckets.length; k++) {
-    if (buckets[k].days <= 0) continue
-    var activeShare = buckets[k].active / buckets[k].days
-    var avg = Math.round(buckets[k].total / buckets[k].days)
-    if (!best || activeShare > best.activeShare || (activeShare === best.activeShare && avg > best.avg)) {
-      best = { weekday: buckets[k].weekday, activeShare: activeShare, avg: avg, days: buckets[k].days }
-    }
-  }
-  if (!best) return null
-  return {
-    label: "Most reliable day",
-    value: WEEKDAY_LABELS[best.weekday] + " - " + percent(best.activeShare),
-    detail: fmt(best.avg) + " average across " + best.days + " matching days.",
-    category: "patterns",
-    tone: best.activeShare >= 0.8 ? "positive" : "info"
-  }
-}
-
-function attentionAnchorInsight(apps, totalSeconds) {
-  var list = apps || []
-  if (list.length === 0 || Number(totalSeconds || 0) <= 0) return null
-  var top = list[0]
-  var share = Number(top.seconds || 0) / Number(totalSeconds || 1)
-  if (share < 0.25) return null
-  return {
-    label: "Attention anchor",
-    value: String(top.app || "App"),
-    detail: fmt(Number(top.seconds || 0)) + " focused, " + percent(share) + " of the period.",
-    category: "apps",
-    tone: share >= 0.5 ? "caution" : "info"
-  }
-}
-
-function dayVolatilityInsight(daily) {
-  var values = []
-  for (var i = 0; i < (daily || []).length; i++) values.push(dayFocusedSeconds(daily[i]))
-  if (values.length < 5) return null
-  var total = 0
-  for (var j = 0; j < values.length; j++) total += values[j]
-  var avg = total / values.length
-  if (avg <= 0) return null
-  var variance = 0
-  for (var k = 0; k < values.length; k++) variance += Math.pow(values[k] - avg, 2)
-  var deviation = Math.sqrt(variance / values.length)
-  var ratio = deviation / avg
-  return {
-    label: "Day volatility",
-    value: percent(Math.min(1, ratio)),
-    detail: "Typical swing is " + fmt(Math.round(deviation)) + " around the daily average.",
-    category: "focus-quality",
-    tone: ratio > 0.65 ? "caution" : (ratio < 0.30 ? "positive" : "info")
-  }
-}
-
-function insightGroups(insights) {
-  var definitions = [
-    { key: "focus-quality", title: "Focus Quality" },
-    { key: "patterns", title: "Patterns" },
-    { key: "apps", title: "Apps" },
-    { key: "system-signals", title: "System Signals" }
-  ]
-  var groups = []
-  for (var i = 0; i < definitions.length; i++) {
-    var rows = []
-    for (var j = 0; j < (insights || []).length; j++) {
-      if (String(insights[j].category || "patterns") === definitions[i].key) rows.push(insights[j])
-    }
-    if (rows.length > 0) groups.push({ key: definitions[i].key, title: definitions[i].title, rows: rows })
-  }
-  return groups
-}
-
-function insightPriorityValue(item) {
-  var tone = String(item && item.tone || "")
-  var category = String(item && item.category || "")
-  if (String(item && item.kind || "") === "same-weekday-pace") return 1
-  if (tone === "caution" || tone === "negative") return 0
-  if (category === "focus-quality") return 1
-  if (category === "patterns") return 2
-  if (category === "apps") return 3
-  if (category === "system-signals") return 4
-  return 5
-}
+// Insights are supplied by the Rust analysis engine; this module only formats charts.
 
 function hexToHsl(hex) {
   var match = /^#?([0-9a-fA-F]{6})$/.exec(String(hex || "").replace(/^\s+|\s+$/g, ""))
@@ -1291,4 +976,51 @@ function arcSegments(apps) {
     angle += frac * 360
   }
   return out
+}
+
+// Spread the first visible findings across activities without changing their claims.
+function diverseInsights(items) {
+  var first = [], remaining = [], seen = {}
+  for (var i = 0; i < (items || []).length; i++) {
+    var support = items[i].supporting || {}
+    var key = String(support.activity_kind || "app") + ":" + String(support.activity_key || support.app_class || items[i].kind || "")
+    if (seen[key]) remaining.push(items[i])
+    else { seen[key] = true; first.push(items[i]) }
+  }
+  return first.concat(remaining)
+}
+
+// Formatting only: the engine decides which findings have enough support.
+function insightDate(value) {
+  var match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""))
+  var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  if (!match || Number(match[2]) < 1 || Number(match[2]) > 12) return String(value || "")
+  return months[Number(match[2]) - 1] + " " + Number(match[3]) + ", " + match[1]
+}
+
+function insightDateRange(start, end) {
+  var first = insightDate(start), last = insightDate(end)
+  if (String(start).slice(0, 4) === String(end).slice(0, 4)) first = first.replace(/, \d{4}$/, "")
+  return first + "–" + last
+}
+
+function insightEvidence(item) {
+  var support = item.supporting || {}
+  var text = String(item.explanation || item.detail || "")
+  if (support.period_start_date && support.period_end_date)
+    text += "\nLooking back at " + insightDateRange(support.period_start_date, support.period_end_date) + "."
+  if (support.routine) {
+    var routine = support.routine
+    text += "\nThis happened on " + Number(support.occurrence_count || 0) + " of " + Number(support.eligible_count || 0) + " days with enough tracking."
+    text += "\nWe only compare times when tracking covered at least 90% of the time."
+    if (routine.eligible_dates && routine.eligible_dates.length)
+      text += "\nDays we could compare: " + routine.eligible_dates.map(insightDate).join("; ")
+  }
+  if (support.matching_dates && support.matching_dates.length)
+    text += "\n" + (support.routine ? "Days it happened: " : "Days used for comparison: ") + support.matching_dates.map(insightDate).join("; ")
+  if (item.evidence) {
+    var confidence = { low: "Limited evidence so far", medium: "Some supporting history", high: "Strong supporting history" }
+    text += "\n" + (confidence[String(item.confidence)] || "Tracking history")
+  }
+  return text
 }

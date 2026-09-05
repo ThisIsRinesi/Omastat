@@ -253,6 +253,8 @@ struct InsightCsvRow {
     open_seconds: Option<i64>,
     excluded_seconds: Option<i64>,
     share: Option<f64>,
+    routine_evidence: Option<String>,
+    matching_dates: Option<String>,
 }
 
 impl From<&Insight> for InsightCsvRow {
@@ -279,6 +281,16 @@ impl From<&Insight> for InsightCsvRow {
             open_seconds: insight.supporting.open_seconds,
             excluded_seconds: insight.supporting.excluded_seconds,
             share: insight.supporting.share,
+            routine_evidence: insight
+                .supporting
+                .routine
+                .as_ref()
+                .and_then(|r| serde_json::to_string(r).ok()),
+            matching_dates: insight
+                .supporting
+                .matching_dates
+                .as_ref()
+                .map(|d| d.join(", ")),
         }
     }
 }

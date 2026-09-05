@@ -25,14 +25,8 @@
   }
 
   function sendNativeMessage(message) {
-    try {
-      var promise = api.runtime.sendNativeMessage(hostName, message)
-      if (promise && typeof promise.catch === "function") promise.catch(function() {})
-    } catch (_) {
-      try {
-        api.runtime.sendNativeMessage(hostName, message, function() {})
-      } catch (_) {}
-    }
+    try { return Promise.resolve(api.runtime.sendNativeMessage(hostName, message)) }
+    catch (error) { return Promise.reject(error) }
   }
 
   function domainFromUrl(url) {
@@ -45,51 +39,45 @@
     }
   }
 
+  var generation = 0
+
   function sendDomain(domain, reason) {
-    if (!domain) return
     var now = Math.floor(Date.now() / 1000)
     var key = appClass + "\n" + domain
     if (key === lastKey && now - lastSentAt < 10) return
-    lastKey = key
-    lastSentAt = now
     sendNativeMessage({
-      type: "active-domain",
+      type: domain ? "active-domain" : "clear-domain",
       source: source,
       app_class: appClass,
-      domain: domain,
+      domain: domain || "",
       timestamp: now,
       reason: reason
-    })
+    }).then(function(response) {
+      if (response && response.ok) { lastKey = key; lastSentAt = now }
+    }).catch(function() { lastKey = "" })
   }
 
   function reportActive(reason) {
-    queryTabs({ active: true, currentWindow: true }).then(function(tabs) {
-      if (!tabs || !tabs.length) return
-      sendDomain(domainFromUrl(tabs[0].url), reason)
-    }).catch(function() {})
+    var request = ++generation
+    Promise.resolve(api.windows.getLastFocused()).then(function(window) {
+      if (request !== generation) return
+      if (!window || !window.focused) { sendDomain("", reason); return }
+      return queryTabs({ active: true, windowId: window.id }).then(function(tabs) {
+        if (request !== generation) return
+        sendDomain(tabs && tabs.length ? domainFromUrl(tabs[0].url) : "", reason)
+      })
+    }).catch(function() { if (request === generation) sendDomain("", reason) })
   }
 
-  api.tabs.onActivated.addListener(function() {
-    reportActive("tab-activated")
+  api.tabs.onActivated.addListener(function() { reportActive("tab-activated") })
+  api.tabs.onUpdated.addListener(function(_tabId, changeInfo) {
+    if (changeInfo.url || changeInfo.status === "complete") reportActive("tab-updated")
   })
-
-  api.tabs.onUpdated.addListener(function(_tabId, changeInfo, tab) {
-    if (!tab || !tab.active || !changeInfo.url) return
-    sendDomain(domainFromUrl(changeInfo.url), "tab-updated")
-  })
-
-  if (api.windows && api.windows.onFocusChanged) {
-    api.windows.onFocusChanged.addListener(function(windowId) {
-      if (windowId === api.windows.WINDOW_ID_NONE) return
-      reportActive("window-focused")
-    })
-  }
-
-  if (api.runtime.onStartup) api.runtime.onStartup.addListener(function() {
-    reportActive("startup")
-  })
-  if (api.runtime.onInstalled) api.runtime.onInstalled.addListener(function() {
-    reportActive("installed")
-  })
+  api.tabs.onRemoved.addListener(function() { reportActive("tab-removed") })
+  api.windows.onFocusChanged.addListener(function() { reportActive("window-focused") })
+  if (api.windows.onRemoved) api.windows.onRemoved.addListener(function() { reportActive("window-removed") })
+  if (api.runtime.onStartup) api.runtime.onStartup.addListener(function() { reportActive("startup") })
+  if (api.runtime.onInstalled) api.runtime.onInstalled.addListener(function() { reportActive("installed") })
+  setInterval(function() { reportActive("heartbeat") }, 30000)
   reportActive("loaded")
 })()

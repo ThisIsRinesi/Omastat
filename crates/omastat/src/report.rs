@@ -10,7 +10,7 @@ use crate::{
     storage::{AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, FocusedRollups, Storage},
 };
 use anyhow::{Context, Result};
-use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone, Timelike};
+use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -43,6 +43,7 @@ pub struct Period {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageReport {
+    pub activity_analytics: crate::activity::ActivityAnalytics,
     pub generated_at: i64,
     pub query_start_ts: i64,
     pub query_end_ts: i64,
@@ -281,14 +282,14 @@ pub fn widget_summary_for_period(
     lens: Lens,
     offset: i32,
 ) -> Result<WidgetSummaryReport> {
-    let period = period_for_lens(lens, offset)?;
+    let period = period_for_storage(storage, lens, offset)?;
     let rows = steam.resolve_totals(rows_for_period(storage, lens, &period)?);
     let total_focused_seconds = focused_total(&rows);
     let total_open_seconds = open_total(&rows);
     let session_totals = storage.session_totals_between(period.start_ts, period.query_end_ts)?;
     let total_elapsed_seconds = period.query_end_ts.saturating_sub(period.start_ts).max(0);
     let total_observed_seconds =
-        total_elapsed_seconds.saturating_sub(session_totals.unobserved_seconds.max(0));
+        storage.observed_seconds_between(period.start_ts, period.query_end_ts)?;
     let top_app = rows.iter().find(|row| row.focused_seconds > 0).map(|row| {
         let label = config.app_label(&row.app_class, || app_label(&row.app_class));
         let category = config.app_category(&row.app_class);
@@ -338,7 +339,7 @@ pub fn widget_summary_for_period(
         total_idle_seconds: session_totals.idle_seconds,
         total_locked_seconds: session_totals.locked_seconds,
         total_sleep_seconds: session_totals.sleep_seconds,
-        total_unobserved_seconds: session_totals.unobserved_seconds,
+        total_unobserved_seconds: (total_elapsed_seconds - total_observed_seconds).max(0),
         top_app,
         display_value,
         tooltip,
@@ -354,23 +355,46 @@ fn usage_report_with_rollups_for_period_with_days(
     offset: i32,
     trailing_days_override: Option<u32>,
 ) -> Result<UsageReportWithRollups> {
-    let period = period_for_lens(lens, offset)?;
+    let period = period_for_storage(storage, lens, offset)?;
+    let baseline_end = Local
+        .timestamp_opt(period.query_end_ts, 0)
+        .single()
+        .context("invalid report cutoff")?
+        .date_naive();
+    let context = crate::activity::AnalysisContext::load(
+        storage,
+        config,
+        steam,
+        period.start_ts,
+        period.query_end_ts,
+        baseline_end,
+    )?;
     let rows = steam.resolve_totals(rows_for_period(storage, lens, &period)?);
     let daily = daily_for_period(storage, lens, &period, trailing_days_override)?;
     let total_focused_seconds = focused_total(&rows);
     let total_open_seconds = open_total(&rows);
     let session_totals = storage.session_totals_between(period.start_ts, period.query_end_ts)?;
     let total_elapsed_seconds = period.query_end_ts.saturating_sub(period.start_ts).max(0);
-    let total_observed_seconds =
-        total_elapsed_seconds.saturating_sub(session_totals.unobserved_seconds.max(0));
+    let total_observed_seconds = context
+        .observation
+        .covered(period.start_ts, period.query_end_ts);
     let today_key = clock::local_now().format("%Y-%m-%d").to_string();
     let selected_day_key = selected_day_key(lens, &period, &daily, &today_key);
     let apps = app_breakdown_with_config(&rows, 6, config);
-    let rollups = storage.focused_rollups_between(period.start_ts, period.query_end_ts, 8, 64)?;
-    let browser_activity =
-        browser_activity_for_period(storage, config, period.start_ts, period.query_end_ts)?;
-    let historical_focus_intervals =
-        historical_focus_intervals_for_report(storage, steam, lens, &period, &daily)?;
+    let rollups = storage.focused_rollups_from_metadata(
+        period.start_ts,
+        period.query_end_ts,
+        8,
+        64,
+        &context.metadata,
+    )?;
+    let browser_activity = browser_activity_for_period(
+        storage,
+        config,
+        period.start_ts,
+        period.query_end_ts,
+        &context,
+    )?;
     let heatmap = rollups.heatmap.clone();
     let focus_intervals = rollups
         .focus_intervals
@@ -389,13 +413,10 @@ fn usage_report_with_rollups_for_period_with_days(
         daily: &daily,
         heatmap: &heatmap,
         focus_intervals: &focus_intervals,
-        historical_focus_intervals: &historical_focus_intervals,
         workspaces: &workspaces,
         app_workspaces: &app_workspaces,
         today_key: &today_key,
         selected_day_key: &selected_day_key,
-        current_weekday: current_weekday(lens, &period),
-        current_hour: current_hour(lens, &period),
         period: AnalysisPeriod {
             lens: lens.into(),
             label: &period.meta.label,
@@ -404,18 +425,40 @@ fn usage_report_with_rollups_for_period_with_days(
         },
         previous_period,
         total_focused_seconds,
+        observed_seconds: total_observed_seconds,
+        elapsed_seconds: total_elapsed_seconds,
+        continuity: Some(&context.observation),
+        pauses: Some(&context.pauses),
         total_open_seconds,
         total_idle_seconds: session_totals.idle_seconds,
         total_locked_seconds: session_totals.locked_seconds,
         total_sleep_seconds: session_totals.sleep_seconds,
-        total_unobserved_seconds: session_totals.unobserved_seconds,
+        total_unobserved_seconds: (total_elapsed_seconds - total_observed_seconds).max(0),
     });
+    if lens == Lens::Day && offset == 0 {
+        insights.retain(|i| i.kind != insights::InsightKind::DayComparison);
+        if let Some(pace) = crate::activity::same_time_from_context(&context, period.query_end_ts)?
+        {
+            insights.insert(0, pace);
+        }
+    }
+    let activity_analytics = crate::activity::analyze_context(
+        &context,
+        config,
+        period.start_ts,
+        period.query_end_ts,
+        baseline_end,
+        None,
+        false,
+    )?;
+    insights.splice(0..0, activity_analytics.insights.clone());
     apply_configured_insight_labels(&mut insights, config);
 
     let generated_at = clock::unix_now();
     let widget_insight = widget_insight_for(&insights, generated_at);
 
     let report = UsageReport {
+        activity_analytics,
         generated_at,
         query_start_ts: period.start_ts,
         query_end_ts: period.query_end_ts,
@@ -430,7 +473,7 @@ fn usage_report_with_rollups_for_period_with_days(
         total_idle_seconds: session_totals.idle_seconds,
         total_locked_seconds: session_totals.locked_seconds,
         total_sleep_seconds: session_totals.sleep_seconds,
-        total_unobserved_seconds: session_totals.unobserved_seconds,
+        total_unobserved_seconds: (total_elapsed_seconds - total_observed_seconds).max(0),
         rows,
         apps,
         browser_activity,
@@ -615,6 +658,44 @@ impl From<Lens> for AnalysisLens {
     }
 }
 
+pub fn activity_detail(
+    storage: &Storage,
+    steam: &mut SteamResolver,
+    config: &Config,
+    lens: Lens,
+    offset: i32,
+    kind: &str,
+    key: &str,
+) -> Result<crate::activity::ActivityAnalytics> {
+    let period = period_for_storage(storage, lens, offset)?;
+    let baseline_end = if offset == 0 {
+        clock::local_now().date_naive()
+    } else {
+        Local
+            .timestamp_opt(period.query_end_ts, 0)
+            .single()
+            .context("invalid period end")?
+            .date_naive()
+    };
+    crate::activity::analyze(
+        storage,
+        config,
+        steam,
+        period.start_ts,
+        period.query_end_ts,
+        baseline_end,
+        Some((kind, key)),
+    )
+}
+
+fn period_for_storage(storage: &Storage, lens: Lens, offset: i32) -> Result<PeriodBounds> {
+    let mut period = period_for_lens(lens, offset)?;
+    if lens == Lens::Life {
+        period.start_ts = storage.recording_start()?.unwrap_or(period.query_end_ts);
+    }
+    Ok(period)
+}
+
 struct PeriodBounds {
     meta: Period,
     start_date: Option<NaiveDate>,
@@ -778,7 +859,7 @@ fn previous_period_comparison(
         return Ok(None);
     }
 
-    let previous = period_for_lens(lens, period.meta.offset.saturating_sub(1))?;
+    let previous = period_for_storage(storage, lens, period.meta.offset.saturating_sub(1))?;
     let matched_elapsed = period.meta.offset == 0;
     let previous_query_end_ts = if matched_elapsed {
         let elapsed = period.query_end_ts.saturating_sub(period.start_ts);
@@ -797,6 +878,9 @@ fn previous_period_comparison(
         end_date: previous.meta.end_date,
         focused_seconds: focused_total(&rows),
         matched_elapsed,
+        observed_seconds: storage
+            .observed_seconds_between(previous.start_ts, previous_query_end_ts)?,
+        elapsed_seconds: (previous_query_end_ts - previous.start_ts).max(0),
     }))
 }
 
@@ -856,9 +940,10 @@ fn browser_activity_for_period(
     config: &Config,
     start_ts: i64,
     end_ts: i64,
+    context: &crate::activity::AnalysisContext,
 ) -> Result<Vec<BrowserActivity>> {
     if config.privacy.browser_domains {
-        let domains = storage.browser_domain_totals_between(start_ts, end_ts, 32)?;
+        let domains = context.domain_totals(start_ts, end_ts);
         let rows = browser::browser_activity_from_domains(&domains, 8);
         if !rows.is_empty() {
             return Ok(rows);
@@ -876,47 +961,6 @@ fn browser_activity_for_period(
         BrowserHistoryResolver::disabled()
     };
     Ok(browser::browser_activity(&titles, &mut history, 8))
-}
-
-fn historical_focus_intervals_for_report(
-    storage: &Storage,
-    steam: &mut SteamResolver,
-    lens: Lens,
-    period: &PeriodBounds,
-    daily: &[DayTotals],
-) -> Result<Vec<crate::storage::TimelineInterval>> {
-    if period.meta.offset != 0 || !matches!(lens, Lens::Day | Lens::Week | Lens::Month | Lens::Life)
-    {
-        return Ok(Vec::new());
-    }
-
-    let Some(first_day) = daily.first() else {
-        return Ok(Vec::new());
-    };
-    let start_date = NaiveDate::parse_from_str(&first_day.date, "%Y-%m-%d")
-        .context("failed to parse first historical day")?;
-    let start_ts = local_midnight(start_date)?.timestamp();
-    let mut intervals = storage.focused_timeline_between(start_ts, period.query_end_ts)?;
-    for interval in &mut intervals {
-        interval.app_class = steam.resolve_class(&interval.app_class);
-    }
-    Ok(intervals)
-}
-
-fn current_weekday(lens: Lens, period: &PeriodBounds) -> Option<u32> {
-    if lens == Lens::Day && period.meta.offset == 0 {
-        Some(clock::local_now().weekday().num_days_from_monday())
-    } else {
-        None
-    }
-}
-
-fn current_hour(lens: Lens, period: &PeriodBounds) -> Option<u32> {
-    if lens == Lens::Day && period.meta.offset == 0 {
-        Some(clock::local_now().hour())
-    } else {
-        None
-    }
 }
 
 fn local_midnight(date: NaiveDate) -> Result<chrono::DateTime<Local>> {
@@ -1078,7 +1122,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let db = dir.path().join("omastat.db");
         let config = Config::default();
-        let storage = Storage::open(Some(&db), &config)?;
+        let mut storage = Storage::open(Some(&db), &config)?;
         let selected_date = Local::now().date_naive() - Duration::days(1);
         let previous_date = selected_date - Duration::days(1);
         let previous_start = local_midnight(previous_date)?.timestamp() + 60 * 60;
@@ -1102,6 +1146,11 @@ mod tests {
         )?;
         storage.close_interval(selected, selected_start + 40 * 60)?;
 
+        let run = storage.start_daemon_run(local_midnight(previous_date)?.timestamp())?;
+        storage.finish_daemon_run(
+            run.run_id,
+            local_midnight(selected_date + Duration::days(1))?.timestamp(),
+        )?;
         let mut steam = SteamResolver::default();
         let report = usage_report_for_period_with_days(
             &storage,
@@ -1131,8 +1180,8 @@ mod tests {
             .find(|insight| insight.kind == crate::insights::InsightKind::DayComparison)
             .expect("historical report should compare with the previous day");
 
-        assert_eq!(comparison.title, "vs previous day");
-        assert_eq!(comparison.value, "+10m");
+        assert_eq!(comparison.title, "Compared with the day before");
+        assert_eq!(comparison.value, "10m more");
 
         Ok(())
     }
@@ -1140,6 +1189,7 @@ mod tests {
     #[test]
     fn insights_report_json_keeps_structured_payload_compact() {
         let usage = UsageReport {
+            activity_analytics: Default::default(),
             generated_at: 1234,
             query_start_ts: 1000,
             query_end_ts: 2000,

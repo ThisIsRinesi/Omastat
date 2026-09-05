@@ -251,7 +251,7 @@ mod tests {
             "System",
             "Top app",
             "Ghostty",
-            "Observed",
+            "Recorded use",
         ] {
             assert!(rendered.contains(label), "missing {label}");
         }
@@ -419,6 +419,7 @@ mod tests {
         let query_end_ts = Local::now().timestamp();
         let total_unobserved_seconds = daily.iter().map(|day| day.unobserved_seconds).sum();
         let report = UsageReport {
+            activity_analytics: Default::default(),
             generated_at: 0,
             query_start_ts,
             query_end_ts,

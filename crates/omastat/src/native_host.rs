@@ -40,20 +40,20 @@ fn handle_message(
     database: Option<&std::path::Path>,
     message: &BrowserDomainMessage,
 ) -> Result<&'static str> {
-    if message.kind != "active-domain" {
+    if message.kind != "active-domain" && message.kind != "clear-domain" {
         return Ok("ignored");
     }
     if !config.privacy.browser_domains {
         return Ok("disabled");
     }
 
-    let Some(domain) = message
+    let domain = message
         .domain
         .as_deref()
-        .and_then(browser::normalize_domain)
-    else {
+        .and_then(browser::normalize_domain);
+    if message.kind == "active-domain" && domain.is_none() {
         return Ok("ignored");
-    };
+    }
     let app_class = message
         .app_class
         .as_deref()
@@ -66,10 +66,23 @@ fn handle_message(
         .map(normalize_source)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| app_class.clone());
-    let timestamp = message.timestamp.unwrap_or_else(clock::unix_now);
+    let now = clock::unix_now();
+    let timestamp = message.timestamp.unwrap_or(now).min(now);
+    if timestamp < now - 90 {
+        return Ok("stale");
+    }
 
     let mut storage = Storage::open_with_mode(database, config, StorageOpenMode::ReadWriteMigrate)?;
-    storage.record_browser_domain(&source, &app_class, &domain, timestamp)?;
+    storage.record_browser_state(
+        &source,
+        &app_class,
+        if message.kind == "clear-domain" {
+            None
+        } else {
+            domain.as_deref()
+        },
+        timestamp,
+    )?;
     Ok("recorded")
 }
 

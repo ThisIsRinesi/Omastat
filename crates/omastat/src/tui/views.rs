@@ -5,9 +5,7 @@ use super::{
 };
 use crate::{
     clock,
-    insights::{
-        Insight, InsightCategory, InsightConfidence, InsightKind, InsightSupport, InsightTone,
-    },
+    insights::{Insight, InsightCategory, InsightConfidence, InsightSupport, InsightTone},
     report::{self, Lens},
     storage::{
         AppDayTotals, AppTotals, DayTotals, FocusHeatCell, IntervalKind, SystemIntervalKind,
@@ -500,9 +498,9 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
 
     let mut lines = insight_support_lines(&insight.supporting, support.width as usize, theme);
     lines.push(widgets::metric_line(
-        "Samples",
+        "Based on",
         &format!(
-            "{} / {} needed",
+            "{} records (minimum {})",
             insight.evidence.data_points, insight.evidence.minimum_data_points
         ),
         support.width as usize,
@@ -510,7 +508,7 @@ fn render_insight_detail(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
         theme,
     ));
     lines.push(widgets::metric_line(
-        "Observed",
+        "Recorded use",
         &report::format_duration(insight.evidence.observed_focus_seconds),
         support.width as usize,
         theme.muted,
@@ -2430,104 +2428,10 @@ fn insight_category_label(category: InsightCategory) -> &'static str {
 }
 
 fn insight_display_title(insight: &Insight) -> String {
-    match insight.kind {
-        InsightKind::TopApp => "Top app".to_string(),
-        InsightKind::DayComparison => "Compared with yesterday".to_string(),
-        InsightKind::SameWeekdayPace => "Usual pace".to_string(),
-        InsightKind::UsuallyActiveNow => "Now pattern".to_string(),
-        InsightKind::UsualAppNow => "Usual app now".to_string(),
-        InsightKind::AppRoutine => "Routine".to_string(),
-        InsightKind::FocusMomentum => "Focus momentum".to_string(),
-        InsightKind::PeriodComparison => "Compared with last period".to_string(),
-        InsightKind::BestDay => "Best day".to_string(),
-        InsightKind::WorstActiveDay => "Lightest day".to_string(),
-        InsightKind::CurrentStreak => "Current streak".to_string(),
-        InsightKind::LongestStreak => "Best streak".to_string(),
-        InsightKind::PeakFocusHour => "Top hour".to_string(),
-        InsightKind::PeakFocusWeekday => "Top weekday".to_string(),
-        InsightKind::DeepWorkBlocks => "Long sessions".to_string(),
-        InsightKind::AppSwitchRate => "App changes".to_string(),
-        InsightKind::FragmentedApp => "Most interrupted app".to_string(),
-        InsightKind::FocusDensity => "Focus share".to_string(),
-        InsightKind::AppFocusDensity if insight.title.to_lowercase().contains("lowest") => {
-            "Lowest focus share app".to_string()
-        }
-        InsightKind::AppFocusDensity => "Highest focus share app".to_string(),
-        InsightKind::EffectiveApps => "Focus spread".to_string(),
-        InsightKind::StrongestWorkspace => "Top workspace".to_string(),
-        InsightKind::WorkspaceAppAffinity => "Workspace pairing".to_string(),
-        InsightKind::IdleExcluded => "Away time".to_string(),
-        InsightKind::LockedExcluded => "Locked time".to_string(),
-        InsightKind::SleepExcluded => "Sleep time".to_string(),
-        InsightKind::UnobservedExcluded => "Tracker off time".to_string(),
-        InsightKind::ExcludedImpact => "Not counted time".to_string(),
-        InsightKind::FocusAnomaly => "Unusual focus time".to_string(),
-        InsightKind::AppAnomaly => "Unusual app time".to_string(),
-        InsightKind::HourAnomaly => "Unusual hour".to_string(),
-        InsightKind::UnobservedAnomaly => "Tracker off gap".to_string(),
-    }
+    insight.title.clone()
 }
-
 fn insight_display_explanation(insight: &Insight) -> String {
-    match insight.kind {
-        InsightKind::TopApp => {
-            "The app with the largest share of focused time in this period.".to_string()
-        }
-        InsightKind::DayComparison => {
-            "Compares today's focus time with yesterday.".to_string()
-        }
-        InsightKind::SameWeekdayPace => {
-            "Compares today with prior active days on the same weekday.".to_string()
-        }
-        InsightKind::UsuallyActiveNow => {
-            "Shows when the current weekday and hour are usually active.".to_string()
-        }
-        InsightKind::UsualAppNow => {
-            "Shows the app most often focused in this usual time slot.".to_string()
-        }
-        InsightKind::AppRoutine => {
-            "Shows the strongest recurring app, weekday, and time-of-day pattern.".to_string()
-        }
-        InsightKind::FocusMomentum => {
-            "Compares the last 7 loaded days with the 7 days before them.".to_string()
-        }
-        InsightKind::PeriodComparison => {
-            "Compares this period with the previous matching period.".to_string()
-        }
-        InsightKind::WorstActiveDay => {
-            "Shows the active day with the least focused time in this period.".to_string()
-        }
-        InsightKind::DeepWorkBlocks => {
-            "Counts long focus sessions at or above your long session threshold.".to_string()
-        }
-        InsightKind::AppSwitchRate => {
-            "Counts how often focus moved from one app to another.".to_string()
-        }
-        InsightKind::FragmentedApp => {
-            "Shows the app with the shortest typical focus sessions.".to_string()
-        }
-        InsightKind::FocusDensity => "Compares focus with the surrounding tracked time.".to_string(),
-        InsightKind::AppFocusDensity => {
-            "Uses open-time telemetry as a background signal for app focus facts.".to_string()
-        }
-        InsightKind::EffectiveApps => {
-            "Estimates how broadly your focus was spread across apps.".to_string()
-        }
-        InsightKind::IdleExcluded => "Away time was not counted as focus.".to_string(),
-        InsightKind::LockedExcluded => "Locked-screen time was not counted as focus.".to_string(),
-        InsightKind::SleepExcluded => "Sleep time was not counted as focus.".to_string(),
-        InsightKind::UnobservedExcluded => {
-            "Tracker off time was not counted as focus.".to_string()
-        }
-        InsightKind::ExcludedImpact => {
-            "Shows how much time was left out because it was away, locked, sleep, or tracker off time."
-                .to_string()
-        }
-        InsightKind::UnobservedAnomaly => {
-            "Flags a tracker off gap that is larger than usual.".to_string()
-        }
-        _ => insight.explanation.clone(),
-    }
+    insight.explanation.clone()
 }
 
 fn insight_tone_label(tone: InsightTone) -> &'static str {
@@ -2562,9 +2466,9 @@ fn insight_tone_color(tone: InsightTone, theme: &Theme) -> Color {
 
 fn insight_confidence_label(confidence: InsightConfidence) -> &'static str {
     match confidence {
-        InsightConfidence::Low => "low confidence",
-        InsightConfidence::Medium => "medium confidence",
-        InsightConfidence::High => "high confidence",
+        InsightConfidence::Low => "limited evidence",
+        InsightConfidence::Medium => "some supporting history",
+        InsightConfidence::High => "strong supporting history",
     }
 }
 
@@ -2574,6 +2478,51 @@ fn insight_support_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if let Some(routine) = &support.routine {
+        push_optional_metric(
+            &mut lines,
+            "Routine",
+            Some(if routine.status == "recent" {
+                "A recent habit"
+            } else {
+                "A recurring habit"
+            }),
+            width,
+            theme.primary,
+            theme,
+        );
+        push_optional_metric(
+            &mut lines,
+            "How often",
+            Some(&format!(
+                "{} of {} days with enough tracking",
+                support.occurrence_count.unwrap_or(0),
+                support.eligible_count.unwrap_or(0)
+            )),
+            width,
+            theme.primary,
+            theme,
+        );
+        push_optional_metric(
+            &mut lines,
+            "Days compared",
+            Some(&routine.eligible_dates.join(", ")),
+            width,
+            theme.secondary,
+            theme,
+        );
+    }
+    if let Some(dates) = &support.matching_dates {
+        push_optional_metric(
+            &mut lines,
+            "Days it happened",
+            Some(&dates.join(", ")),
+            width,
+            theme.secondary,
+            theme,
+        );
+    }
+
     push_optional_metric(
         &mut lines,
         "Period",

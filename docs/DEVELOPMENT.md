@@ -118,3 +118,76 @@ writes a PNG under `/tmp`, prints the path, and closes the panel. Use
 `--region GEOMETRY` for a panel-only crop, `--select` to pick a region
 interactively with `slurp`, or `--keep-open`, `--delay SECONDS`, and
 `--output PATH` when a review needs a specific state.
+
+## Dashboard validation
+
+Run `cargo test --locked` and `packaging/dev/check-widget-qml.sh` before
+installing. The latter uses Qt 6 tools and covers QML parsing, chart helpers, report/detail
+request races, and browser domain lifecycle events. The Rust integration
+suite runs activity reports across spring and autumn DST transitions without
+changing the process-global timezone.
+
+The dashboard uses `activity.rs` for observation-backed recurrence and visit
+analytics. JavaScript formats charts; it does not infer extra insights.
+Pattern baselines are separate from visible chart history. Website foreground
+slices are shared with the browser breakdown so totals reconcile.
+
+Migration 10 adds browser confirmation timestamps and latest-event state.
+Install the CLI, daemon, widget, and browser extension together using the
+existing reinstall script. Restart the browser to activate its updated
+extension. The migration is additive; older binaries cannot read the new
+schema. Back up the SQLite database before installation when validating an
+upgrade. Do not rewrite old historical domain attribution from guesses.
+
+Visual checks should include every lens, activity selection, insight evidence,
+long labels, an empty period, and a narrow panel. Reports were also checked
+against an isolated copy of the local database for overview/detail agreement.
+
+## Pattern and insight engine
+
+`activity.rs` loads a request-scoped analysis context; `routines.rs` evaluates
+local-clock recurrence using date bitsets and 15-minute buckets. Coverage uses
+merged intervals and cumulative lengths, so overlap queries use binary search.
+The context supplies foreground metadata to overview rollups, domain slices to
+browser summaries, and history to same-time comparisons. Routine analysis never
+extends beyond 56 completed days, even when the selected chart is lifetime.
+
+`InsightSupport.routine` is additive JSON evidence: cadence, status, local
+start/end minutes, timing basis (`usage`, `visit-start`, or
+`usage-and-visit-start`), eligible dates, and an optional visit-start window.
+Ends are exclusive and may wrap past midnight. Matching dates identify the date
+on which the window begins. Combined findings require identical matching dates,
+eligible dates, cadence, and baseline. The longer qualifying baseline wins;
+recent-only observation cannot establish a long-term everyday routine.
+
+Candidates require 60% recurrence and 90% coverage, plus the minimum counts in
+the README. A window must contain at least 1.5 times the activity expected from
+its fraction of the clock day; this suppresses arbitrary windows for all-day
+foreground activity. Confidence, occurrence count, recurrence share, window
+width, and stable textual ties determine rank. Related overlapping or adjacent
+windows are deduplicated before taking three routines per activity. Overview
+selection takes one finding per activity before additional findings and the
+12-result limit. No JavaScript detector or persistent analytics cache exists.
+
+Comparisons require 90% observation on both sides and include observed zero-use
+periods. Daily anomalies use completed observed dates, seven other baseline
+dates, and a median / median-absolute-deviation threshold with a 30-minute floor.
+Contiguous same-app telemetry fragments form one foreground block; any time gap
+breaks continuity for blocks and app switches. Concentration facts are descriptive
+and make no claim about productivity or historical unusualness.
+
+Run the standard Rust and widget checks, plus
+`cargo clippy --locked --all-targets -- -D warnings`. `routine_reports` tests overview/detail and cross-lens evidence;
+`activity_timezones` tests recurrence and totals through both DST transitions.
+`packaging/dev/benchmark-insights.py OLD NEW --database SNAPSHOT` compares release
+binaries and asserts unchanged recorded usage totals. Add
+`--synthetic-intervals 200000` for 400,000 generated focus/open rows in a temporary
+database using the supplied schema, without copying private telemetry.
+
+See [INSIGHTS_AUDIT.md](INSIGHTS_AUDIT.md) for findings and measured performance.
+
+Insight copy is written for the person using the app: use "app time," "a typical
+day," and "days with enough tracking" in prose. Keep technical terms and exact
+methods in structured evidence and these docs. Routine wording is applied after
+ranking so presentation changes cannot change detection. Display local times as
+readable clock ranges, while retaining numeric minutes in JSON evidence.

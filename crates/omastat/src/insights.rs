@@ -4,7 +4,7 @@ use crate::{
         AppTotals, AppWorkspaceTotals, DayTotals, FocusHeatCell, TimelineInterval, WorkspaceTotals,
     },
 };
-use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -32,6 +32,8 @@ pub struct AnalysisComparisonPeriod {
     pub end_date: Option<String>,
     pub focused_seconds: i64,
     pub matched_elapsed: bool,
+    pub observed_seconds: i64,
+    pub elapsed_seconds: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -40,16 +42,17 @@ pub struct AnalysisInput<'a> {
     pub daily: &'a [DayTotals],
     pub heatmap: &'a [FocusHeatCell],
     pub focus_intervals: &'a [TimelineInterval],
-    pub historical_focus_intervals: &'a [TimelineInterval],
     pub workspaces: &'a [WorkspaceTotals],
     pub app_workspaces: &'a [AppWorkspaceTotals],
     pub today_key: &'a str,
     pub selected_day_key: &'a str,
-    pub current_weekday: Option<u32>,
-    pub current_hour: Option<u32>,
     pub period: AnalysisPeriod<'a>,
     pub previous_period: Option<AnalysisComparisonPeriod>,
     pub total_focused_seconds: i64,
+    pub observed_seconds: i64,
+    pub elapsed_seconds: i64,
+    pub continuity: Option<&'a crate::activity::Coverage>,
+    pub pauses: Option<&'a crate::activity::Coverage>,
     pub total_open_seconds: i64,
     pub total_idle_seconds: i64,
     pub total_locked_seconds: i64,
@@ -141,8 +144,33 @@ pub struct InsightEvidence {
     pub observed_open_seconds: i64,
 }
 
+/// Local clock minutes, with an exclusive end that may wrap past midnight.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineEvidence {
+    pub cadence: String,
+    pub status: String,
+    pub start_minute: u32,
+    pub end_minute: u32,
+    pub timing_basis: String,
+    pub eligible_dates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visit_start_window: Option<(u32, u32)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InsightSupport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<RoutineEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matching_dates: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,16 +247,10 @@ pub struct InsightSupport {
 
 pub fn analyze(input: AnalysisInput<'_>) -> Vec<Insight> {
     let mut out = Vec::new();
-    let blocks = focus_blocks(input.focus_intervals);
+    let blocks = focus_blocks(&input);
 
     if input.total_focused_seconds > 0 {
         push_top_app(&input, &mut out);
-        push_day_comparison(&input, &mut out);
-        push_same_weekday_pace(&input, &mut out);
-        push_current_habit_facts(&input, &mut out);
-        push_app_routine_fact(&input, &mut out);
-        push_focus_momentum_fact(&input, &mut out);
-        push_period_comparison(&input, &mut out);
         push_day_facts(&input, &mut out);
         push_peak_facts(&input, &mut out);
         push_deep_work_facts(&input, &blocks, &mut out);
@@ -239,8 +261,37 @@ pub fn analyze(input: AnalysisInput<'_>) -> Vec<Insight> {
         push_anomaly_facts(&input, &mut out);
     }
 
+    push_day_comparison(&input, &mut out);
+    push_period_comparison(&input, &mut out);
     push_system_facts(&input, &mut out);
 
+    for insight in &mut out {
+        if matches!(insight.tone, InsightTone::Positive | InsightTone::Negative)
+            || (insight.tone == InsightTone::Caution
+                && insight.category != InsightCategory::SystemSignals)
+        {
+            insight.tone = InsightTone::Info;
+        }
+        let points = match insight.kind {
+            InsightKind::DeepWorkBlocks => blocks.len(),
+            InsightKind::AppSwitchRate => insight.supporting.switch_count.unwrap_or(0),
+            InsightKind::FragmentedApp => insight.supporting.block_count.unwrap_or(0),
+            InsightKind::TopApp | InsightKind::AppAnomaly | InsightKind::EffectiveApps => {
+                active_app_count(input.rows)
+            }
+            InsightKind::DayComparison | InsightKind::PeriodComparison => 2,
+            InsightKind::FocusAnomaly => insight.evidence.data_points,
+            _ => input
+                .daily
+                .iter()
+                .filter(|d| in_period(&input, d) && eligible_day(d))
+                .count(),
+        };
+        insight.evidence.data_points = points;
+        if insight.evidence.minimum_data_points > 0 && insight.kind != InsightKind::FocusAnomaly {
+            insight.confidence = confidence(points, insight.evidence.minimum_data_points);
+        }
+    }
     out
 }
 
@@ -276,32 +327,6 @@ struct FragmentedApp {
     rate_per_hour: f64,
 }
 
-#[derive(Debug, Clone)]
-struct SlotApp {
-    app_class: String,
-    focused_seconds: i64,
-    active_days: usize,
-    share: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Daypart {
-    key: &'static str,
-    label: &'static str,
-    start_hour: u32,
-    end_hour: u32,
-}
-
-#[derive(Debug, Clone)]
-struct AppRoutine {
-    app_class: String,
-    weekday: u32,
-    daypart: Daypart,
-    focused_seconds: i64,
-    active_days: usize,
-    share: f64,
-}
-
 fn push_top_app(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
     let Some(top) = input.rows.iter().find(|row| row.focused_seconds > 0) else {
         return;
@@ -317,14 +342,14 @@ fn push_top_app(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         } else {
             InsightTone::Neutral
         },
-        title: "Top app share".to_string(),
+        title: "Your most-used app".to_string(),
         value: format!(
             "{} - {} ({})",
             app_label,
             format_duration(top.focused_seconds),
             percent(share)
         ),
-        explanation: "The app with the largest share of focused time in this period.".to_string(),
+        explanation: "You spent more of your app time here than anywhere else.".to_string(),
         confidence: confidence(input.daily.len(), 1),
         evidence: evidence(input, 1),
         supporting: period_support(input.period).with_app(
@@ -346,7 +371,12 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
     else {
         return;
     };
-    if yesterday <= 0 {
+    if !covered_enough(input.observed_seconds, input.elapsed_seconds)
+        || !input
+            .daily
+            .iter()
+            .any(|d| d.date == comparison_date && eligible_day(d))
+    {
         return;
     }
 
@@ -362,12 +392,12 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         category: InsightCategory::Patterns,
         tone: comparison_tone(delta),
         title: if selected_label == "Today" {
-            "vs yesterday".to_string()
+            "Compared with yesterday".to_string()
         } else {
-            "vs previous day".to_string()
+            "Compared with the day before".to_string()
         },
         value: signed_duration(delta),
-        explanation: "Compares focused time for the selected day with the previous local day."
+        explanation: "How much your app time changed from the day before. Both days had enough tracking to compare."
             .to_string(),
         confidence: confidence(input.daily.len(), 2),
         evidence: evidence(input, 2),
@@ -383,328 +413,25 @@ fn push_day_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
     });
 }
 
-fn push_same_weekday_pace(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
-    if input.period.lens != AnalysisLens::Day || input.period.label != "Today" {
-        return;
-    }
-
-    let Ok(selected_date) = NaiveDate::parse_from_str(input.selected_day_key, "%Y-%m-%d") else {
-        return;
-    };
-    let selected_weekday = selected_date.weekday();
-    let matching_days = input
-        .daily
-        .iter()
-        .filter(|day| day.date != input.selected_day_key)
-        .filter_map(|day| {
-            let date = NaiveDate::parse_from_str(&day.date, "%Y-%m-%d").ok()?;
-            (date.weekday() == selected_weekday && day.focused_seconds > 0)
-                .then_some(day.focused_seconds.max(0))
-        })
-        .collect::<Vec<_>>();
-
-    const MIN_MATCHING_DAYS: usize = 3;
-    if matching_days.len() < MIN_MATCHING_DAYS {
-        return;
-    }
-
-    let baseline = mean_seconds(&matching_days).round().max(0.0) as i64;
-    if baseline < 15 * 60 {
-        return;
-    }
-
-    let delta = input.total_focused_seconds - baseline;
-    let tolerance = (baseline / 5).max(15 * 60);
-    let (tone, title, value) = if delta.abs() <= tolerance {
-        (
-            InsightTone::Neutral,
-            "Near usual pace",
-            format_duration(input.total_focused_seconds),
-        )
-    } else if delta > 0 {
-        (
-            InsightTone::Positive,
-            "Ahead of usual pace",
-            signed_duration(delta),
-        )
-    } else {
-        (
-            InsightTone::Info,
-            "Behind usual pace",
-            signed_duration(delta),
-        )
-    };
-
-    let mut support = period_support(input.period);
-    support.date = Some(input.selected_day_key.to_string());
-    support.date_label = Some("Today".to_string());
-    support.weekday = Some(selected_weekday.num_days_from_monday());
-    support.weekday_label =
-        Some(weekday_label(selected_weekday.num_days_from_monday()).to_string());
-    support.focused_seconds = Some(input.total_focused_seconds.max(0));
-    support.baseline_seconds = Some(baseline);
-    support.delta_seconds = Some(delta);
-
-    out.push(Insight {
-        kind: InsightKind::SameWeekdayPace,
-        category: InsightCategory::Patterns,
-        tone,
-        title: title.to_string(),
-        value,
-        explanation: format!(
-            "Compares today with your usual focused time across prior active {}s.",
-            weekday_label(selected_weekday.num_days_from_monday())
-        ),
-        confidence: confidence(matching_days.len(), MIN_MATCHING_DAYS),
-        evidence: InsightEvidence {
-            data_points: matching_days.len(),
-            minimum_data_points: MIN_MATCHING_DAYS,
-            observed_focus_seconds: input.total_focused_seconds.max(0),
-            observed_open_seconds: input.total_open_seconds.max(0),
-        },
-        supporting: support,
-    });
-}
-
-fn push_current_habit_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
-    if input.period.lens != AnalysisLens::Day || input.period.label != "Today" {
-        return;
-    }
-    let (Some(current_weekday), Some(current_hour)) = (input.current_weekday, input.current_hour)
-    else {
-        return;
-    };
-
-    let matching_weekdays = prior_matching_weekday_count(input.daily, input.selected_day_key);
-    if matching_weekdays < 3 {
-        return;
-    }
-
-    let slot_days = active_slot_days(
-        input.historical_focus_intervals,
-        input.selected_day_key,
-        current_weekday,
-        current_hour,
-    );
-    let active_days = slot_days.len();
-    let active_share = active_days as f64 / matching_weekdays as f64;
-    if active_share < 0.60 {
-        return;
-    }
-
-    let slot_seconds = slot_days.values().copied().sum::<i64>();
-    let average = slot_seconds / active_days.max(1) as i64;
-    if average < 5 * 60 {
-        return;
-    }
-
-    let mut support = period_support(input.period);
-    support.weekday = Some(current_weekday);
-    support.weekday_label = Some(weekday_label(current_weekday).to_string());
-    support.hour = Some(current_hour);
-    support.hour_label = Some(hour_label(current_hour));
-    support.focused_seconds = Some(slot_seconds.max(0));
-    support.baseline_seconds = Some(average.max(0));
-    support.share = Some(active_share.clamp(0.0, 1.0));
-
-    out.push(Insight {
-        kind: InsightKind::UsuallyActiveNow,
-        category: InsightCategory::Patterns,
-        tone: if active_share >= 0.80 {
-            InsightTone::Positive
-        } else {
-            InsightTone::Info
-        },
-        title: "Usually active now".to_string(),
-        value: format!(
-            "{} {}",
-            weekday_label(current_weekday),
-            hour_label(current_hour)
-        ),
-        explanation: format!(
-            "This weekday and hour had focused time on {} of {} prior matching days.",
-            active_days, matching_weekdays
-        ),
-        confidence: confidence(matching_weekdays, 3),
-        evidence: InsightEvidence {
-            data_points: matching_weekdays,
-            minimum_data_points: 3,
-            observed_focus_seconds: input.total_focused_seconds.max(0),
-            observed_open_seconds: input.total_open_seconds.max(0),
-        },
-        supporting: support,
-    });
-
-    if let Some(app) = dominant_slot_app(
-        input.historical_focus_intervals,
-        input.selected_day_key,
-        current_weekday,
-        current_hour,
-    ) {
-        if app.share >= 0.60 && app.active_days >= 3 && app.focused_seconds >= 15 * 60 {
-            let app_label = identity::display_name(&app.app_class);
-            let mut support = period_support(input.period).with_app(
-                &app.app_class,
-                &app_label,
-                app.focused_seconds,
-                None,
-                Some(app.share),
-            );
-            support.weekday = Some(current_weekday);
-            support.weekday_label = Some(weekday_label(current_weekday).to_string());
-            support.hour = Some(current_hour);
-            support.hour_label = Some(hour_label(current_hour));
-
-            out.push(Insight {
-                kind: InsightKind::UsualAppNow,
-                category: InsightCategory::Apps,
-                tone: InsightTone::Info,
-                title: "Usual app now".to_string(),
-                value: app_label,
-                explanation: format!(
-                    "This app held {} of focused time in this usual time slot.",
-                    percent(app.share)
-                ),
-                confidence: confidence(app.active_days, 3),
-                evidence: InsightEvidence {
-                    data_points: app.active_days,
-                    minimum_data_points: 3,
-                    observed_focus_seconds: input.total_focused_seconds.max(0),
-                    observed_open_seconds: input.total_open_seconds.max(0),
-                },
-                supporting: support,
-            });
-        }
-    }
-}
-
-fn push_app_routine_fact(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
-    let Some(routine) =
-        strongest_app_routine(input.historical_focus_intervals, input.selected_day_key)
-    else {
-        return;
-    };
-    if routine.active_days < 3 || routine.focused_seconds < 60 * 60 || routine.share < 0.45 {
-        return;
-    }
-
-    let app_label = identity::display_name(&routine.app_class);
-    let mut support = period_support(input.period).with_app(
-        &routine.app_class,
-        &app_label,
-        routine.focused_seconds,
-        None,
-        Some(routine.share),
-    );
-    support.weekday = Some(routine.weekday);
-    support.weekday_label = Some(weekday_label(routine.weekday).to_string());
-
-    out.push(Insight {
-        kind: InsightKind::AppRoutine,
-        category: InsightCategory::Apps,
-        tone: if routine.share >= 0.65 {
-            InsightTone::Positive
-        } else {
-            InsightTone::Info
-        },
-        title: "Routine".to_string(),
-        value: format!(
-            "{} {} {}",
-            app_label,
-            weekday_label(routine.weekday),
-            routine.daypart.label
-        ),
-        explanation: format!(
-            "{} has a recurring {} pattern on {}s.",
-            app_label,
-            routine.daypart.label,
-            weekday_label(routine.weekday)
-        ),
-        confidence: confidence(routine.active_days, 3),
-        evidence: InsightEvidence {
-            data_points: routine.active_days,
-            minimum_data_points: 3,
-            observed_focus_seconds: routine.focused_seconds.max(0),
-            observed_open_seconds: input.total_open_seconds.max(0),
-        },
-        supporting: support,
-    });
-}
-
-fn push_focus_momentum_fact(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
-    let values = input
-        .daily
-        .iter()
-        .map(|day| day.focused_seconds.max(0))
-        .collect::<Vec<_>>();
-    if values.len() < 14 {
-        return;
-    }
-
-    let recent = values[values.len().saturating_sub(7)..].iter().sum::<i64>();
-    let previous_start = values.len().saturating_sub(14);
-    let previous = values[previous_start..values.len() - 7].iter().sum::<i64>();
-    if previous < 60 * 60 {
-        return;
-    }
-
-    let delta = recent - previous;
-    let change = delta as f64 / previous.max(1) as f64;
-    if change.abs() < 0.20 || delta.abs() < 30 * 60 {
-        return;
-    }
-
-    let mut support = period_support(input.period);
-    support.focused_seconds = Some(recent.max(0));
-    support.comparison_seconds = Some(previous.max(0));
-    support.delta_seconds = Some(delta);
-    support.share = Some(change.abs().min(1.0));
-
-    out.push(Insight {
-        kind: InsightKind::FocusMomentum,
-        category: InsightCategory::Patterns,
-        tone: if delta > 0 {
-            InsightTone::Positive
-        } else {
-            InsightTone::Info
-        },
-        title: if delta > 0 {
-            "Focus trending up".to_string()
-        } else {
-            "Focus trending down".to_string()
-        },
-        value: signed_duration(delta),
-        explanation: "Compares the last 7 loaded days with the 7 days before them.".to_string(),
-        confidence: confidence(values.len(), 14),
-        evidence: InsightEvidence {
-            data_points: values.len(),
-            minimum_data_points: 14,
-            observed_focus_seconds: recent.max(0),
-            observed_open_seconds: input.total_open_seconds.max(0),
-        },
-        supporting: support,
-    });
-}
-
 fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
-    let (label, minimum_days, full_explanation, elapsed_explanation) = match input.period.lens {
+    let (label, _minimum_days, full_explanation, elapsed_explanation) = match input.period.lens {
         AnalysisLens::Week => (
             "week",
             7,
-            "Compares this week with the previous local Monday-through-Sunday week.",
-            "Compares this week so far with the same elapsed span in the previous local Monday-through-Sunday week.",
+            "How your app time compares with the week before, from Monday through Sunday.",
+            "Your app time so far this week, compared with the same point in the week before.",
         ),
         AnalysisLens::Month => (
             "month",
             14,
-            "Compares this month with the previous local calendar month.",
-            "Compares this month so far with the same elapsed span in the previous local calendar month.",
+            "How your app time compares with the month before.",
+            "Your app time so far this month, compared with the same amount of time in the month before.",
         ),
         AnalysisLens::Year => (
             "year",
             30,
-            "Compares this year with the previous local calendar year.",
-            "Compares this year so far with the same elapsed span in the previous local calendar year.",
+            "How your app time compares with the year before.",
+            "Your app time so far this year, compared with the same amount of time in the year before.",
         ),
         AnalysisLens::Day | AnalysisLens::Life => {
             return;
@@ -714,7 +441,9 @@ fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
     let Some(previous) = input.previous_period.as_ref() else {
         return;
     };
-    if previous.focused_seconds <= 0 {
+    if !covered_enough(input.observed_seconds, input.elapsed_seconds)
+        || !covered_enough(previous.observed_seconds, previous.elapsed_seconds)
+    {
         return;
     }
 
@@ -732,7 +461,7 @@ fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         kind: InsightKind::PeriodComparison,
         category: InsightCategory::Patterns,
         tone: comparison_tone(delta),
-        title: format!("vs previous {label}"),
+        title: format!("Compared with the {label} before"),
         value: signed_duration(delta),
         explanation: if previous.matched_elapsed {
             elapsed_explanation
@@ -740,8 +469,8 @@ fn push_period_comparison(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             full_explanation
         }
         .to_string(),
-        confidence: confidence(input.daily.len(), minimum_days),
-        evidence: evidence(input, minimum_days),
+        confidence: confidence(2, 2),
+        evidence: evidence(input, 2),
         supporting: support,
     });
 }
@@ -750,7 +479,7 @@ fn push_day_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
     let active_days = input
         .daily
         .iter()
-        .filter(|day| day.focused_seconds > 0)
+        .filter(|day| day.focused_seconds > 0 && in_period(input, day))
         .collect::<Vec<_>>();
 
     if let Some(best) = active_days.iter().max_by_key(|day| day.focused_seconds) {
@@ -758,13 +487,13 @@ fn push_day_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::BestDay,
             category: InsightCategory::Patterns,
             tone: InsightTone::Positive,
-            title: "Best day".to_string(),
+            title: "Your busiest day".to_string(),
             value: format!(
                 "{} - {}",
                 relative_day_label(best, input.today_key),
                 format_duration(best.focused_seconds)
             ),
-            explanation: "The highest-focus day visible in the loaded period history.".to_string(),
+            explanation: "The day you spent the most time using apps in this period.".to_string(),
             confidence: confidence(input.daily.len(), 1),
             evidence: evidence(input, 1),
             supporting: period_support(input.period).with_day(
@@ -782,14 +511,15 @@ fn push_day_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::WorstActiveDay,
             category: InsightCategory::Patterns,
             tone: InsightTone::Neutral,
-            title: "Lightest active day".to_string(),
+            title: "Your quietest day".to_string(),
             value: format!(
                 "{} - {}",
                 relative_day_label(worst, input.today_key),
                 format_duration(worst.focused_seconds)
             ),
-            explanation: "The lowest-focus day that still had tracked focus in this period."
-                .to_string(),
+            explanation:
+                "The day with the least recorded app use. Days with no recorded use are left out."
+                    .to_string(),
             confidence: confidence(input.daily.len(), 2),
             evidence: evidence(input, 2),
             supporting: period_support(input.period).with_day(
@@ -797,41 +527,6 @@ fn push_day_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
                 &relative_day_label(worst, input.today_key),
                 worst.focused_seconds,
             ),
-        });
-    }
-
-    if input.daily.len() >= 2 {
-        let current = current_active_streak(input.daily);
-        out.push(Insight {
-            kind: InsightKind::CurrentStreak,
-            category: InsightCategory::Patterns,
-            tone: if current > 0 {
-                InsightTone::Positive
-            } else {
-                InsightTone::Neutral
-            },
-            title: "Current streak".to_string(),
-            value: format_days(current),
-            explanation: "Consecutive focused days ending at the latest loaded local day."
-                .to_string(),
-            confidence: confidence(input.daily.len(), 2),
-            evidence: evidence(input, 2),
-            supporting: period_support(input.period).with_streak(current, None),
-        });
-    }
-
-    let longest = longest_active_streak(input.daily);
-    if longest > 0 && input.daily.len() >= 2 {
-        out.push(Insight {
-            kind: InsightKind::LongestStreak,
-            category: InsightCategory::Patterns,
-            tone: InsightTone::Positive,
-            title: "Longest streak".to_string(),
-            value: format_days(longest),
-            explanation: "Longest run of consecutive local days with any focused time.".to_string(),
-            confidence: confidence(input.daily.len(), 2),
-            evidence: evidence(input, 2),
-            supporting: period_support(input.period).with_streak(0, Some(longest)),
         });
     }
 }
@@ -843,13 +538,13 @@ fn push_peak_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::PeakFocusHour,
             category: InsightCategory::Patterns,
             tone: InsightTone::Info,
-            title: "Peak focus hour".to_string(),
+            title: "Your busiest time of day".to_string(),
             value: format!(
                 "{} - {}",
                 hour_label(peak.hour),
                 format_duration(peak.focused_seconds)
             ),
-            explanation: "The local clock hour with the most focused time in this period."
+            explanation: "You spent the most time using apps during this hour, adding up the days in this period."
                 .to_string(),
             confidence: confidence(input.daily.len(), 2),
             evidence: evidence(input, 2),
@@ -867,13 +562,14 @@ fn push_peak_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::PeakFocusWeekday,
             category: InsightCategory::Patterns,
             tone: InsightTone::Info,
-            title: "Peak focus weekday".to_string(),
+            title: "Your busiest day of the week".to_string(),
             value: format!(
                 "{} - {}",
                 weekday_label(peak.weekday),
                 format_duration(peak.focused_seconds)
             ),
-            explanation: "The weekday with the most focused time in this period.".to_string(),
+            explanation: "This day of the week had the most app use in total during this period."
+                .to_string(),
             confidence: confidence(input.daily.len(), 2),
             evidence: evidence(input, 2),
             supporting: period_support(input.period).with_weekday(
@@ -915,14 +611,14 @@ fn push_deep_work_facts(input: &AnalysisInput<'_>, blocks: &[FocusBlock], out: &
         } else {
             InsightTone::Caution
         },
-        title: "Deep work blocks".to_string(),
+        title: "Time with one app".to_string(),
         value: format!(
             "{} - {} total",
             format_blocks(deep_count),
             format_duration(deep_total)
         ),
         explanation: format!(
-            "Counts focused blocks at or above {}; longest block is {}, median block is {}.",
+            "Times you stayed with one app for at least {}. Your longest stretch was {}; a typical stretch was {}.",
             format_duration(DEEP_BLOCK_SECONDS),
             format_duration(longest),
             format_duration(median)
@@ -944,16 +640,19 @@ fn push_switch_facts(input: &AnalysisInput<'_>, blocks: &[FocusBlock], out: &mut
         let switch_count = input
             .focus_intervals
             .windows(2)
-            .filter(|pair| pair[0].app_class != pair[1].app_class)
+            .filter(|pair| {
+                pair[0].app_class != pair[1].app_class
+                    && continuous(input, pair[0].ended_at, pair[1].started_at)
+            })
             .count();
         let rate = per_hour(switch_count, input.total_focused_seconds);
         out.push(Insight {
             kind: InsightKind::AppSwitchRate,
             category: InsightCategory::FocusQuality,
             tone: switch_rate_tone(rate),
-            title: "App switches".to_string(),
-            value: format!("{} switches/hour", format_rate(rate)),
-            explanation: "Counts focused app changes normalized by focused hours.".to_string(),
+            title: "Moving between apps".to_string(),
+            value: format!("{} switches an hour", format_rate(rate)),
+            explanation: "How often you moved to a different app while using your computer. Breaks and gaps in tracking don't count as switches.".to_string(),
             confidence: confidence(input.focus_intervals.len(), 3),
             evidence: evidence(input, 3),
             supporting: period_support(input.period).with_switch_rate(switch_count, rate),
@@ -970,13 +669,15 @@ fn push_switch_facts(input: &AnalysisInput<'_>, blocks: &[FocusBlock], out: &mut
             } else {
                 InsightTone::Neutral
             },
-            title: "Most fragmented app".to_string(),
+            title: "An app you dip in and out of".to_string(),
             value: format!(
-                "{} - {} blocks/hour",
+                "{} · {} stretches an hour",
                 app_label,
                 format_rate(fragmented.rate_per_hour)
             ),
-            explanation: "The app split across the most focus blocks per focused hour.".to_string(),
+            explanation:
+                "You returned to this app most often for the amount of time you spent using it."
+                    .to_string(),
             confidence: confidence(fragmented.block_count, 3),
             evidence: evidence(input, 3),
             supporting: period_support(input.period).with_fragmented_app(
@@ -997,9 +698,9 @@ fn push_density_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::FocusDensity,
             category: InsightCategory::FocusQuality,
             tone: density_tone(density),
-            title: "Focus density".to_string(),
+            title: "Time spent using open apps".to_string(),
             value: percent(density),
-            explanation: "Focused time divided by open app time for the selected period."
+            explanation: "The share of all open-app time you spent actually using those apps. Several apps can be open at once."
                 .to_string(),
             confidence: confidence(input.daily.len(), 1),
             evidence: evidence(input, 1),
@@ -1023,7 +724,7 @@ fn push_density_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             .total_cmp(&right.1)
             .then_with(|| left.0.focused_seconds.cmp(&right.0.focused_seconds))
     }) {
-        push_app_density(input, out, "Densest app", row, *density);
+        push_app_density(input, out, "Open and in use", row, *density);
     }
 
     if app_densities.len() >= 2
@@ -1034,7 +735,7 @@ fn push_density_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         })
         && *density < 0.65
     {
-        push_app_density(input, out, "Lowest-density app", row, *density);
+        push_app_density(input, out, "Often open in the background", row, *density);
     }
 }
 
@@ -1052,7 +753,8 @@ fn push_app_density(
         tone: density_tone(density),
         title: title.to_string(),
         value: format!("{} - {}", app_label, percent(density)),
-        explanation: "Focused time divided by open time for this app.".to_string(),
+        explanation: "How much of the time this app was open you spent actually using it."
+            .to_string(),
         confidence: confidence(input.daily.len(), 1),
         evidence: evidence(input, 1),
         supporting: period_support(input.period).with_app(
@@ -1087,10 +789,10 @@ fn push_effective_app_fact(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         } else {
             InsightTone::Info
         },
-        title: "Effective app count".to_string(),
-        value: format!("{} effective apps", format_decimal(effective)),
+        title: "How your time is spread".to_string(),
+        value: format!("Like {} equally used apps", format_decimal(effective)),
         explanation:
-            "Shannon effective count; lower values mean focus is concentrated in fewer apps."
+            "A way to describe how evenly you shared your time between apps. A smaller number means more of your time went to just a few apps."
                 .to_string(),
         confidence: confidence(app_count, 2),
         evidence: evidence(input, 2),
@@ -1113,14 +815,14 @@ fn push_workspace_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::StrongestWorkspace,
             category: InsightCategory::Patterns,
             tone: InsightTone::Info,
-            title: "Strongest workspace".to_string(),
+            title: "Your most-used workspace".to_string(),
             value: format!(
                 "{} - {} ({})",
                 workspace.workspace,
                 format_duration(workspace.focused_seconds),
                 percent(share)
             ),
-            explanation: "The workspace with the largest amount of focused time.".to_string(),
+            explanation: "You spent the most app time on this workspace.".to_string(),
             confidence: confidence(input.workspaces.len(), 1),
             evidence: evidence(input, 1),
             supporting: period_support(input.period).with_workspace(
@@ -1162,9 +864,9 @@ fn push_workspace_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::WorkspaceAppAffinity,
             category: InsightCategory::Apps,
             tone: InsightTone::Info,
-            title: "Workspace/app affinity".to_string(),
+            title: "Where you use this app".to_string(),
             value: format!("{} on {} - {}", app_label, row.workspace, percent(affinity)),
-            explanation: "The strongest workspace association for an app with enough focused time."
+            explanation: "This is the workspace you used most for this app. The percentage shows how much of its use happened there."
                 .to_string(),
             confidence: confidence(input.app_workspaces.len(), 2),
             evidence: evidence(input, 2),
@@ -1189,18 +891,18 @@ fn push_anomaly_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
     if let Some(insight) = hour_anomaly(input) {
         out.push(insight);
     }
-    if let Some(insight) = unobserved_anomaly(input) {
-        out.push(insight);
-    }
 }
 
 fn push_system_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
+    if let Some(insight) = unobserved_anomaly(input) {
+        out.push(insight);
+    }
     if input.total_idle_seconds > 0 {
         out.push(system_signal(
             input,
             InsightKind::IdleExcluded,
-            "Idle",
-            "Session idle time was excluded from focused time.",
+            "Idle time",
+            "Time when your computer was idle. It isn't counted as app use.",
             input.total_idle_seconds,
             InsightTone::Info,
         ));
@@ -1210,8 +912,8 @@ fn push_system_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         out.push(system_signal(
             input,
             InsightKind::LockedExcluded,
-            "Locked",
-            "Session locked time was excluded from focused time.",
+            "Screen locked",
+            "Time when your screen was locked. It isn't counted as app use.",
             input.total_locked_seconds,
             InsightTone::Info,
         ));
@@ -1221,8 +923,8 @@ fn push_system_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         out.push(system_signal(
             input,
             InsightKind::SleepExcluded,
-            "Sleep",
-            "System sleep was excluded from focused time.",
+            "Computer asleep",
+            "Time when your computer was asleep. It isn't counted as app use.",
             input.total_sleep_seconds,
             InsightTone::Info,
         ));
@@ -1232,8 +934,8 @@ fn push_system_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         out.push(system_signal(
             input,
             InsightKind::UnobservedExcluded,
-            "Unobserved",
-            "Daemon-offline time was excluded instead of being counted as active focus.",
+            "Time without tracking",
+            "The tracker wasn't recording during this time, so we don't guess which apps you used.",
             input.total_unobserved_seconds,
             InsightTone::Caution,
         ));
@@ -1248,10 +950,7 @@ fn push_system_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         return;
     }
 
-    let impact = ratio(
-        excluded,
-        input.total_focused_seconds.saturating_add(excluded).max(1),
-    );
+    let impact = ratio(excluded, input.elapsed_seconds);
     out.push(Insight {
         kind: InsightKind::ExcludedImpact,
         category: InsightCategory::SystemSignals,
@@ -1260,9 +959,9 @@ fn push_system_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
         } else {
             InsightTone::Info
         },
-        title: "Excluded time impact".to_string(),
+        title: "Time outside your app totals".to_string(),
         value: format!("{} ({})", format_duration(excluded), percent(impact)),
-        explanation: "Idle, locked, sleep, and daemon-offline time excluded from focus totals."
+        explanation: "Time when your computer was idle, locked, asleep, or not being tracked. It isn't included in your app totals."
             .to_string(),
         confidence: InsightConfidence::High,
         evidence: evidence(input, 0),
@@ -1290,7 +989,7 @@ fn system_signal(
         category: InsightCategory::SystemSignals,
         tone,
         title: title.to_string(),
-        value: format!("{} excluded", format_duration(seconds)),
+        value: format!("{} not counted", format_duration(seconds)),
         explanation: explanation.to_string(),
         confidence: InsightConfidence::High,
         evidence: evidence(input, 0),
@@ -1386,18 +1085,6 @@ impl InsightSupport {
         self.weekday_label = Some(weekday_label(weekday).to_string());
         self.focused_seconds = Some(focused_seconds.max(0));
         self.share = Some(share.clamp(0.0, 1.0));
-        self
-    }
-
-    fn with_streak(
-        mut self,
-        current_streak_days: usize,
-        longest_streak_days: Option<usize>,
-    ) -> Self {
-        if current_streak_days > 0 || longest_streak_days.is_none() {
-            self.current_streak_days = Some(current_streak_days);
-        }
-        self.longest_streak_days = longest_streak_days;
         self
     }
 
@@ -1531,42 +1218,50 @@ fn selected_day_label(period: AnalysisPeriod<'_>) -> &'static str {
     }
 }
 
-fn focus_blocks(intervals: &[TimelineInterval]) -> Vec<FocusBlock> {
-    intervals
-        .iter()
-        .filter_map(|interval| {
-            let duration = interval.ended_at.saturating_sub(interval.started_at);
-            (duration > 0).then(|| FocusBlock {
-                app_class: interval.app_class.clone(),
+fn continuous(input: &AnalysisInput<'_>, a: i64, b: i64) -> bool {
+    b == a
+        && input.continuity.is_none_or(|c| c.covered(a, b) == b - a)
+        && input.pauses.is_none_or(|c| c.covered(a, b) == 0)
+}
+fn focus_blocks(input: &AnalysisInput<'_>) -> Vec<FocusBlock> {
+    let mut blocks: Vec<FocusBlock> = Vec::new();
+    let mut previous_end = None;
+    for i in input.focus_intervals {
+        let duration = (i.ended_at - i.started_at).max(0);
+        if duration == 0 {
+            continue;
+        }
+        if let Some(last) = blocks.last_mut()
+            && last.app_class == i.app_class
+            && previous_end.is_some_and(|end| continuous(input, end, i.started_at))
+        {
+            last.duration_seconds += duration;
+        } else {
+            blocks.push(FocusBlock {
+                app_class: i.app_class.clone(),
                 duration_seconds: duration,
-            })
-        })
-        .collect()
+            });
+        }
+        previous_end = Some(i.ended_at);
+    }
+    blocks
+}
+fn covered_enough(observed: i64, elapsed: i64) -> bool {
+    elapsed > 0 && observed * 10 >= elapsed * 9
+}
+fn eligible_day(day: &DayTotals) -> bool {
+    covered_enough(day.observed_seconds, day.elapsed_seconds)
+}
+fn in_period(input: &AnalysisInput<'_>, day: &DayTotals) -> bool {
+    input
+        .period
+        .start_date
+        .is_none_or(|a| day.date.as_str() >= a)
+        && input.period.end_date.is_none_or(|b| day.date.as_str() <= b)
 }
 
 fn median(sorted: &[i64]) -> i64 {
     analytics::median(sorted)
-}
-
-fn current_active_streak(days: &[DayTotals]) -> usize {
-    days.iter()
-        .rev()
-        .take_while(|day| day.focused_seconds > 0)
-        .count()
-}
-
-fn longest_active_streak(days: &[DayTotals]) -> usize {
-    let mut current = 0;
-    let mut best = 0;
-    for day in days {
-        if day.focused_seconds > 0 {
-            current += 1;
-            best = best.max(current);
-        } else {
-            current = 0;
-        }
-    }
-    best
 }
 
 fn peak_hour(cells: &[FocusHeatCell]) -> Option<HourTotal> {
@@ -1583,240 +1278,16 @@ fn peak_weekday(cells: &[FocusHeatCell]) -> Option<WeekdayTotal> {
     })
 }
 
-fn prior_matching_weekday_count(daily: &[DayTotals], selected_day_key: &str) -> usize {
-    let Ok(selected_date) = NaiveDate::parse_from_str(selected_day_key, "%Y-%m-%d") else {
-        return 0;
-    };
-    let selected_weekday = selected_date.weekday();
-    daily
-        .iter()
-        .filter(|day| day.date != selected_day_key)
-        .filter(|day| {
-            NaiveDate::parse_from_str(&day.date, "%Y-%m-%d")
-                .is_ok_and(|date| date.weekday() == selected_weekday)
-        })
-        .count()
-}
-
-fn active_slot_days(
-    intervals: &[TimelineInterval],
-    selected_day_key: &str,
-    weekday: u32,
-    hour: u32,
-) -> BTreeMap<String, i64> {
-    let mut days = BTreeMap::<String, i64>::new();
-    for interval in intervals {
-        add_slot_overlaps(interval, selected_day_key, weekday, hour, &mut days, None);
-    }
-    days.retain(|_, seconds| *seconds >= 5 * 60);
-    days
-}
-
-fn dominant_slot_app(
-    intervals: &[TimelineInterval],
-    selected_day_key: &str,
-    weekday: u32,
-    hour: u32,
-) -> Option<SlotApp> {
-    let mut totals = BTreeMap::<String, (i64, BTreeMap<String, i64>)>::new();
-    for interval in intervals {
-        let day_totals = totals.entry(interval.app_class.clone()).or_default();
-        add_slot_overlaps(
-            interval,
-            selected_day_key,
-            weekday,
-            hour,
-            &mut day_totals.1,
-            Some(&mut day_totals.0),
-        );
-    }
-
-    let total_seconds = totals
-        .values()
-        .map(|(seconds, _)| seconds.max(&0))
-        .sum::<i64>();
-    if total_seconds <= 0 {
-        return None;
-    }
-
-    totals
-        .into_iter()
-        .filter_map(|(app_class, (focused_seconds, mut days))| {
-            days.retain(|_, seconds| *seconds >= 5 * 60);
-            (focused_seconds > 0).then(|| SlotApp {
-                app_class,
-                focused_seconds,
-                active_days: days.len(),
-                share: ratio(focused_seconds, total_seconds),
-            })
-        })
-        .max_by(|left, right| {
-            left.share
-                .total_cmp(&right.share)
-                .then_with(|| left.focused_seconds.cmp(&right.focused_seconds))
-        })
-}
-
-fn add_slot_overlaps(
-    interval: &TimelineInterval,
-    selected_day_key: &str,
-    weekday: u32,
-    hour: u32,
-    days: &mut BTreeMap<String, i64>,
-    mut total_seconds: Option<&mut i64>,
-) {
-    let mut cursor = interval.started_at;
-    while cursor < interval.ended_at {
-        let Some((date, slot_weekday, slot_hour)) = local_day_slot(cursor) else {
-            break;
-        };
-        let segment_end = next_slot_change(cursor, interval.ended_at, slot_weekday, slot_hour);
-        let overlap = segment_end - cursor;
-        if overlap > 0 && date != selected_day_key && slot_weekday == weekday && slot_hour == hour {
-            *days.entry(date).or_default() += overlap;
-            if let Some(total) = total_seconds.as_deref_mut() {
-                *total += overlap;
-            }
-        }
-        cursor = segment_end.max(cursor + 1);
-    }
-}
-
-fn strongest_app_routine(
-    intervals: &[TimelineInterval],
-    selected_day_key: &str,
-) -> Option<AppRoutine> {
-    let dayparts = dayparts();
-    let mut totals = BTreeMap::<(String, u32, &'static str), (i64, BTreeMap<String, i64>)>::new();
-    let mut app_totals = BTreeMap::<String, i64>::new();
-
-    for interval in intervals {
-        let mut cursor = interval.started_at;
-        while cursor < interval.ended_at {
-            let Some((date, weekday, hour)) = local_day_slot(cursor) else {
-                break;
-            };
-            let segment_end = next_slot_change(cursor, interval.ended_at, weekday, hour);
-            let overlap = segment_end - cursor;
-            if overlap > 0 && date != selected_day_key {
-                *app_totals.entry(interval.app_class.clone()).or_default() += overlap;
-                if let Some(daypart) = dayparts.iter().find(|part| part.contains(hour)) {
-                    let entry = totals
-                        .entry((interval.app_class.clone(), weekday, daypart.key))
-                        .or_default();
-                    entry.0 += overlap;
-                    *entry.1.entry(date).or_default() += overlap;
-                }
-            }
-            cursor = segment_end.max(cursor + 1);
-        }
-    }
-
-    totals
-        .into_iter()
-        .filter_map(
-            |((app_class, weekday, daypart_key), (focused_seconds, mut days))| {
-                days.retain(|_, seconds| *seconds >= 10 * 60);
-                let active_days = days.len();
-                let app_total = *app_totals.get(&app_class)?;
-                let daypart = dayparts
-                    .iter()
-                    .find(|part| part.key == daypart_key)
-                    .copied()?;
-                (app_total > 0).then(|| AppRoutine {
-                    app_class,
-                    weekday,
-                    daypart,
-                    focused_seconds,
-                    active_days,
-                    share: ratio(focused_seconds, app_total),
-                })
-            },
-        )
-        .max_by(|left, right| {
-            left.share
-                .total_cmp(&right.share)
-                .then_with(|| left.active_days.cmp(&right.active_days))
-                .then_with(|| left.focused_seconds.cmp(&right.focused_seconds))
-        })
-}
-
-impl Daypart {
-    fn contains(self, hour: u32) -> bool {
-        hour >= self.start_hour && hour < self.end_hour
-    }
-}
-
-fn dayparts() -> [Daypart; 4] {
-    [
-        Daypart {
-            key: "morning",
-            label: "morning",
-            start_hour: 5,
-            end_hour: 12,
-        },
-        Daypart {
-            key: "afternoon",
-            label: "afternoon",
-            start_hour: 12,
-            end_hour: 17,
-        },
-        Daypart {
-            key: "evening",
-            label: "evening",
-            start_hour: 17,
-            end_hour: 22,
-        },
-        Daypart {
-            key: "night",
-            label: "night",
-            start_hour: 22,
-            end_hour: 24,
-        },
-    ]
-}
-
-fn local_day_slot(timestamp: i64) -> Option<(String, u32, u32)> {
-    let local = Local.timestamp_opt(timestamp, 0).single()?;
-    Some((
-        local.format("%Y-%m-%d").to_string(),
-        local.weekday().num_days_from_monday(),
-        local.hour(),
-    ))
-}
-
-fn next_slot_change(cursor: i64, ended_at: i64, weekday: u32, hour: u32) -> i64 {
-    let search_end = ended_at.min(cursor.saturating_add(3 * 60 * 60 + 1));
-    if search_end <= cursor + 1 {
-        return search_end;
-    }
-    if local_day_slot(search_end.saturating_sub(1))
-        .is_some_and(|(_, next_weekday, next_hour)| next_weekday == weekday && next_hour == hour)
-    {
-        return search_end;
-    }
-
-    let mut low = cursor + 1;
-    let mut high = search_end;
-    while low < high {
-        let mid = low + (high - low) / 2;
-        if local_day_slot(mid).is_some_and(|(_, next_weekday, next_hour)| {
-            next_weekday == weekday && next_hour == hour
-        }) {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-    low
-}
-
 fn effective_app_count(rows: &[AppTotals], total_focused_seconds: i64) -> f64 {
     analytics::effective_app_count(rows, total_focused_seconds)
 }
 
 fn signed_duration(seconds: i64) -> String {
-    analytics::signed_duration(seconds)
+    match seconds.cmp(&0) {
+        std::cmp::Ordering::Equal => "No change".into(),
+        std::cmp::Ordering::Greater => format!("{} more", format_duration(seconds)),
+        std::cmp::Ordering::Less => format!("{} less", format_duration(seconds.abs())),
+    }
 }
 
 fn format_duration(seconds: i64) -> String {
@@ -1860,58 +1331,57 @@ fn most_fragmented_app(blocks: &[FocusBlock]) -> Option<FragmentedApp> {
 }
 
 fn focus_anomaly(input: &AnalysisInput<'_>) -> Option<Insight> {
-    if input.daily.len() < 5 {
-        return None;
-    }
-
-    let (best_index, best) = input
+    let days = input
         .daily
         .iter()
-        .enumerate()
-        .max_by_key(|(_, day)| day.focused_seconds)?;
-    if best.focused_seconds < 60 * 60 {
-        return None;
-    }
-
-    let baseline = input
-        .daily
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != best_index)
-        .map(|(_, day)| day.focused_seconds.max(0))
+        .filter(|d| in_period(input, d) && d.date.as_str() < input.today_key && eligible_day(d))
         .collect::<Vec<_>>();
-    if baseline.len() < 4 {
+    let best = *days.iter().max_by_key(|d| d.focused_seconds)?;
+    if best.focused_seconds < 3600 {
         return None;
     }
-
-    let mean = mean_seconds(&baseline);
-    let deviation = std_dev_seconds(&baseline, mean);
-    let threshold = (deviation * 2.0).round().max(30.0 * 60.0) as i64;
-    if best.focused_seconds < mean.round() as i64 + threshold {
+    let baseline_days = days
+        .iter()
+        .filter(|d| d.date != best.date)
+        .collect::<Vec<_>>();
+    if baseline_days.len() < 7 {
         return None;
     }
-
+    let mut baseline = baseline_days
+        .iter()
+        .map(|d| d.focused_seconds)
+        .collect::<Vec<_>>();
+    baseline.sort_unstable();
+    let median = analytics::median(&baseline);
+    let mut deviations = baseline
+        .iter()
+        .map(|s| (s - median).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_unstable();
+    let threshold = (3 * analytics::median(&deviations)).max(1800);
+    if best.focused_seconds <= median + threshold {
+        return None;
+    }
     let mut support = period_support(input.period).with_day(
         &best.date,
         &relative_day_label(best, input.today_key),
         best.focused_seconds,
     );
-    support.baseline_seconds = Some(mean.round().max(0.0) as i64);
+    support.baseline_seconds = Some(median);
     support.threshold_seconds = Some(threshold);
-
+    support.matching_dates = Some(baseline_days.iter().map(|d| d.date.clone()).collect());
     Some(Insight {
         kind: InsightKind::FocusAnomaly,
         category: InsightCategory::Patterns,
         tone: InsightTone::Info,
-        title: "Unusual focus spike".to_string(),
-        value: format!(
-            "{} - {}",
-            relative_day_label(best, input.today_key),
-            format_duration(best.focused_seconds)
-        ),
-        explanation: "This day is well above the recent daily focus baseline.".to_string(),
-        confidence: confidence(input.daily.len(), 5),
-        evidence: evidence(input, 5),
+        title: "More app time than usual".into(),
+        value: format!("{} - {}", relative_day_label(best, input.today_key), format_duration(best.focused_seconds)),
+        explanation: "You spent noticeably more time using apps on this day than on a typical day in this period. The comparison uses completed days with enough tracking.".into(),
+        confidence: confidence(baseline.len(), 7),
+        evidence: InsightEvidence {
+            data_points: baseline.len(), minimum_data_points: 7,
+            observed_focus_seconds: baseline.iter().sum(), observed_open_seconds: 0,
+        },
         supporting: support,
     })
 }
@@ -1933,10 +1403,9 @@ fn app_anomaly(input: &AnalysisInput<'_>) -> Option<Insight> {
         kind: InsightKind::AppAnomaly,
         category: InsightCategory::Apps,
         tone: InsightTone::Caution,
-        title: "App concentration".to_string(),
-        value: format!("{} held {}", app_label, percent(share)),
-        explanation: "Focused time is unusually concentrated in one app for this period."
-            .to_string(),
+        title: "One app took most of your time".to_string(),
+        value: format!("{} · {} of your app time", app_label, percent(share)),
+        explanation: "At least three quarters of your app time went to this one app.".to_string(),
         confidence: confidence(app_count, 2),
         evidence: evidence(input, 2),
         supporting: period_support(input.period).with_app(
@@ -1964,9 +1433,9 @@ fn hour_anomaly(input: &AnalysisInput<'_>) -> Option<Insight> {
         kind: InsightKind::HourAnomaly,
         category: InsightCategory::Patterns,
         tone: InsightTone::Info,
-        title: "Hour concentration".to_string(),
-        value: format!("{} held {}", hour_label(peak.hour), percent(share)),
-        explanation: "A large share of focus landed in one local clock hour.".to_string(),
+        title: "A lot happened in one hour".to_string(),
+        value: format!("{} · {} of your app time", hour_label(peak.hour), percent(share)),
+        explanation: "A large share of your app use fell in this hour of the day, adding up the days in this period.".to_string(),
         confidence: confidence(input.daily.len(), 2),
         evidence: evidence(input, 2),
         supporting: period_support(input.period).with_hour(peak.hour, peak.focused_seconds, share),
@@ -1978,13 +1447,7 @@ fn unobserved_anomaly(input: &AnalysisInput<'_>) -> Option<Insight> {
         return None;
     }
 
-    let signal_total = input
-        .total_focused_seconds
-        .saturating_add(input.total_idle_seconds)
-        .saturating_add(input.total_locked_seconds)
-        .saturating_add(input.total_sleep_seconds)
-        .saturating_add(input.total_unobserved_seconds);
-    let share = ratio(input.total_unobserved_seconds, signal_total.max(1));
+    let share = ratio(input.total_unobserved_seconds, input.elapsed_seconds);
     if share < 0.10 {
         return None;
     }
@@ -1997,14 +1460,15 @@ fn unobserved_anomaly(input: &AnalysisInput<'_>) -> Option<Insight> {
         kind: InsightKind::UnobservedAnomaly,
         category: InsightCategory::SystemSignals,
         tone: InsightTone::Caution,
-        title: "Unobserved gap anomaly".to_string(),
+        title: "Gaps in tracking".to_string(),
         value: format!(
-            "{} unobserved ({})",
+            "{} without tracking ({})",
             format_duration(input.total_unobserved_seconds),
             percent(share)
         ),
-        explanation: "Daemon-offline time is large enough to affect confidence in this period."
-            .to_string(),
+        explanation:
+            "The tracker missed enough time that this period may not tell the whole story."
+                .to_string(),
         confidence: InsightConfidence::High,
         evidence: evidence(input, 0),
         supporting: support,
@@ -2013,28 +1477,6 @@ fn unobserved_anomaly(input: &AnalysisInput<'_>) -> Option<Insight> {
 
 fn active_app_count(rows: &[AppTotals]) -> usize {
     rows.iter().filter(|row| row.focused_seconds > 0).count()
-}
-
-fn mean_seconds(values: &[i64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    values.iter().sum::<i64>().max(0) as f64 / values.len() as f64
-}
-
-fn std_dev_seconds(values: &[i64], mean: f64) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-    let variance = values
-        .iter()
-        .map(|value| {
-            let delta = (*value).max(0) as f64 - mean;
-            delta.powi(2)
-        })
-        .sum::<f64>()
-        / values.len() as f64;
-    variance.sqrt()
 }
 
 fn comparison_tone(delta_seconds: i64) -> InsightTone {
@@ -2096,15 +1538,11 @@ fn weekday_label(weekday: u32) -> &'static str {
     }
 }
 
-fn format_days(days: usize) -> String {
-    format!("{days}d")
-}
-
 fn format_blocks(blocks: usize) -> String {
     if blocks == 1 {
-        "1 block".to_string()
+        "1 stretch".to_string()
     } else {
-        format!("{blocks} blocks")
+        format!("{blocks} stretches")
     }
 }
 
@@ -2125,6 +1563,166 @@ mod tests {
     use super::*;
     use crate::storage::IntervalKind;
 
+    #[test]
+    fn comparisons_require_coverage_and_include_zero_use() {
+        let rows = Vec::new();
+        let mut daily = vec![
+            day("2026-01-13", "Yesterday", 0),
+            day("2026-01-14", "Today", 0),
+        ];
+        let result = analyze(input(&rows, &daily, 0, 0, 0, 0));
+        assert_eq!(
+            result
+                .iter()
+                .find(|i| i.kind == InsightKind::DayComparison)
+                .unwrap()
+                .supporting
+                .delta_seconds,
+            Some(0)
+        );
+        daily[0].observed_seconds = 100;
+        assert!(
+            analyze(input(&rows, &daily, 0, 0, 0, 0))
+                .iter()
+                .all(|i| i.kind != InsightKind::DayComparison)
+        );
+        daily[0].observed_seconds = 86400;
+        let mut partial = input(&rows, &daily, 0, 0, 0, 0);
+        partial.observed_seconds = 100;
+        assert!(
+            analyze(partial)
+                .iter()
+                .all(|i| i.kind != InsightKind::DayComparison)
+        );
+        let mut period = input(&rows, &daily, 0, 0, 0, 0);
+        period.period.lens = AnalysisLens::Week;
+        period.previous_period = Some(AnalysisComparisonPeriod {
+            label: "Prior week".into(),
+            start_date: None,
+            end_date: None,
+            focused_seconds: 0,
+            matched_elapsed: true,
+            observed_seconds: 86400,
+            elapsed_seconds: 86400,
+        });
+        assert!(
+            analyze(period.clone())
+                .iter()
+                .any(|i| i.kind == InsightKind::PeriodComparison)
+        );
+        period.previous_period.as_mut().unwrap().observed_seconds = 100;
+        assert!(
+            analyze(period)
+                .iter()
+                .all(|i| i.kind != InsightKind::PeriodComparison)
+        );
+    }
+
+    #[test]
+    fn robust_anomaly_excludes_partial_missing_and_out_of_period_days() {
+        let rows = vec![AppTotals {
+            app_class: "editor".into(),
+            focused_seconds: 36000,
+            open_seconds: 36000,
+        }];
+        let mut daily = (1..=9)
+            .map(|d| day(&format!("2026-01-{d:02}"), "Day", 3600))
+            .collect::<Vec<_>>();
+        daily[8].focused_seconds = 10800;
+        let mut context = input(&rows, &daily, 36000, 36000, 0, 0);
+        context.period.lens = AnalysisLens::Month;
+        context.period.start_date = Some("2026-01-01");
+        context.period.end_date = Some("2026-01-31");
+        let result = analyze(context.clone());
+        let spike = result
+            .iter()
+            .find(|i| i.kind == InsightKind::FocusAnomaly)
+            .unwrap();
+        assert_eq!(spike.supporting.baseline_seconds, Some(3600));
+        assert_eq!(spike.evidence.data_points, 8);
+        assert_eq!(spike.supporting.threshold_seconds, Some(1800));
+        context.today_key = "2026-01-09";
+        assert!(
+            analyze(context.clone())
+                .iter()
+                .all(|i| i.kind != InsightKind::FocusAnomaly)
+        );
+        context.today_key = "2026-01-14";
+        context.period.end_date = Some("2026-01-08");
+        assert!(
+            analyze(context)
+                .iter()
+                .all(|i| i.kind != InsightKind::FocusAnomaly)
+        );
+        daily[0].observed_seconds = 0;
+        daily[1].observed_seconds = 0;
+        let mut context = input(&rows, &daily, 36000, 36000, 0, 0);
+        context.period.start_date = None;
+        context.period.end_date = None;
+        assert!(
+            analyze(context)
+                .iter()
+                .all(|i| i.kind != InsightKind::FocusAnomaly)
+        );
+    }
+
+    #[test]
+    fn title_fragments_merge_but_pauses_and_recording_gaps_break_blocks_and_switches() {
+        let intervals = vec![
+            focus("editor", 0, 900),
+            focus("editor", 900, 1800),
+            focus("browser", 1800, 2400),
+            focus("editor", 3000, 3600),
+            focus("browser", 4000, 4600),
+        ];
+        let coverage = crate::activity::Coverage::new(vec![(0, 3600), (4000, 4600)]);
+        let pauses = crate::activity::Coverage::new(vec![(2400, 3000)]);
+        let mut context = input_with_context(&[], &[], &[], &intervals, &[], &[]);
+        context.continuity = Some(&coverage);
+        context.pauses = Some(&pauses);
+        let blocks = focus_blocks(&context);
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].duration_seconds, 1800);
+        let mut result = Vec::new();
+        push_switch_facts(&context, &blocks, &mut result);
+        assert_eq!(
+            result
+                .iter()
+                .find(|i| i.kind == InsightKind::AppSwitchRate)
+                .unwrap()
+                .supporting
+                .switch_count,
+            Some(1)
+        );
+        assert_eq!(analytics::app_switch_count(&intervals), 1);
+        assert_eq!(analytics::focus_block_stats(&intervals).count, 4);
+    }
+
+    #[test]
+    fn additive_routine_evidence_preserves_old_json() {
+        let old = r#"{"app_class":"game","hour":20,"occurrence_count":3}"#;
+        let support: InsightSupport = serde_json::from_str(old).unwrap();
+        assert!(support.routine.is_none());
+        assert!(
+            serde_json::to_value(support)
+                .unwrap()
+                .get("routine")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_observation_fraction_uses_elapsed_time_even_without_focus() {
+        let mut context = input(&[], &[], 0, 0, 0, 3600);
+        context.elapsed_seconds = 36000;
+        context.observed_seconds = 32400;
+        let result = analyze(context);
+        let gap = result
+            .iter()
+            .find(|i| i.kind == InsightKind::UnobservedAnomaly)
+            .unwrap();
+        assert_eq!(gap.supporting.share, Some(0.1));
+    }
     #[test]
     fn emits_structured_top_app_insight() {
         let rows = vec![
@@ -2151,7 +1749,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(top.category, InsightCategory::Apps);
-        assert_eq!(top.title, "Top app share");
+        assert_eq!(top.title, "Your most-used app");
         assert_eq!(
             top.supporting.app_class.as_deref(),
             Some("com.mitchellh.ghostty")
@@ -2162,7 +1760,7 @@ mod tests {
         let json = serde_json::to_value(top).unwrap();
         assert_eq!(json["kind"], "top-app");
         assert_eq!(json["category"], "apps");
-        assert_eq!(json["tone"], "caution");
+        assert_eq!(json["tone"], "info");
         assert!(json.get("label").is_none());
     }
 
@@ -2193,7 +1791,7 @@ mod tests {
 
         assert_eq!(insights.len(), 3);
         assert_eq!(insights[0].kind, InsightKind::SleepExcluded);
-        assert_eq!(insights[0].value, "30m excluded");
+        assert_eq!(insights[0].value, "30m not counted");
         assert_eq!(insights[1].kind, InsightKind::UnobservedExcluded);
         assert_eq!(insights[1].tone, InsightTone::Caution);
         assert_eq!(insights[2].kind, InsightKind::ExcludedImpact);
@@ -2201,7 +1799,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_comparison_uses_negative_tone() {
+    fn negative_comparison_is_descriptive() {
         let rows = vec![AppTotals {
             app_class: "firefox".to_string(),
             focused_seconds: 900,
@@ -2218,8 +1816,8 @@ mod tests {
             .find(|insight| insight.kind == InsightKind::DayComparison)
             .unwrap();
 
-        assert_eq!(comparison.tone, InsightTone::Negative);
-        assert_eq!(comparison.value, "-15m");
+        assert_eq!(comparison.tone, InsightTone::Info);
+        assert_eq!(comparison.value, "15m less");
         assert_eq!(comparison.supporting.comparison_seconds, Some(1800));
         assert_eq!(comparison.supporting.delta_seconds, Some(-900));
     }
@@ -2251,8 +1849,8 @@ mod tests {
             .find(|insight| insight.kind == InsightKind::DayComparison)
             .unwrap();
 
-        assert_eq!(comparison.title, "vs previous day");
-        assert_eq!(comparison.value, "+10m");
+        assert_eq!(comparison.title, "Compared with the day before");
+        assert_eq!(comparison.value, "10m more");
         assert_eq!(comparison.supporting.date.as_deref(), Some("2026-01-12"));
         assert_eq!(
             comparison.supporting.comparison_date.as_deref(),
@@ -2262,173 +1860,6 @@ mod tests {
             comparison.supporting.comparison_label.as_deref(),
             Some("Previous day")
         );
-    }
-
-    #[test]
-    fn emits_same_weekday_pace_for_today_with_enough_history() {
-        let rows = vec![AppTotals {
-            app_class: "steam".to_string(),
-            focused_seconds: 5400,
-            open_seconds: 5400,
-        }];
-        let daily = vec![
-            day("2025-12-24", "Wed", 3600),
-            day("2025-12-31", "Wed", 4500),
-            day("2026-01-07", "Wed", 2700),
-            day("2026-01-13", "Tue", 900),
-            day("2026-01-14", "Wed", 5400),
-        ];
-
-        let insights = analyze(input(&rows, &daily, 5400, 5400, 0, 0));
-        let pace = insights
-            .iter()
-            .find(|insight| insight.kind == InsightKind::SameWeekdayPace)
-            .unwrap();
-
-        assert_eq!(pace.title, "Ahead of usual pace");
-        assert_eq!(pace.value, "+30m");
-        assert_eq!(pace.category, InsightCategory::Patterns);
-        assert_eq!(pace.confidence, InsightConfidence::Medium);
-        assert_eq!(pace.evidence.data_points, 3);
-        assert_eq!(pace.supporting.weekday_label.as_deref(), Some("Wed"));
-        assert_eq!(pace.supporting.baseline_seconds, Some(3600));
-        assert_eq!(pace.supporting.delta_seconds, Some(1800));
-    }
-
-    #[test]
-    fn suppresses_same_weekday_pace_without_enough_history() {
-        let rows = vec![AppTotals {
-            app_class: "steam".to_string(),
-            focused_seconds: 1800,
-            open_seconds: 1800,
-        }];
-        let daily = vec![
-            day("2025-12-31", "Wed", 4500),
-            day("2026-01-07", "Wed", 2700),
-            day("2026-01-14", "Wed", 1800),
-        ];
-
-        let insights = analyze(input(&rows, &daily, 1800, 1800, 0, 0));
-
-        assert!(
-            insights
-                .iter()
-                .all(|insight| insight.kind != InsightKind::SameWeekdayPace)
-        );
-    }
-
-    #[test]
-    fn emits_current_slot_habits_from_historical_focus() {
-        let rows = vec![AppTotals {
-            app_class: "steam".to_string(),
-            focused_seconds: 1800,
-            open_seconds: 1800,
-        }];
-        let daily = vec![
-            day("2025-12-24", "Wed", 1800),
-            day("2025-12-31", "Wed", 1800),
-            day("2026-01-07", "Wed", 1800),
-            day("2026-01-14", "Wed", 1800),
-        ];
-        let history = vec![
-            focus(
-                "steam",
-                local_ts(2025, 12, 24, 9, 0),
-                local_ts(2025, 12, 24, 9, 20),
-            ),
-            focus(
-                "steam",
-                local_ts(2025, 12, 31, 9, 0),
-                local_ts(2025, 12, 31, 9, 20),
-            ),
-            focus(
-                "steam",
-                local_ts(2026, 1, 7, 9, 0),
-                local_ts(2026, 1, 7, 9, 20),
-            ),
-            focus(
-                "code",
-                local_ts(2026, 1, 7, 9, 20),
-                local_ts(2026, 1, 7, 9, 25),
-            ),
-        ];
-        let mut analysis = input(&rows, &daily, 1800, 1800, 0, 0);
-        analysis.historical_focus_intervals = &history;
-        analysis.current_weekday = Some(2);
-        analysis.current_hour = Some(9);
-
-        let insights = analyze(analysis);
-        let active = insights
-            .iter()
-            .find(|insight| insight.kind == InsightKind::UsuallyActiveNow)
-            .unwrap();
-        let app = insights
-            .iter()
-            .find(|insight| insight.kind == InsightKind::UsualAppNow)
-            .unwrap();
-
-        assert_eq!(active.value, "Wed 9 AM");
-        assert_eq!(active.supporting.share, Some(1.0));
-        assert_eq!(app.value, "Steam");
-        assert_eq!(app.supporting.app_class.as_deref(), Some("steam"));
-    }
-
-    #[test]
-    fn emits_app_routine_and_focus_momentum() {
-        let rows = vec![AppTotals {
-            app_class: "steam".to_string(),
-            focused_seconds: 7200,
-            open_seconds: 7200,
-        }];
-        let daily = vec![
-            day("2026-01-01", "Thu", 600),
-            day("2026-01-02", "Fri", 600),
-            day("2026-01-03", "Sat", 600),
-            day("2026-01-04", "Sun", 600),
-            day("2026-01-05", "Mon", 600),
-            day("2026-01-06", "Tue", 600),
-            day("2026-01-07", "Wed", 1800),
-            day("2026-01-08", "Thu", 1800),
-            day("2026-01-09", "Fri", 1800),
-            day("2026-01-10", "Sat", 1800),
-            day("2026-01-11", "Sun", 1800),
-            day("2026-01-12", "Mon", 1800),
-            day("2026-01-13", "Tue", 1800),
-            day("2026-01-14", "Wed", 1800),
-        ];
-        let history = vec![
-            focus(
-                "steam",
-                local_ts(2025, 12, 24, 18, 0),
-                local_ts(2025, 12, 24, 19, 0),
-            ),
-            focus(
-                "steam",
-                local_ts(2025, 12, 31, 18, 0),
-                local_ts(2025, 12, 31, 19, 0),
-            ),
-            focus(
-                "steam",
-                local_ts(2026, 1, 7, 18, 0),
-                local_ts(2026, 1, 7, 19, 0),
-            ),
-        ];
-        let mut analysis = input(&rows, &daily, 7200, 7200, 0, 0);
-        analysis.historical_focus_intervals = &history;
-
-        let insights = analyze(analysis);
-
-        assert!(
-            insights
-                .iter()
-                .any(|insight| insight.kind == InsightKind::AppRoutine)
-        );
-        let momentum = insights
-            .iter()
-            .find(|insight| insight.kind == InsightKind::FocusMomentum)
-            .unwrap();
-        assert_eq!(momentum.title, "Focus trending up");
-        assert_eq!(momentum.value, "+2h");
     }
 
     #[test]
@@ -2483,8 +1914,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(kinds.contains(&InsightKind::PeakFocusHour));
         assert!(kinds.contains(&InsightKind::PeakFocusWeekday));
-        assert!(kinds.contains(&InsightKind::CurrentStreak));
-        assert!(kinds.contains(&InsightKind::LongestStreak));
+        assert!(!kinds.contains(&InsightKind::CurrentStreak));
+        assert!(!kinds.contains(&InsightKind::LongestStreak));
         assert!(kinds.contains(&InsightKind::DeepWorkBlocks));
         assert!(kinds.contains(&InsightKind::AppSwitchRate));
         assert!(kinds.contains(&InsightKind::FragmentedApp));
@@ -2541,6 +1972,8 @@ mod tests {
             end_date: Some("2026-01-11".to_string()),
             focused_seconds: 3600,
             matched_elapsed: false,
+            observed_seconds: 86400,
+            elapsed_seconds: 86400,
         });
 
         let insights = analyze(analysis);
@@ -2549,9 +1982,9 @@ mod tests {
             .find(|insight| insight.kind == InsightKind::PeriodComparison)
             .unwrap();
 
-        assert_eq!(trend.title, "vs previous week");
-        assert_eq!(trend.value, "+1h");
-        assert_eq!(trend.tone, InsightTone::Positive);
+        assert_eq!(trend.title, "Compared with the week before");
+        assert_eq!(trend.value, "1h more");
+        assert_eq!(trend.tone, InsightTone::Info);
         assert_eq!(trend.supporting.comparison_seconds, Some(3600));
     }
 
@@ -2580,6 +2013,8 @@ mod tests {
             end_date: Some("2026-01-11".to_string()),
             focused_seconds: 3600,
             matched_elapsed: true,
+            observed_seconds: 86400,
+            elapsed_seconds: 86400,
         });
 
         let insights = analyze(analysis);
@@ -2616,6 +2051,8 @@ mod tests {
             end_date: Some("2025-12-31".to_string()),
             focused_seconds: 7200,
             matched_elapsed: false,
+            observed_seconds: 86400,
+            elapsed_seconds: 86400,
         });
 
         let insights = analyze(analysis);
@@ -2624,9 +2061,9 @@ mod tests {
             .find(|insight| insight.kind == InsightKind::PeriodComparison)
             .unwrap();
 
-        assert_eq!(trend.title, "vs previous month");
-        assert_eq!(trend.value, "+2h");
-        assert_eq!(trend.tone, InsightTone::Positive);
+        assert_eq!(trend.title, "Compared with the month before");
+        assert_eq!(trend.value, "2h more");
+        assert_eq!(trend.tone, InsightTone::Info);
         assert_eq!(
             trend.supporting.comparison_label.as_deref(),
             Some("December 2025")
@@ -2644,6 +2081,8 @@ mod tests {
         let mut analysis = input(&rows, &daily, 3600, 7200, 0, 3600);
         analysis.total_idle_seconds = 900;
         analysis.total_locked_seconds = 300;
+        analysis.elapsed_seconds = 12000;
+        analysis.observed_seconds = 8400;
 
         let insights = analyze(analysis);
 
@@ -2685,13 +2124,10 @@ mod tests {
             daily,
             heatmap: &[],
             focus_intervals: &[],
-            historical_focus_intervals: &[],
             workspaces: &[],
             app_workspaces: &[],
             today_key: "2026-01-14",
             selected_day_key: "2026-01-14",
-            current_weekday: Some(2),
-            current_hour: Some(9),
             period: AnalysisPeriod {
                 lens: AnalysisLens::Day,
                 label: "Today",
@@ -2700,6 +2136,10 @@ mod tests {
             },
             previous_period: None,
             total_focused_seconds: focused,
+            observed_seconds: 86400,
+            elapsed_seconds: 86400,
+            continuity: None,
+            pauses: None,
             total_open_seconds: open,
             total_idle_seconds: 0,
             total_locked_seconds: 0,
@@ -2721,13 +2161,10 @@ mod tests {
             daily,
             heatmap,
             focus_intervals,
-            historical_focus_intervals: focus_intervals,
             workspaces,
             app_workspaces,
             today_key: "2026-01-14",
             selected_day_key: "2026-01-14",
-            current_weekday: Some(2),
-            current_hour: Some(9),
             period: AnalysisPeriod {
                 lens: AnalysisLens::Day,
                 label: "Today",
@@ -2736,6 +2173,10 @@ mod tests {
             },
             previous_period: None,
             total_focused_seconds: rows.iter().map(|row| row.focused_seconds.max(0)).sum(),
+            observed_seconds: 86400,
+            elapsed_seconds: 86400,
+            continuity: None,
+            pauses: None,
             total_open_seconds: rows.iter().map(|row| row.open_seconds.max(0)).sum(),
             total_idle_seconds: 0,
             total_locked_seconds: 0,
@@ -2750,8 +2191,8 @@ mod tests {
             label: label.to_string(),
             focused_seconds,
             open_seconds: focused_seconds,
-            elapsed_seconds: focused_seconds,
-            observed_seconds: focused_seconds,
+            elapsed_seconds: 86400,
+            observed_seconds: 86400,
             idle_seconds: 0,
             locked_seconds: 0,
             sleep_seconds: 0,
@@ -2789,13 +2230,5 @@ mod tests {
             app_class: app_class.to_string(),
             focused_seconds,
         }
-    }
-
-    fn local_ts(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
-        Local
-            .with_ymd_and_hms(year, month, day, hour, minute, 0)
-            .single()
-            .unwrap()
-            .timestamp()
     }
 }

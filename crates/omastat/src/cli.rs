@@ -36,7 +36,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-fn print_json<T: Serialize>(value: &T) -> Result<()> {
+pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     let mut stdout = io::stdout().lock();
     match stdout
@@ -72,6 +72,17 @@ pub enum Commands {
         offset: i32,
         #[arg(long, default_value_t = 7)]
         days: u32,
+    },
+    /// Inspect visit frequency and patterns for one app or website.
+    ActivityDetail {
+        #[arg(long, value_enum, default_value = "day")]
+        lens: LensArg,
+        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+        offset: i32,
+        #[arg(long, required_unless_present = "domain", conflicts_with = "domain")]
+        app: Option<String>,
+        #[arg(long, required_unless_present = "app", conflicts_with = "app")]
+        domain: Option<String>,
     },
     /// Show structured insights for a report lens.
     Insights {
@@ -318,7 +329,7 @@ pub fn print_insights(report: &InsightsReport, json: bool) -> Result<()> {
                 insight.value
             );
             println!(
-                "      {} confidence - {}",
+                "      {} · {}",
                 insight_confidence_label(insight.confidence),
                 insight.explanation
             );
@@ -872,9 +883,9 @@ fn insight_tone_label(tone: InsightTone) -> &'static str {
 
 fn insight_confidence_label(confidence: InsightConfidence) -> &'static str {
     match confidence {
-        InsightConfidence::Low => "low",
-        InsightConfidence::Medium => "medium",
-        InsightConfidence::High => "high",
+        InsightConfidence::Low => "Limited evidence",
+        InsightConfidence::Medium => "Some supporting history",
+        InsightConfidence::High => "Strong supporting history",
     }
 }
 

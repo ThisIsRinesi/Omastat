@@ -101,7 +101,9 @@ pub fn longest_active_streak(days: &[DayTotals]) -> usize {
 pub fn app_switch_count(intervals: &[TimelineInterval]) -> usize {
     intervals
         .windows(2)
-        .filter(|pair| pair[0].app_class != pair[1].app_class)
+        .filter(|pair| {
+            pair[0].app_class != pair[1].app_class && pair[0].ended_at == pair[1].started_at
+        })
         .count()
 }
 
@@ -134,11 +136,23 @@ pub fn focus_block_stats(intervals: &[TimelineInterval]) -> FocusBlockStats {
 }
 
 pub fn focus_block_durations(intervals: &[TimelineInterval]) -> Vec<i64> {
-    intervals
-        .iter()
-        .map(|interval| interval.ended_at.saturating_sub(interval.started_at))
-        .filter(|seconds| *seconds > 0)
-        .collect()
+    let mut durations: Vec<i64> = Vec::new();
+    let mut previous: Option<&TimelineInterval> = None;
+    for interval in intervals {
+        let seconds = (interval.ended_at - interval.started_at).max(0);
+        if seconds == 0 {
+            continue;
+        }
+        if previous
+            .is_some_and(|p| p.app_class == interval.app_class && p.ended_at == interval.started_at)
+        {
+            *durations.last_mut().unwrap() += seconds;
+        } else {
+            durations.push(seconds);
+        }
+        previous = Some(interval);
+    }
+    durations
 }
 
 pub fn hour_totals(cells: &[FocusHeatCell]) -> Vec<(u32, i64)> {
@@ -198,4 +212,65 @@ pub fn effective_app_count(rows: &[AppTotals], total_focused_seconds: i64) -> f6
         .map(|share| -share * share.ln())
         .sum::<f64>();
     entropy.exp()
+}
+
+/// Human-readable local clock labels; stored timestamps and clock minutes stay unchanged.
+pub fn clock_label(minute: u32) -> String {
+    let minute = minute % 1440;
+    let hour = minute / 60;
+    let hour12 = if hour.is_multiple_of(12) {
+        12
+    } else {
+        hour % 12
+    };
+    let suffix = if hour < 12 { "AM" } else { "PM" };
+    if minute.is_multiple_of(60) {
+        format!("{hour12} {suffix}")
+    } else {
+        format!("{hour12}:{:02} {suffix}", minute % 60)
+    }
+}
+
+pub fn clock_range(start: u32, end: u32) -> String {
+    let first = clock_label(start);
+    let last = clock_label(end);
+    if (start % 1440 < 720) == (end % 1440 < 720) {
+        format!("{}–{last}", first.rsplit_once(' ').unwrap().0)
+    } else {
+        format!("{first}–{last}")
+    }
+}
+
+pub fn duration_words(seconds: i64) -> String {
+    let minutes = seconds.max(0) / 60;
+    if minutes == 0 {
+        return "less than a minute".into();
+    }
+    let hours = minutes / 60;
+    let rest = minutes % 60;
+    let minute_label = if rest == 1 { "minute" } else { "minutes" };
+    if hours == 0 {
+        return format!("{rest} {minute_label}");
+    }
+    let hour_label = if hours == 1 { "hour" } else { "hours" };
+    if rest == 0 {
+        format!("{hours} {hour_label}")
+    } else {
+        format!("{hours} {hour_label} and {rest} {minute_label}")
+    }
+}
+
+#[cfg(test)]
+mod wording_tests {
+    use super::*;
+    #[test]
+    fn readable_times_cover_noon_midnight_and_uneven_hours() {
+        assert_eq!(clock_label(0), "12 AM");
+        assert_eq!(clock_label(720), "12 PM");
+        assert_eq!(clock_range(1230, 1290), "8:30–9:30 PM");
+        assert_eq!(clock_range(1410, 60), "11:30 PM–1 AM");
+        assert_eq!(duration_words(3600), "1 hour");
+        assert_eq!(duration_words(3660), "1 hour and 1 minute");
+        assert_eq!(duration_words(90), "1 minute");
+    }
 }

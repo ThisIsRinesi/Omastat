@@ -186,7 +186,7 @@ pub fn browser_activity_from_domains(
     rows
 }
 
-fn is_browser_class(app_class: &str) -> bool {
+pub fn is_browser_class(app_class: &str) -> bool {
     matches!(
         app_class.to_ascii_lowercase().as_str(),
         "zen"
