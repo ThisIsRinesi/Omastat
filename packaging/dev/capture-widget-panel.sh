@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: %s [--output PATH] [--delay SECONDS] [--lens day|week|month|year|life] [--region GEOMETRY] [--select] [--shell-path PATH] [--keep-open] [--no-open]\n' "$0" >&2
+  printf 'usage: %s [--output PATH] [--delay SECONDS] [--lens day|week|month|year|life] [--offset N] [--region GEOMETRY] [--select] [--shell-path PATH] [--keep-open] [--no-open]\n' "$0" >&2
 }
 
 shell_path="${OMARCHY_SHELL_PATH:-/usr/share/omarchy/shell}"
@@ -10,6 +10,7 @@ output="/tmp/omastat-panel-$(date +%Y%m%d-%H%M%S).png"
 delay="1.2"
 region=""
 lens=""
+offset=""
 keep_open=0
 open_panel=1
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
@@ -38,6 +39,11 @@ while (($#)); do
         day|week|month|year|life) ;;
         *) usage; exit 2 ;;
       esac
+      shift 2
+      ;;
+    --offset)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      offset="$2"
       shift 2
       ;;
     --select)
@@ -89,7 +95,11 @@ EOF
     exit 1
   fi
   if [[ -n "$lens" ]]; then
-    quickshell ipc -n -p "$shell_path" call local.omastat "$lens"
+    if [[ -n "$offset" ]]; then
+      quickshell ipc -n -p "$shell_path" call local.omastat period "$lens" "$offset"
+    else
+      quickshell ipc -n -p "$shell_path" call local.omastat "$lens"
+    fi
   fi
   sleep "$delay"
 fi

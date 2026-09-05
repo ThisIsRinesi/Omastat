@@ -28,14 +28,14 @@ Panel {
   property string todayKey: ""
   property string lensLabel: "DAY"
   property string periodLabel: "Today"
-  property int totalFocused: 0
-  property int totalOpen: 0
-  property int totalElapsed: 0
-  property int totalObserved: 0
-  property int totalIdle: 0
-  property int totalLocked: 0
-  property int totalSleep: 0
-  property int totalUnobserved: 0
+  property real totalFocused: 0
+  property real totalOpen: 0
+  property real totalElapsed: 0
+  property real totalObserved: 0
+  property real totalIdle: 0
+  property real totalLocked: 0
+  property real totalSleep: 0
+  property real totalUnobserved: 0
   property string statusText: ""
   property string errorText: ""
   property string updatedText: ""
@@ -69,9 +69,9 @@ Panel {
   readonly property int metricColumns: panel.width > 0 && panel.width < Style.space(420) ? 1 : (compactPanel ? 2 : 3)
   readonly property bool periodCanShift: selectedLens !== "life"
   readonly property string displayTodayKey: selectedOffset === 0 ? todayKey : ""
-  readonly property int totalPaused: totalIdle + totalLocked + totalSleep
-  readonly property int totalExcluded: totalPaused + totalUnobserved
-  readonly property int focusDenominator: totalObserved > 0 ? totalObserved : Math.max(0, totalFocused + totalPaused)
+  readonly property real totalPaused: totalIdle + totalLocked + totalSleep
+  readonly property real totalExcluded: totalPaused + totalUnobserved
+  readonly property real focusDenominator: totalObserved > 0 ? totalObserved : Math.max(0, totalFocused + totalPaused)
   readonly property string focusShareText: focusDenominator > 0 ? Model.percent(totalFocused / focusDenominator) : "--"
   readonly property string observedDetailText: totalElapsed > 0 ? "Of " + root.formatDuration(totalElapsed) + " elapsed" : "Tracker-visible time"
   readonly property string pausedDetailText: Model.pausedDetail(totalIdle, totalLocked, totalSleep)
@@ -118,8 +118,8 @@ Panel {
   readonly property string periodScopeLabel: selectedOffset === 0 && selectedLens !== "day" && selectedLens !== "life" ? periodLabel + " to date" : periodLabel
   readonly property string consistencyScopeText: selectedLens === "life" ? "Recent visible days" : (selectedOffset === 0 && selectedLens !== "day" ? "Elapsed days only" : "Across period")
   readonly property string loadingAppMixText: summaryTopApp && summaryTopApp.app ? "Loading app mix; top " + String(summaryTopApp.app) + " " + root.formatDuration(Number(summaryTopApp.seconds || 0)) : "Loading app mix..."
-  readonly property string activityChartTitle: selectedLens === "day" ? "Last 7 days" : (selectedLens === "week" ? "This week" : (selectedLens === "month" ? "Month calendar" : (selectedLens === "year" ? "Monthly focus" : "Recent weeks")))
-  readonly property string timeChartTitle: selectedLens === "day" ? "Today by hour" : "Focus by time of week"
+  readonly property string activityChartTitle: selectedLens === "day" ? "Last 7 days" : (selectedLens === "week" ? (selectedOffset === 0 ? "This week" : "Selected week") : (selectedLens === "month" ? "Month calendar" : (selectedLens === "year" ? "Monthly focus" : "Recent weeks")))
+  readonly property string timeChartTitle: selectedLens === "day" ? (selectedOffset === 0 ? "Today by hour" : "Selected day by hour") : "Focus by time of week"
   readonly property string activityChartDetail: selectedLens === "month" ? "Daily focused time" : (selectedLens === "week" ? "Cumulative focused time" : "Focused time")
   readonly property string timeChartDetail: selectedLens === "day" ? "Hourly focused time" : "Weekday and hour intensity"
 
@@ -154,6 +154,7 @@ Panel {
     }
     function refresh() { root.refresh() }
     function status() { return root.statusText || "idle" }
+    function period(lens, offset) { root.setLensOffset(lens, offset) }
     function day() { root.setLens("day") }
     function week() { root.setLens("week") }
     function month() { root.setLens("month") }
@@ -163,6 +164,10 @@ Panel {
 
   function setLens(lens) {
     if (hostWidget && hostWidget.setPeriod) hostWidget.setPeriod(lens, 0)
+  }
+
+  function setLensOffset(lens, offset) {
+    if (hostWidget && hostWidget.setPeriod) hostWidget.setPeriod(lens, offset)
   }
 
   function shiftPeriod(delta) {
@@ -830,8 +835,8 @@ Panel {
   component DashboardSummary: Rectangle {
     id: summaryRoot
 
-    readonly property int otherTrackedSeconds: Math.max(0, root.totalObserved - root.totalFocused - root.totalPaused)
-    readonly property int elapsedSeconds: Math.max(1, root.totalObserved + root.totalUnobserved)
+    readonly property real otherTrackedSeconds: Math.max(0, root.totalObserved - root.totalFocused - root.totalPaused)
+    readonly property real elapsedSeconds: Math.max(1, root.totalObserved + root.totalUnobserved)
 
     implicitHeight: summaryColumn.implicitHeight + Style.space(20)
     radius: 0
@@ -1183,7 +1188,7 @@ Panel {
 
     property var categories: []
 
-    readonly property int totalSeconds: {
+    readonly property real totalSeconds: {
       var total = 0
       for (var i = 0; i < categories.length; i++) total += Number(categories[i].seconds || 0)
       return Math.max(1, total)
@@ -1390,16 +1395,16 @@ Panel {
   component TimeBreakdownStrip: Rectangle {
     id: breakdownRoot
 
-    property int focusedSeconds: 0
-    property int observedSeconds: 0
-    property int pausedSeconds: 0
-    property int trackerOffSeconds: 0
+    property real focusedSeconds: 0
+    property real observedSeconds: 0
+    property real pausedSeconds: 0
+    property real trackerOffSeconds: 0
     property real focusedShare: 0
     property string excludedDetail: ""
     property real revealProgress: 0
 
-    readonly property int otherTrackedSeconds: Math.max(0, observedSeconds - focusedSeconds - pausedSeconds)
-    readonly property int elapsedSeconds: Math.max(1, observedSeconds + trackerOffSeconds)
+    readonly property real otherTrackedSeconds: Math.max(0, observedSeconds - focusedSeconds - pausedSeconds)
+    readonly property real elapsedSeconds: Math.max(1, observedSeconds + trackerOffSeconds)
 
     function restartReveal() {
       revealProgress = 0
@@ -1652,7 +1657,7 @@ Panel {
 
     property var apps: []
     property var colors: []
-    property int totalSeconds: 0
+    property real totalSeconds: 0
     property int hoveredIndex: -1
     property int highlightedIndex: -1
     signal highlightChanged(int index)
@@ -1826,7 +1831,7 @@ Panel {
     property int highlightedIndex: -1
     signal highlightChanged(int index)
 
-    readonly property int maxSeconds: {
+    readonly property real maxSeconds: {
       var value = 0
       for (var i = 0; i < apps.length; i++) value = Math.max(value, Number(apps[i].seconds || 0))
       return Math.max(1, value)
@@ -1881,7 +1886,7 @@ Panel {
           width: parent.width
           height: Style.space(34)
 
-          readonly property int seconds: Number(modelData.seconds || 0)
+          readonly property real seconds: Number(modelData.seconds || 0)
           readonly property int pct: Number(modelData.pct || 0)
           readonly property bool highlighted: rankRoot.highlightedIndex === index
           readonly property color barColor: root.colorFromHex(String(colors[index] || Color.accent), highlighted || index === 0 ? 0.92 : 0.68)
@@ -1958,12 +1963,12 @@ Panel {
 
     property var rows: []
 
-    readonly property int totalSeconds: {
+    readonly property real totalSeconds: {
       var total = 0
       for (var i = 0; i < rows.length; i++) total += Number(rows[i].seconds || 0)
       return total
     }
-    readonly property int maxSeconds: {
+    readonly property real maxSeconds: {
       var value = 0
       for (var i = 0; i < rows.length; i++) value = Math.max(value, Number(rows[i].seconds || 0))
       return Math.max(1, value)
@@ -2039,7 +2044,7 @@ Panel {
             width: parent.width
             height: Style.space(28)
 
-            readonly property int seconds: Number(modelData.seconds || 0)
+            readonly property real seconds: Number(modelData.seconds || 0)
             readonly property int pct: Number(modelData.pct || 0)
 
             Text {
@@ -2626,6 +2631,10 @@ Panel {
     readonly property int rowCount: Math.ceil(cells.length / 7)
     readonly property real cellSize: Math.max(Style.space(22), Math.min(Style.space(32), (width - Style.space(compact ? 28 : 304)) / 7))
     readonly property real calendarWidth: 7 * cellSize + 6 * gap
+    readonly property real calendarHeight: Style.space(18) + Style.space(4) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
+    readonly property real weeklyPaceHeight: Style.space(18) + Style.space(5) + weeks.length * Style.space(22) + Math.max(0, weeks.length - 1) * Style.space(5)
+    readonly property real sideHeight: weeklyPaceHeight + Style.space(10) + Style.space(54)
+    readonly property real bodyHeight: compact ? calendarHeight + Style.space(10) + sideHeight : Math.max(calendarHeight, sideHeight)
 
     function restartReveal() {
       revealProgress = 0
@@ -2636,7 +2645,7 @@ Panel {
     onMaxSecondsChanged: restartReveal()
     Component.onCompleted: restartReveal()
 
-    implicitHeight: compact ? Style.space(398) : Style.space(304)
+    implicitHeight: Style.space(12) + monthRhythmHeader.height + Style.space(10) + bodyHeight + Style.space(10) + monthRhythmReadout.height + Style.space(10)
     radius: 0
     color: root.noFill
     border.width: 0

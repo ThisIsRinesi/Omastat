@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: %s [--capture PATH] [--lens day|week|month|year|life] [--delay SECONDS] [--region GEOMETRY] [--select] [--keep-open] [--restart-shell]\n' "$0" >&2
+  printf 'usage: %s [--capture PATH] [--lens day|week|month|year|life] [--offset N] [--delay SECONDS] [--region GEOMETRY] [--select] [--keep-open] [--restart-shell]\n' "$0" >&2
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -11,6 +11,7 @@ widget_dir="$repo_root/packaging/omarchy/omastat"
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
 capture=""
 lens=""
+offset=""
 delay="0.7"
 keep_open=0
 restart_shell=0
@@ -32,6 +33,11 @@ while (($#)); do
         day|week|month|year|life) ;;
         *) usage; exit 2 ;;
       esac
+      shift 2
+      ;;
+    --offset)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      offset="$2"
       shift 2
       ;;
     --delay)
@@ -109,6 +115,7 @@ fi
 if [[ -n "$capture" ]]; then
   capture_args=(--output "$capture" --delay "$delay")
   [[ -n "$lens" ]] && capture_args+=(--lens "$lens")
+  [[ -n "$offset" ]] && capture_args+=(--offset "$offset")
   [[ -n "$region" ]] && capture_args+=(--region "$region")
   ((select_region)) && capture_args+=(--select)
   ((keep_open)) && capture_args+=(--keep-open)

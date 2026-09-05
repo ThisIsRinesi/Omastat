@@ -20,6 +20,11 @@ BarWidget {
   property string loadingLens: "day"
   property int loadingOffset: 0
   property bool loadingFullReport: false
+  property string loadingDate: ""
+  property bool reportOutputReady: false
+  property bool reportExitReady: false
+  property string reportOutput: ""
+  property int reportExitCode: 0
   property var reportsByKey: ({})
   property var summariesByKey: ({})
   property var rows: []
@@ -33,14 +38,14 @@ BarWidget {
   property string todayKey: ""
   property string lensLabel: "DAY"
   property string periodLabel: "Today"
-  property int totalFocused: 0
-  property int totalOpen: 0
-  property int totalElapsed: 0
-  property int totalObserved: 0
-  property int totalIdle: 0
-  property int totalLocked: 0
-  property int totalSleep: 0
-  property int totalUnobserved: 0
+  property real totalFocused: 0
+  property real totalOpen: 0
+  property real totalElapsed: 0
+  property real totalObserved: 0
+  property real totalIdle: 0
+  property real totalLocked: 0
+  property real totalSleep: 0
+  property real totalUnobserved: 0
   property bool panelDataLoaded: false
   property bool refreshQueuedFull: false
   property bool injectQueued: false
@@ -59,8 +64,6 @@ BarWidget {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
-
-  Component.onCompleted: refresh(false)
 
   onBarChanged: scheduleInjectPanel()
   onSettingsChanged: scheduleInjectPanel()
@@ -102,25 +105,19 @@ BarWidget {
   Process {
     id: reportProcess
     running: false
-    onRunningChanged: root.refreshRunning = running
     onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        root.errorText = "Report command failed"
-        root.statusText = "Command failed"
-        root.displayText = root.glyph + " !"
-        root.tooltip = "Omastat report failed"
-      }
-      if (root.refreshQueued) {
-        var queuedFull = root.refreshQueuedFull
-        root.refreshQueued = false
-        root.refreshQueuedFull = false
-        root.refresh(queuedFull)
-      }
+      root.reportExitCode = exitCode
+      root.reportExitReady = true
+      root.finishReport()
     }
 
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.parseReport(text)
+      onStreamFinished: {
+        root.reportOutput = text
+        root.reportOutputReady = true
+        root.finishReport()
+      }
     }
 
     stderr: StdioCollector {
@@ -159,7 +156,7 @@ BarWidget {
 
   function refresh(forceFull) {
     var full = forceFull === true || root.opened
-    if (reportProcess.running) {
+    if (refreshRunning) {
       refreshQueued = true
       refreshQueuedFull = refreshQueuedFull || full
       return
@@ -167,6 +164,11 @@ BarWidget {
     loadingLens = selectedLens
     loadingOffset = selectedOffset
     loadingFullReport = full
+    loadingDate = Model.dateKey(new Date())
+    reportOutputReady = false
+    reportExitReady = false
+    reportOutput = ""
+    refreshRunning = true
     errorText = ""
     statusText = full ? "Loading analytics" : "Refreshing"
     reportProcess.command = shellCommand(full
@@ -202,27 +204,51 @@ BarWidget {
     setPeriod(selectedLens, selectedOffset + Math.floor(Number(delta) || 0))
   }
 
+  // Consume output only after both signals, before starting a queued request.
+  function finishReport() {
+    if (!reportOutputReady || !reportExitReady) return
+    if (reportExitCode === 0) parseReport(reportOutput)
+    else reportFailure("Report command failed", "Command failed")
+    refreshRunning = false
+    if (refreshQueued) {
+      var queuedFull = refreshQueuedFull
+      refreshQueued = false
+      refreshQueuedFull = false
+      refresh(queuedFull)
+    }
+  }
+
+  function reportFailure(error, status) {
+    if (reportKey(loadingLens, loadingOffset) !== currentKey || loadingDate !== Model.dateKey(new Date())) return
+    errorText = error
+    statusText = status
+    displayText = root.glyph + " !"
+    tooltip = error
+  }
+
   function parseReport(text) {
+    if (loadingDate !== Model.dateKey(new Date())) {
+      refreshQueued = true
+      refreshQueuedFull = refreshQueuedFull || loadingFullReport
+      return
+    }
     var parsed = null
     var raw = String(text || "").trim()
     if (raw.length === 0) {
-      clearReport("Report command returned no data", "No report data")
-      displayText = root.glyph + " !"
-      tooltip = "Omastat report returned no data"
+      reportFailure("Report command returned no data", "No report data")
       return
     }
     try {
       parsed = JSON.parse(raw)
     } catch (error) {
-      clearReport("Report JSON parse failed", "Parse failed")
-      displayText = root.glyph + " !"
-      tooltip = "Omastat report parse failed"
+      reportFailure("Report JSON parse failed", "Parse failed")
       return
     }
-    if (!Array.isArray(parsed) && (!parsed || typeof parsed !== "object")) {
-      clearReport("Report JSON had an unexpected shape", "Invalid report")
-      displayText = root.glyph + " !"
-      tooltip = "Omastat report had an unexpected shape"
+    var legacyReport = loadingFullReport && Array.isArray(parsed)
+    var validObject = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      && typeof parsed.total_focused_seconds === "number" && isFinite(parsed.total_focused_seconds)
+    if (!legacyReport && !validObject) {
+      reportFailure("Report JSON had an unexpected shape", "Invalid report")
       return
     }
 
@@ -320,31 +346,6 @@ BarWidget {
     errorText = ""
     statusText = "Loading analytics"
     scheduleInjectPanel()
-  }
-
-  function clearReport(error, status) {
-    rows = []
-    reportApps = []
-    browserActivity = []
-    summaryTopApp = null
-    reportInsights = []
-    widgetInsight = null
-    daily = []
-    heatmap = []
-    todayKey = ""
-    lensLabel = "DAY"
-    periodLabel = "Today"
-    totalFocused = 0
-    totalOpen = 0
-    totalElapsed = 0
-    totalObserved = 0
-    totalIdle = 0
-    totalLocked = 0
-    totalSleep = 0
-    totalUnobserved = 0
-    panelDataLoaded = false
-    errorText = error
-    statusText = status
   }
 
   function updateDisplay(report) {
@@ -593,14 +594,14 @@ BarWidget {
 
   function cachedReport(key) {
     var entry = reportsByKey ? reportsByKey[key] : null
-    if (!entry || !entry.report) return null
+    if (!entry || !entry.report || entry.report.todayKey !== Model.dateKey(new Date())) return null
     if (nowMs() - Number(entry.updatedAt || 0) > fullReportTtlMs) return null
     return entry.report
   }
 
   function cachedSummary(key) {
     var entry = summariesByKey ? summariesByKey[key] : null
-    if (!entry || !entry.summary) return null
+    if (!entry || !entry.summary || entry.summary.todayKey !== Model.dateKey(new Date())) return null
     if (nowMs() - Number(entry.updatedAt || 0) > summaryTtlMs) return null
     return entry.summary
   }
