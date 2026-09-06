@@ -454,15 +454,38 @@ Ui.Panel {
                 Layout.fillWidth: true
                 Layout.preferredWidth: root.wide ? body.width * (0.64) : body.width
                 Layout.alignment: Qt.AlignTop
-                FocusRing {
+                GridLayout {
                   Layout.fillWidth: true
-                  Layout.preferredHeight: implicitHeight
                   visible: root.selectedLens === "day"
-                  title: "Busiest hours"
-                  detail: "Local time"
-                  hours: root.hours
-                  maxSeconds: root.maximum(root.hours)
-                  expanded: true
+                  columns: width >= Style.space(620) ? 2 : 1
+                  columnSpacing: Style.space(12)
+                  rowSpacing: Style.space(8)
+                  FocusRing {
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: Style.space(280)
+                    Layout.maximumWidth: parent.columns === 2 ? Style.space(280) : Infinity
+                    Layout.preferredHeight: implicitHeight
+                    title: "Busiest hours"
+                    detail: "Local time"
+                    hours: root.hours
+                    maxSeconds: root.maximum(root.hours)
+                    expanded: true
+                  }
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: Style.space(400)
+                    Layout.alignment: Qt.AlignTop
+                    Layout.topMargin: Style.space(12)
+                    spacing: Style.space(12)
+                    Label { text: "Hour by hour"; font.bold: true }
+                    BarChart {
+                      Layout.fillWidth: true
+                      Layout.minimumHeight: Style.space(200)
+                      Layout.preferredHeight: Style.space(200)
+                      cells: root.hours
+                      hourly: true
+                    }
+                  }
                 }
                 FocusTrendLine {
                   Layout.fillWidth: true
@@ -489,13 +512,6 @@ Ui.Panel {
                   weekMaxSeconds: root.maximum(root.calendarWeeks)
                   weekdayMaxSeconds: root.maximum(root.calendarWeekdays)
                   onActivatedCell: function(cell) { root.chartReadout = Model.monthCellDetailText(cell) }
-                }
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  visible: root.selectedLens === "day"
-                  spacing: Style.space(8)
-                  Label { text: "Hour by hour · local time"; font.bold: true }
-                  BarChart { Layout.fillWidth: true; Layout.minimumHeight: Style.space(175); Layout.preferredHeight: Style.space(175); cells: root.hours; hourly: true }
                 }
                 Label { Layout.fillWidth: true; visible: root.chartReadout.length > 0; text: root.chartReadout; color: root.dim; font.pixelSize: Style.font.caption }
                 ColumnLayout {
@@ -697,7 +713,7 @@ Ui.Panel {
         onClicked: { chart.inspected = index; root.chartReadout = name + " · " + Model.fmt(seconds) }
         background: Rectangle { color: "transparent"; border.width: barButton.activeFocus ? 1 : 0; border.color: root.accent }
         contentItem: Item {
-          Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top; anchors.bottomMargin: Style.space(6); height: Math.max(barButton.seconds > 0 ? Style.space(2) : 0, (parent.height - Style.space(28)) * barButton.seconds / chart.maxSeconds); color: root.accent; opacity: barButton.hovered || chart.inspected === barButton.index ? 1 : 0.65 }
+          Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top; anchors.bottomMargin: Style.space(6); height: Math.max(barButton.seconds > 0 ? Style.space(2) : 0, (parent.height - Style.space(28)) * barButton.seconds / chart.maxSeconds); radius: Style.space(2); color: root.accent; opacity: barButton.hovered || barButton.activeFocus || chart.inspected === barButton.index || barButton.seconds === chart.maxSeconds ? 1 : 0.65 }
           Label { id: barLabel; anchors.bottom: parent.bottom; width: chart.hourly ? Style.space(44) : parent.width; x: chart.hourly && barButton.index === 0 ? 0 : (parent.width - width) / 2; text: chart.hourly ? (barButton.index % 6 === 0 ? Model.clockLabel(barButton.index) : "") : (chart.cells.length <= 12 || barButton.index % Math.ceil(chart.cells.length / 6) === 0 ? barButton.name : ""); font.pixelSize: Style.font.caption; color: root.dim; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; wrapMode: Text.NoWrap }
         }
         Controls.ToolTip.visible: hovered || activeFocus
