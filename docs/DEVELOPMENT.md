@@ -191,3 +191,28 @@ day," and "days with enough tracking" in prose. Keep technical terms and exact
 methods in structured evidence and these docs. Routine wording is applied after
 ranking so presentation changes cannot change detection. Display local times as
 readable clock ranges, while retaining numeric minutes in JSON evidence.
+
+### Dashboard density review (September 2026)
+
+The refined panel was rendered at 1160×920, 600×920, and 380×920 using
+Quickshell with the installed Commons/Ui modules, desktop font, and theme.
+An isolated offscreen harness substituted a fixed viewport for KeyboardPanel;
+this checks dashboard content, not compositor placement or popup anchoring.
+Reports came from a consistent SQLite snapshot. Captures covered all five
+periods with overview, app, and website selections; narrow chart sections;
+long names; empty, loading, and error states; and expanded routine evidence.
+
+At 1160×920, the week overview's rhythm section ends at y=899. The default insight list fits complete
+explanations to the available viewport instead of stopping at three; in the
+review snapshot, its section ends at y=806. The whole seven-day heatmap is visible.
+QtTest keyboard checks exercised trend arrows, heatmap Enter activation,
+the search shortcut, and Tab at all three widths. Slay the Spire 2 retains
+its explanation above the expanded supporting dates and counting rules.
+The prior README week capture and refreshed capture use the same week and
+“All activity”; the newer snapshot includes additional recorded usage.
+
+`cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
+and `packaging/dev/check-widget-qml.sh` passed. The final fresh preview run
+reported no dashboard QML errors. QtTest hot reload needed a preview restart;
+the offscreen platform's startup warning is expected. README images are
+captures of the panel content from this harness.

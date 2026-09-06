@@ -18,7 +18,7 @@ The bar shows your focused time. Open it for the full dashboard:
 - **See the bigger picture.** Switch between day, week, month, year, and lifetime,
   or step back through earlier periods.
 - **Find where your time went.** Select a slice of the app chart, or search the
-  Apps and Websites lists. The dashboard follows your selection.
+  Apps and Websites lists. Its charts follow your selection; app and website shares keep the overall period breakdown.
 - **Explore your rhythm.** See your busiest hours, daily trends, monthly calendar,
   and the times of the week you tend to use an activity.
 - **Understand your visits.** Inspect time spent, days used, visit counts, and
@@ -34,14 +34,16 @@ minute. Omastat looks for recurring use across flexible time windows, including
 recent habits and longer-running routines. Days with too much missing tracking
 are left out of the comparison.
 
-![Slay the Spire 2 selected in the widget, with an evening routine found on 10 of 14 days](docs/assets/widget-routine.png)
+![Slay the Spire 2 selected in the widget, with its evening routine explanation and expanded evidence](docs/assets/widget-routine.png)
 
 *Selecting Slay the Spire 2 reveals an evening routine, its timing, and how often
 it appeared. Routine evidence looks across recent history; the charts show the
 selected period.*
 
 Insights take time to develop. A fresh install starts collecting from that point
-on, and early hints are labeled accordingly. Open **How we know** on an insight to inspect its supporting details.
+on, and early hints are labeled accordingly. Open **How we know** on an insight
+to inspect its supporting details. Counting rules and tracking gaps are available
+under **About your data**, leaving the main dashboard focused on your activities.
 
 ### Today and the month ahead
 
@@ -49,12 +51,12 @@ on, and early hints are labeled accordingly. Open **How we know** on an insight 
 
 *The day view shows your app mix and when you were active.*
 
-![The month view showing daily trends, calendar days, and weekday balance](docs/assets/widget-month.png)
+![The month view grouping app shares, habits, and daily trends into defined sections](docs/assets/widget-month.png)
 
-*The month view brings daily usage and weekday balance together. Scroll the
-panel to explore more activity and charts.*
+*The month view groups your daily trends and calendar under **Your rhythm**.
+Scroll to explore the calendar, weekday totals, and activity list.*
 
-These are live screenshots with the current desktop theme and real local
+These panel captures use the current desktop theme and a snapshot of real local
 activity. Your colors and totals will follow your own setup.
 
 ## Install

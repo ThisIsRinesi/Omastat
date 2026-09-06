@@ -338,7 +338,8 @@ function weekTrendSummary(daily, todayKey) {
   return parts.join("  ")
 }
 
-function trendDefaultText(days) {
+function trendDefaultText(days, unit) {
+  unit = unit || "day"
   var list = days || []
   if (list.length === 0) return ""
   if (list[0] && list[0].cumulative === true) {
@@ -359,9 +360,9 @@ function trendDefaultText(days) {
     if (!best || seconds > Number(best.seconds || 0)) best = list[i]
   }
   var parts = []
-  if (best && Number(best.seconds || 0) > 0) parts.push("Peak " + String(best.fullLabel || best.label || "day") + ": " + fmt(best.seconds))
-  parts.push("Average " + fmt(list.length > 0 ? Math.round(total / list.length) : 0))
-  parts.push(active + "/" + list.length + " active")
+  if (best && Number(best.seconds || 0) > 0) parts.push("Busiest: " + String(best.fullLabel || best.label || "day") + ": " + fmt(best.seconds))
+  parts.push((unit === "day" ? "Daily average " : unit === "week" ? "Weekly average " : "Monthly average ") + fmt(list.length > 0 ? Math.round(total / list.length) : 0))
+  parts.push("Used on " + active + " of " + list.length + " " + unit + (list.length === 1 ? "" : "s"))
   return parts.join("  ")
 }
 
@@ -416,12 +417,12 @@ function bestHour(cells) {
     if (!best || seconds > Number(best.seconds || 0)) best = list[i]
   }
   if (!best || Number(best.seconds || 0) <= 0) {
-    return { label: "--", value: "--", detail: "No focused hours", active: 0, total: list.length }
+    return { label: "--", value: "--", detail: "No activity yet", active: 0, total: list.length }
   }
   return {
     label: String(best.fullLabel || best.label || hourLabel(best.hour || 0)),
     value: fmt(Number(best.seconds || 0)),
-    detail: active + "/" + list.length + " active hours",
+    detail: "Used during " + active + " of " + list.length + " hours",
     active: active,
     total: list.length
   }
@@ -1006,7 +1007,7 @@ function insightDateRange(start, end) {
 
 function insightEvidence(item) {
   var support = item.supporting || {}
-  var text = String(item.explanation || item.detail || "")
+  var text = ""
   if (support.period_start_date && support.period_end_date)
     text += "\nLooking back at " + insightDateRange(support.period_start_date, support.period_end_date) + "."
   if (support.routine) {
@@ -1022,5 +1023,50 @@ function insightEvidence(item) {
     var confidence = { low: "Limited evidence so far", medium: "Some supporting history", high: "Strong supporting history" }
     text += "\n" + (confidence[String(item.confidence)] || "Tracking history")
   }
-  return text
+  return text.trim()
+}
+
+// Keep recording diagnostics available in the data disclosure, outside habits.
+function widgetInsights(items) {
+  return diverseInsights((items || []).filter(function(item) {
+    return item.category !== "system-signals" && ["idle-excluded", "locked-excluded", "sleep-excluded", "unobserved-excluded", "excluded-impact", "unobserved-anomaly"].indexOf(item.kind) === -1
+  }))
+}
+
+function insightQualifier(item) {
+  return item && item.confidence === "low" ? "Early hint" : ""
+}
+
+function visitSummary(activity) {
+  var days = Number(activity.days_used || 0), visits = Number(activity.visits || 0)
+  return days + (days === 1 ? " day" : " days") + " · " + visits + (visits === 1 ? " visit" : " visits")
+}
+
+function insightExplanation(item) {
+  return String(item.explanation || item.detail || "")
+}
+
+function trendTitle(lens) {
+  return lens === "year" ? "Monthly time" : lens === "life" ? "Weekly time" : "Daily time"
+}
+
+function clockLabel(hour) {
+  return pad2(hour) + ":00"
+}
+
+// Legend endpoints are durations, including observed zero-use periods.
+function durationLegend(maxSeconds) {
+  return [fmt(0), fmt(Math.max(0, Number(maxSeconds) || 0))]
+}
+
+// Preserve ranked order, fitting complete explanations rather than clipping cards.
+function fittingInsightCount(heights, available, spacing) {
+  var used = 0, count = 0
+  for (var i = 0; i < heights.length; i++) {
+    var next = Number(heights[i]) + (count ? spacing : 0)
+    if (count > 0 && used + next > Math.max(0, available)) break
+    used += next
+    count++
+  }
+  return count
 }

@@ -210,8 +210,51 @@ assert.match(routineEvidence, /5 of 7 days with enough tracking/);
 assert.match(routineEvidence, /Days we could compare: Sep 1, 2026; Sep 2, 2026/);
 assert.match(routineEvidence, /Days it happened: Sep 1, 2026/);
 assert.match(routineEvidence, /Some supporting history/);
-assert.equal(context.insightEvidence({ explanation: "Legacy fact" }), "Legacy fact");
+assert.equal(context.insightExplanation({ explanation: "Legacy fact" }), "Legacy fact");
+assert.equal(context.insightEvidence({ explanation: "Legacy fact" }), "");
 
 assert.equal(context.insightDateRange("2026-08-22", "2026-09-04"), "Aug 22–Sep 4, 2026");
 assert.equal(context.insightDateRange("2025-12-22", "2026-01-04"), "Dec 22, 2025–Jan 4, 2026");
 assert.equal(context.insightDate("not a date"), "not a date");
+
+// Recording quality belongs in data details, even when the full habits list opens.
+const habit = { kind: 'app-routine', category: 'patterns', title: 'Slay the Spire 2 most evenings', confidence: 'low', explanation: 'Original evidence stays intact.', supporting: { activity_key: 'Slay the Spire 2', matching_dates: ['2026-09-01'] } };
+const visibleHabits = context.widgetInsights([
+  { kind: 'unobserved-anomaly', category: 'patterns' },
+  { kind: 'idle-excluded' },
+  { kind: 'future-diagnostic', category: 'system-signals' },
+  habit,
+  { kind: 'top-app', category: 'apps', supporting: { activity_key: 'Browser' } },
+]);
+assert.equal(visibleHabits.length, 2);
+assert.equal(visibleHabits[0], habit);
+assert.equal(context.insightQualifier(habit), 'Early hint');
+assert.equal(context.insightQualifier({ confidence: 'high' }), '');
+assert.match(context.insightExplanation(habit), /Original evidence stays intact/);
+assert.doesNotMatch(context.insightEvidence(habit), /Original evidence stays intact/);
+assert.match(context.insightEvidence(habit), /Sep 1, 2026/);
+assert.equal(context.widgetInsights(null).length, 0);
+assert.equal(context.visitSummary({ days_used: 1, visits: 1 }), '1 day · 1 visit');
+assert.equal(context.visitSummary({ days_used: 2, visits: 3 }), '2 days · 3 visits');
+assert.match(context.trendDefaultText([{seconds: 3600, label: 'Mon'}], 'day'), /Daily average 1h/);
+assert.match(context.trendDefaultText([{seconds: 3600, label: 'Jan'}], 'month'), /Monthly average 1h/);
+assert.match(context.trendDefaultText([{seconds: 3600, label: 'Week 1'}], 'week'), /Weekly average 1h/);
+
+for (const [lens, title] of [["week", "Daily time"], ["month", "Daily time"], ["year", "Monthly time"], ["life", "Weekly time"]]) {
+  assert.equal(context.trendTitle(lens), title);
+}
+assert.equal(context.clockLabel(0), "00:00");
+assert.equal(context.clockLabel(6), "06:00");
+assert.equal(context.clockLabel(18), "18:00");
+assert.equal(context.insightExplanation({detail: "Older insight"}), "Older insight");
+assert.equal(context.insightExplanation({}), "");
+
+assert.deepEqual(Array.from(context.durationLegend(7200)), ["0s", "2h"]);
+assert.deepEqual(Array.from(context.durationLegend(0)), ["0s", "0s"]);
+assert.deepEqual(Array.from(context.durationLegend(90)), ["0s", "1m"]);
+assert.deepEqual(Array.from(context.durationLegend(undefined)), ["0s", "0s"]);
+
+assert.equal(context.fittingInsightCount([100, 100, 100, 100, 100, 100, 100], 650, 8), 6);
+assert.equal(context.fittingInsightCount([200, 200, 200], 430, 8), 2);
+assert.equal(context.fittingInsightCount([100], 20, 8), 1);
+assert.equal(context.fittingInsightCount([], 650, 8), 0);
