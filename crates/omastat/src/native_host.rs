@@ -26,10 +26,11 @@ struct NativeHostResponse<'a> {
 }
 
 pub fn run(config: &Config, database: Option<&std::path::Path>) -> Result<()> {
+    let browser_class = launching_browser();
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     while let Some(message) = read_message(&mut stdin)? {
-        let status = handle_message(config, database, &message)?;
+        let status = handle_message(config, database, &message, browser_class)?;
         write_message(&mut stdout, &NativeHostResponse { ok: true, status })?;
     }
     Ok(())
@@ -39,6 +40,7 @@ fn handle_message(
     config: &Config,
     database: Option<&std::path::Path>,
     message: &BrowserDomainMessage,
+    browser_class: Option<&str>,
 ) -> Result<&'static str> {
     if message.kind != "active-domain" && message.kind != "clear-domain" {
         return Ok("ignored");
@@ -60,12 +62,7 @@ fn handle_message(
         .map(normalize_app_class)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "zen".to_string());
-    let source = message
-        .source
-        .as_deref()
-        .map(normalize_source)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| app_class.clone());
+    let (app_class, source) = browser_identity(browser_class, app_class, message.source.as_deref());
     let now = clock::unix_now();
     let timestamp = message.timestamp.unwrap_or(now).min(now);
     if timestamp < now - 90 {
@@ -84,6 +81,56 @@ fn handle_message(
         timestamp,
     )?;
     Ok("recorded")
+}
+
+// Native messaging is launched by the browser. Use its executable identity so
+// the same signed Firefox package also works in Zen, including focus-loss events.
+fn launching_browser() -> Option<&'static str> {
+    let mut pid = std::process::id();
+    for _ in 0..8 {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        pid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))?
+            .trim()
+            .parse()
+            .ok()?;
+        if pid == 0 {
+            return None;
+        }
+        if let Ok(executable) = std::fs::read_link(format!("/proc/{pid}/exe"))
+            && let Some(class) = executable
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(browser_executable)
+        {
+            return Some(class);
+        }
+    }
+    None
+}
+
+fn browser_executable(name: &str) -> Option<&'static str> {
+    match name {
+        "zen" | "zen-bin" => Some("zen"),
+        "firefox" | "firefox-bin" => Some("firefox"),
+        _ => None,
+    }
+}
+
+fn browser_identity(
+    browser_class: Option<&str>,
+    reported_class: String,
+    reported_source: Option<&str>,
+) -> (String, String) {
+    if let Some(class) = browser_class {
+        return (class.to_owned(), format!("omastat-{class}"));
+    }
+    let source = reported_source
+        .map(normalize_source)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| reported_class.clone());
+    (reported_class, source)
 }
 
 fn read_message(stdin: &mut impl Read) -> Result<Option<BrowserDomainMessage>> {
@@ -128,6 +175,34 @@ fn normalize_source(value: &str) -> String {
 mod tests {
     use super::{NativeHostResponse, read_message, write_message};
     use std::io::Cursor;
+
+    #[test]
+    fn signed_firefox_messages_use_launching_browser_identity() {
+        use super::{browser_executable, browser_identity};
+        for (executable, class) in [
+            ("zen", "zen"),
+            ("zen-bin", "zen"),
+            ("firefox", "firefox"),
+            ("firefox-bin", "firefox"),
+        ] {
+            assert_eq!(
+                browser_identity(
+                    browser_executable(executable),
+                    "firefox".into(),
+                    Some("omastat-firefox")
+                ),
+                (class.into(), format!("omastat-{class}"))
+            );
+        }
+        assert_eq!(
+            browser_identity(
+                browser_executable("sh"),
+                "zen".into(),
+                Some("custom-source")
+            ),
+            ("zen".into(), "custom-source".into())
+        );
+    }
 
     #[test]
     fn reads_native_message_frame() {

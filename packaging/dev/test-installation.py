@@ -25,7 +25,7 @@ home = pathlib.Path.home()
 plugin = home / '.config/omarchy/plugins/local.omastat'
 if name == 'cargo':
     if '--list' in args:
-        if s.get('installed'): print('omastat v0.1.5:\n    omastat\n    omastatd')
+        if s.get('installed'): print('omastat v0.1.6:\n    omastat\n    omastatd')
     elif args[0] == 'install':
         if s.get('build_fail'): fail()
         s['installed'] = True
@@ -157,6 +157,7 @@ class InstallationTests(unittest.TestCase):
         self.run_script('install.sh', '--with-browser')
         self.assertTrue((self.home / '.zen/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').exists())
         signed = (REPO / 'packaging/browser-extension/signed/omastat-domain-tracker-firefox.xpi').read_bytes()
+        self.assertEqual((self.home / '.zen/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').read_bytes(), signed)
         self.assertEqual((self.home / '.mozilla/firefox/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').read_bytes(), signed)
         self.assertEqual((self.home / '.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi').read_bytes(), signed)
         self.run_script('uninstall.sh')

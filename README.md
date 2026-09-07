@@ -42,8 +42,20 @@ For website breakdowns in Zen or Firefox:
 ./install.sh --with-browser
 ```
 
-This also needs `zip` and a browser restart. The installer includes a Mozilla-signed
-Firefox extension; Zen uses a local build. See [browser setup](docs/USAGE.md).
+The installer includes a Mozilla-signed extension for Firefox 140+ and compatible
+Zen versions. Restart your browser and enable **Omastat Domain Tracker**, accepting
+the browsing activity permission. Domains go only to your local Omastat app;
+the native host automatically distinguishes Zen from Firefox.
+
+If the extension does not appear, open `about:addons`, choose **Install Add-on
+From File** from the gear menu, and select:
+
+```text
+~/.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi
+```
+
+The same signed file works in both browsers. If you use `XDG_DATA_HOME`, use that
+directory instead of `~/.local/share`. See [browser setup](docs/USAGE.md) for details.
 
 ## Use
 

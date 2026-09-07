@@ -35,23 +35,6 @@ install_native_manifest() {
     "$host_name" "$host_wrapper" "$extension_id" >"$dir/$host_name.json"
 }
 
-build_xpi() {
-  local app_class="$1"
-  local source="$2"
-  local out="$install_root/omastat-domain-tracker-$app_class.xpi"
-  local build_dir="$install_root/build-$app_class"
-
-  rm -rf "$build_dir"
-  mkdir -p "$build_dir"
-  cp "$extension_src/manifest.json" "$extension_src/background.js" "$build_dir/"
-  printf 'var OMastatDomainTrackerConfig = {\n  hostName: "%s",\n  appClass: "%s",\n  source: "%s"\n}\n' \
-    "$host_name" "$app_class" "$source" >"$build_dir/config.js"
-
-  rm -f "$out"
-  (cd "$build_dir" && zip -qr "$out" manifest.json background.js config.js)
-  printf '%s\n' "$out"
-}
-
 install_xpi_to_profiles() {
   local root="$1"
   local xpi="$2"
@@ -78,10 +61,11 @@ install_native_manifest "$HOME/.mozilla/native-messaging-hosts"
 install_native_manifest "$HOME/.zen/native-messaging-hosts"
 
 mkdir -p "$install_root"
-zen_xpi="$(build_xpi zen omastat-zen)"
+zen_xpi="$install_root/omastat-domain-tracker-zen.xpi"
 firefox_xpi="$install_root/omastat-domain-tracker-firefox.xpi"
 # Preserve Mozilla signatures by copying the signed archive without repacking it.
 cp "$extension_src/../signed/omastat-domain-tracker-firefox.xpi" "$firefox_xpi"
+cp "$firefox_xpi" "$zen_xpi"
 
 install_xpi_to_profiles "$HOME/.zen" "$zen_xpi"
 install_xpi_to_profiles "$HOME/.mozilla/firefox" "$firefox_xpi"

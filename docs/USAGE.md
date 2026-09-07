@@ -193,9 +193,10 @@ select `~/.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.
 (or the equivalent path under `$XDG_DATA_HOME`). Accept the browsing activity
 permission to enable domain tracking. Domains are sent to the local Omastat app.
 
-Zen uses a separate, locally built XPI so activity is attributed to Zen. If Zen
-refuses unsigned add-ons, load that build temporarily for development or obtain
-a separately signed Zen package.
+Zen uses the same signed package. The native host identifies the launching browser
+from its process ancestry and records Zen activity under `zen`, even though the
+extension's embedded configuration says Firefox. Firefox activity stays under
+`firefox`. This requires the updated Omastat native host.
 
 Set `title_capture = "all"` only if you want focused intervals to include
 cleaned window titles. When title capture is enabled and no direct domain rows

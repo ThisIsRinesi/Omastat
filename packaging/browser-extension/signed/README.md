@@ -13,4 +13,5 @@ updated Firefox package to Mozilla for signing, and replace this archive with
 the signed result. Update this record and verify the installation test. Editing
 or repacking the signed archive invalidates its signatures.
 
-Zen still uses a separate local build; this archive attributes activity to Firefox.
+The same archive is installed for Zen. The native host detects the launching
+browser and overrides the embedded identity to attribute Zen activity correctly.

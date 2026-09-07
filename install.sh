@@ -12,7 +12,7 @@ Omarchy plugin. Run again from an updated checkout to upgrade.
   -h, --help      Show this help.
 
 Run as your normal user inside Omarchy. Requires Cargo/Rust, a C compiler,
-systemd, Omarchy Quattro, and jq. The browser option also requires zip.
+systemd, Omarchy Quattro, and jq.
 Activity data and configuration are preserved. Local plugin copies are backed up;
 existing Git-managed plugins are updated through Omarchy and keep their checkout.
 USAGE
@@ -32,7 +32,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$repo_root/packaging/install-common.sh"
 require_session
 require_commands cc cp mv mktemp readlink
-if ((with_browser)); then require_commands zip find; fi
+if ((with_browser)); then require_commands find; fi
 
 # Moving the installed plugin must never move the checkout executing this script.
 plugin_resolved=$(readlink -m "$plugin_dir")
