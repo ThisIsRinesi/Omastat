@@ -186,9 +186,16 @@ packaging/browser-extension/install.sh
 Restart Zen/Firefox after installing. The development reinstall script runs the
 same browser-extension install step.
 
-Firefox release builds require signed add-ons. If Zen enforces the same policy
-and refuses the local XPI, the native host is still installed but the extension
-must be loaded temporarily for development or signed for regular use.
+The installer uses the bundled Mozilla-signed Firefox extension (version 0.2.0,
+Firefox 140 or newer). If Firefox does not offer to enable it after restarting,
+open `about:addons`, choose **Install Add-on From File** from the gear menu, and
+select `~/.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi`
+(or the equivalent path under `$XDG_DATA_HOME`). Accept the browsing activity
+permission to enable domain tracking. Domains are sent to the local Omastat app.
+
+Zen uses a separate, locally built XPI so activity is attributed to Zen. If Zen
+refuses unsigned add-ons, load that build temporarily for development or obtain
+a separately signed Zen package.
 
 Set `title_capture = "all"` only if you want focused intervals to include
 cleaned window titles. When title capture is enabled and no direct domain rows

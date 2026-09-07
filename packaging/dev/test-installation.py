@@ -156,6 +156,9 @@ class InstallationTests(unittest.TestCase):
             (profile / 'extensions/other.xpi').write_text('unrelated extension')
         self.run_script('install.sh', '--with-browser')
         self.assertTrue((self.home / '.zen/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').exists())
+        signed = (REPO / 'packaging/browser-extension/signed/omastat-domain-tracker-firefox.xpi').read_bytes()
+        self.assertEqual((self.home / '.mozilla/firefox/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').read_bytes(), signed)
+        self.assertEqual((self.home / '.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi').read_bytes(), signed)
         self.run_script('uninstall.sh')
         for relative in ['.zen/test-profile', '.mozilla/firefox/test-profile']:
             profile = self.home / relative

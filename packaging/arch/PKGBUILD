@@ -29,6 +29,7 @@ package() {
   install -Dm644 "README.md" "$pkgdir/usr/share/doc/omastat/README.md"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/omastat/LICENSE"
   install -Dm755 "packaging/browser-extension/install.sh" "$pkgdir/usr/share/omastat/browser-extension/install.sh"
+  install -Dm644 "packaging/browser-extension/signed/omastat-domain-tracker-firefox.xpi" "$pkgdir/usr/share/omastat/browser-extension/signed/omastat-domain-tracker-firefox.xpi"
   install -Dm644 "packaging/browser-extension/domain-tracker/manifest.json" "$pkgdir/usr/share/omastat/browser-extension/domain-tracker/manifest.json"
   install -Dm644 "packaging/browser-extension/domain-tracker/background.js" "$pkgdir/usr/share/omastat/browser-extension/domain-tracker/background.js"
   install -Dm644 "packaging/omarchy/omastat/manifest.json" "$pkgdir/usr/share/omastat/omarchy/omastat/manifest.json"

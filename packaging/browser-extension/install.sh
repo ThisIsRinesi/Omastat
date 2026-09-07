@@ -79,7 +79,9 @@ install_native_manifest "$HOME/.zen/native-messaging-hosts"
 
 mkdir -p "$install_root"
 zen_xpi="$(build_xpi zen omastat-zen)"
-firefox_xpi="$(build_xpi firefox omastat-firefox)"
+firefox_xpi="$install_root/omastat-domain-tracker-firefox.xpi"
+# Preserve Mozilla signatures by copying the signed archive without repacking it.
+cp "$extension_src/../signed/omastat-domain-tracker-firefox.xpi" "$firefox_xpi"
 
 install_xpi_to_profiles "$HOME/.zen" "$zen_xpi"
 install_xpi_to_profiles "$HOME/.mozilla/firefox" "$firefox_xpi"

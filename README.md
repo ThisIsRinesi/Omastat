@@ -42,8 +42,8 @@ For website breakdowns in Zen or Firefox:
 ./install.sh --with-browser
 ```
 
-This also needs `zip` and a browser restart. Browsers that enforce add-on signing
-need a signed extension or a temporary load; see [browser setup](docs/USAGE.md).
+This also needs `zip` and a browser restart. The installer includes a Mozilla-signed
+Firefox extension; Zen uses a local build. See [browser setup](docs/USAGE.md).
 
 ## Use
 
