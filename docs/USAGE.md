@@ -1,5 +1,27 @@
 # Usage
 
+## Installation and removal
+
+Run `./install.sh` from a checkout outside `~/.config/omarchy/plugins/local.omastat/`,
+as your normal user inside a running Omarchy desktop session. It installs the
+backend to `~/.cargo/bin`, restarts the systemd user service, and installs/enables
+the bar plugin. Add `~/.cargo/bin` to your session's `PATH` for CLI use.
+`./install.sh --with-browser` also installs the optional Zen/Firefox integration.
+
+New installs use [Omarchy's supported local-plugin flow](https://github.com/omacom/omarchy/blob/quattro/shell/README.md#installing-by-hand).
+Rerun the installer from an updated checkout to upgrade both components. Existing
+Git-managed plugins use `omarchy plugin update`; the backend is built from that
+updated checkout, preserving the plugin's origin and history. Existing bar
+placement and settings are retained.
+
+Replaced local plugin files are backed up under
+`${XDG_STATE_HOME:-~/.local/state}/omastat/install-backups/`.
+`./uninstall.sh` uses `omarchy plugin remove`, including its backup behavior for
+local copies, then removes the user service, Cargo backend, and optional browser
+integration. Recorded activity, configuration, and installer backups are kept.
+Both scripts can be rerun. System-wide package installs must be removed with
+their package manager.
+
 ## Reports
 
 ```bash
