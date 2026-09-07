@@ -158,3 +158,36 @@ for (const exitFirst of [false, true]) {
   assert.equal(c.activityDetail, null, "results from a prior date are discarded");
 }
 console.log("Activity detail controller checks passed");
+
+for (const kind of ["app", "domain"]) {
+  const c = controller();
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const date = c.Model.dateKey(yesterday);
+  c.setPeriod("month", -1);
+  c.setActivity(kind, "selected-activity");
+  assert.equal(c.openCell({ date }), true);
+  assert.equal(c.selectedLens, "day");
+  assert.equal(c.selectedOffset, -1);
+  assert.equal(c.selectedActivityKind, kind);
+  assert.equal(c.selectedActivityKey, "selected-activity");
+  deliverDetail(c, detailPayload("stale"));
+  assert.equal(c.activityDetail, null);
+  deliverDetail(c, JSON.stringify({ activities: [], daily: [], heatmap: [] }));
+  assert.equal(c.activityDetail.activities.length, 0);
+  assert.equal(c.detailRunning, false);
+  assert.equal(c.Model.activityMetricValues(c.activityDetail, c.detailRunning, c.detailError).visits, "0");
+  assert.equal(c.openCell({ date: "9999-12-31" }), false);
+  assert.equal(c.selectedOffset, -1);
+  c.setPeriod("day", 0);
+  assert.equal(c.selectedActivityKey, "selected-activity");
+  assert.equal(c.selectedOffset, 0);
+}
+{
+  const c = controller();
+  // A stale report's today key must not shift date navigation after midnight.
+  c.todayKey = "2000-01-01";
+  assert.equal(c.openCell({ date: c.Model.dateKey(new Date()) }), true);
+  assert.equal(c.selectedOffset, 0);
+}
+console.log("Chart drilldown controller checks passed");

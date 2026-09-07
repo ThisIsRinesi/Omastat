@@ -3,11 +3,10 @@ use clap::Parser;
 use omastat::{
     cli::{self, Cli, Commands, DataExportFormatArg},
     config::Config,
-    export::{self, DataExportOptions, ExportOptions},
+    export::{self, DataExportOptions},
     native_host,
     steam::SteamResolver,
     storage::{Storage, StorageOpenMode},
-    tui,
 };
 use std::fs;
 
@@ -101,30 +100,6 @@ async fn main() -> Result<()> {
             let report = cli::insights_report(&storage, &mut steam, &config, lens.into(), offset)?;
             cli::print_insights(&report, cli.json)?;
         }
-        Commands::Export {
-            lens,
-            offset,
-            output,
-            title,
-        } => {
-            if let Some(parent) = output.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                fs::create_dir_all(parent)?;
-            }
-            let html = export::render_html(
-                &storage,
-                &mut steam,
-                &config,
-                ExportOptions {
-                    lens: lens.into(),
-                    offset,
-                    title,
-                },
-            )?;
-            fs::write(&output, html)?;
-            println!("Exported {}", output.display());
-        }
         Commands::ExportData {
             lens,
             offset,
@@ -190,9 +165,6 @@ async fn main() -> Result<()> {
             let summary =
                 cli::widget_summary_report(&storage, &mut steam, &config, lens.into(), offset)?;
             cli::print_widget_summary(&summary)?;
-        }
-        Commands::Tui => {
-            tui::run(storage, config)?;
         }
         Commands::RepairTitles { dry_run } => {
             let repair = storage.repair_titles(&mut steam, &config, dry_run)?;

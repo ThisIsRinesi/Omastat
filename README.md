@@ -62,23 +62,19 @@ activity. Your colors and totals will follow your own setup.
 ## Install
 
 You'll need a running Hyprland session, the Omarchy Quattro shell with plugin
-support, Git, and a Rust toolchain with Cargo and a C compiler. The widget uses
-the `omastat` binary and its background user service; install both before adding
-the plugin.
+support, Git, jq, and a Rust toolchain with Cargo and a C compiler. The widget uses
+the `omastat` binary and its background user service; the installer sets up both.
 
 ```bash
 git clone https://github.com/ThisIsRinesi/Omastat.git
 cd Omastat
-cargo install --path crates/omastat --locked
-packaging/systemd/install-user-service.sh
-omastat doctor
-
-omarchy plugin add https://github.com/ThisIsRinesi/Omastat.git
-omarchy plugin enable local.omastat
+./install.sh
 ```
 
-Make sure `~/.cargo/bin` is on your session's `PATH`. The widget appears on the
-right side of the bar by default. Activity begins accumulating while the service
+The script builds both backend commands in `~/.cargo/bin`, starts the tracking
+service, and installs and enables the plugin. Run it as your normal desktop user,
+without `sudo`. Make sure `~/.cargo/bin` is on your session's `PATH` for CLI use.
+The widget appears on the right side of the bar by default. Activity begins accumulating while the service
 runs; no manual timer is needed.
 
 | Control | Action |
@@ -87,6 +83,8 @@ runs; no manual timer is needed.
 | Middle-click the bar widget | Refresh |
 | Right-click the bar widget | Toggle icon-only mode |
 | Select an app, website, or chart slice | Explore that activity |
+| Select a calendar day or trend point | Open its day, month, or week, keeping the selected activity |
+| Today / This week / This month / This year | Return to the current period |
 | All activity | Return to the overview |
 | Tab, then Enter or Space | Navigate and select controls |
 | `/` | Search activities |
@@ -103,7 +101,7 @@ for Zen or Firefox, install the local browser integration, then restart your
 browser:
 
 ```bash
-packaging/browser-extension/install.sh
+./install.sh --with-browser
 ```
 
 The installer needs `zip`. Firefox release builds require signed add-ons; browsers
@@ -135,33 +133,48 @@ including a dry run before deletion. See [configuration and privacy](docs/USAGE.
 
 ## Beyond the widget
 
-The same local data is available through a terminal dashboard, command-line
-reports, and exports:
+The same local data is available through command-line reports and JSON/CSV exports:
 
 ```bash
 omastat today
 omastat insights
-omastat tui
-omastat export --lens month --output ~/omastat-month.html
 omastat export-data --lens month --format csv --output ~/omastat-month-csv
 ```
 
 [Usage and configuration](docs/USAGE.md) covers historical periods, JSON/CSV
-exports, aliases, categories, goals, budgets, digests, and retention. Terminal
-theme integration is documented in [skwd-wall setup](packaging/skwd-wall).
+exports, aliases, categories, goals, budgets, digests, and retention.
 
-## Development
+## Update or uninstall
+
+From your checkout, update both the backend and plugin together:
 
 ```bash
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-packaging/dev/check-widget-qml.sh
+git pull
+./install.sh
 ```
 
-See the [development guide](docs/DEVELOPMENT.md) for local installation, widget
-checks, and screenshot tooling, or the [insights audit](docs/INSIGHTS_AUDIT.md)
-for detection rules and performance measurements. An Arch packaging recipe is
-available in [packaging/arch/PKGBUILD](packaging/arch/PKGBUILD).
+New installs follow [Omarchy's supported local-plugin installation flow](https://github.com/omacom/omarchy/blob/quattro/shell/README.md#installing-by-hand).
+Rerun `./install.sh` to update both components from your checkout. If you previously
+installed with `omarchy plugin add`, the script uses `omarchy plugin update` and
+builds the backend from that updated Git checkout, preserving its origin and history.
+
+The installer keeps your data, configuration, and existing bar placement. It
+backs up replaced local plugin files under `~/.local/state/omastat/install-backups/`
+(or `$XDG_STATE_HOME/omastat/install-backups/`). Run it from a separate checkout,
+not from inside the installed plugin directory.
+
+To remove Omastat:
+
+```bash
+./uninstall.sh
+```
+
+This uses `omarchy plugin remove` to unload/remove the plugin (including Omarchy's
+standard backup behavior for local copies), stops and removes the user service,
+uninstalls the Cargo-installed backend, and removes Omastat's optional browser
+integration. Recorded activity, user configuration, and installer backups are
+kept. Both scripts run inside your Omarchy desktop session and can be rerun.
+System-wide package installations must be removed with their package manager.
 
 ## License
 

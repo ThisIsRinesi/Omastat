@@ -280,6 +280,13 @@ Ui.BarWidget {
     refresh(true)
   }
 
+  function openCell(cell) {
+    var destination = Model.cellDestination(cell, Model.dateKey(new Date()))
+    if (!destination) return false
+    setPeriod(destination.lens, destination.offset)
+    return true
+  }
+
   function shiftPeriod(delta) {
     if (selectedLens === "life") return
     setPeriod(selectedLens, selectedOffset + Math.floor(Number(delta) || 0))

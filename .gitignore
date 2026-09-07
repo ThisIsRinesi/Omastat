@@ -5,3 +5,10 @@
 *.db-wal
 /.codex
 /.agents
+
+# Local development notes; keep these out of published source.
+/docs/DEVELOPMENT.md
+/docs/INSIGHTS_AUDIT.md
+
+__pycache__/
+*.py[cod]

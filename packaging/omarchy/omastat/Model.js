@@ -227,18 +227,57 @@ function dateKey(date) {
 }
 
 function parseDateKey(key) {
-  var parts = String(key || "").split("-")
-  if (parts.length !== 3) return null
-  var date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
-  return isNaN(date.getTime()) ? null : date
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(key || ""))) return null
+  var parts = key.split("-")
+  var date = new Date(0)
+  date.setFullYear(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
+  date.setHours(0, 0, 0, 0)
+  return !isNaN(date.getTime()) && dateKey(date) === key ? date : null
+}
+
+// Compare calendar dates, not elapsed hours: DST days need not be 24 hours.
+function calendarDayNumber(date) {
+  var utc = new Date(0)
+  utc.setUTCFullYear(date.getFullYear(), date.getMonth(), date.getDate())
+  utc.setUTCHours(0, 0, 0, 0)
+  return utc.getTime() / 86400000
 }
 
 function dayOffsetFromToday(key, todayKey) {
   var selected = parseDateKey(key)
   var today = parseDateKey(todayKey)
-  if (!selected || !today) return null
-  var msPerDay = 24 * 60 * 60 * 1000
-  return Math.round((selected.getTime() - today.getTime()) / msPerDay)
+  return selected && today ? calendarDayNumber(selected) - calendarDayNumber(today) : null
+}
+
+function cellDestination(cell, todayKey) {
+  if (!cell || cell.blank) return null
+  var key = String(cell.date || cell.key || "")
+  var selected = parseDateKey(key)
+  var today = parseDateKey(todayKey)
+  if (!selected || !today || calendarDayNumber(selected) > calendarDayNumber(today)) return null
+  var lens = cell.monthly ? "month" : cell.weekly ? "week" : "day"
+  var offset = calendarDayNumber(selected) - calendarDayNumber(today)
+  if (lens === "month") offset = (selected.getFullYear() - today.getFullYear()) * 12 + selected.getMonth() - today.getMonth()
+  if (lens === "week") offset = (offset - (selected.getDay() + 6) % 7 + (today.getDay() + 6) % 7) / 7
+  return { lens: lens, offset: offset }
+}
+
+function cellActionText(cell) {
+  return "Open " + (cell.monthly ? "month" : cell.weekly ? "week" : "day") + " view"
+}
+
+function activityMetricValues(detail, running, error) {
+  if (!detail) {
+    var pending = running && !error ? "…" : "—"
+    return { time: pending, days: pending, visits: pending, typical: pending }
+  }
+  var stats = (detail.activities || [])[0]
+  return {
+    time: fmt(stats ? stats.focused_seconds : 0),
+    days: String(stats ? stats.days_used : 0),
+    visits: String(stats ? stats.visits : 0),
+    typical: stats && Number(stats.visits) > 0 ? fmt(stats.median_visit_seconds) : "—"
+  }
 }
 
 function totalForDay(daily, key) {
@@ -628,39 +667,34 @@ function compactWeekRangeLabel(startLabel, endLabel) {
 }
 
 function weekCells(daily) {
-  var list = daily || []
-  if (list.length === 0) return []
-  var out = []
-  for (var start = 0; start < list.length; start += 7) {
-    var end = Math.min(start + 7, list.length)
-    var focused = 0
-    var open = 0
-    var excluded = 0
-    var elapsed = 0
-    var observed = 0
-    for (var i = start; i < end; i++) {
-      focused += dayFocusedSeconds(list[i])
-      open += dayOpenSeconds(list[i])
-      excluded += dayExcludedSeconds(list[i])
-      elapsed += dayElapsedSeconds(list[i])
-      observed += dayObservedSeconds(list[i])
+  var buckets = {}
+  var list = (daily || []).slice().sort(function(a, b) { return String(a.date).localeCompare(String(b.date)) })
+  for (var i = 0; i < list.length; i++) {
+    var date = parseDateKey(list[i].date)
+    if (!date) continue
+    date.setDate(date.getDate() - (date.getDay() + 6) % 7)
+    var key = dateKey(date)
+    if (!buckets[key]) buckets[key] = {
+      blank: false, weekly: true, date: key, label: "",
+      first: list[i], last: list[i], seconds: 0, open_seconds: 0,
+      excluded_seconds: 0, elapsed_seconds: 0, observed_seconds: 0
     }
-    var first = list[start] || {}
-    var last = list[end - 1] || first
-    out.push({
-      blank: false,
-      weekly: true,
-      date: String(first.date || ""),
-      day: "W" + (out.length + 1),
-      label: compactRangeLabel(first, last),
-      seconds: focused,
-      open_seconds: open,
-      excluded_seconds: excluded,
-      elapsed_seconds: elapsed,
-      observed_seconds: observed
-    })
+    var bucket = buckets[key]
+    bucket.last = list[i]
+    bucket.seconds += dayFocusedSeconds(list[i])
+    bucket.open_seconds += dayOpenSeconds(list[i])
+    bucket.excluded_seconds += dayExcludedSeconds(list[i])
+    bucket.elapsed_seconds += dayElapsedSeconds(list[i])
+    bucket.observed_seconds += dayObservedSeconds(list[i])
   }
-  return out
+  return Object.keys(buckets).sort().map(function(key, index) {
+    var bucket = buckets[key]
+    bucket.day = "W" + (index + 1)
+    bucket.label = compactRangeLabel(bucket.first, bucket.last)
+    delete bucket.first
+    delete bucket.last
+    return bucket
+  })
 }
 
 function weekdayFocusCells(heatmap) {

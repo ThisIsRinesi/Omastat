@@ -61,6 +61,7 @@ Ui.Panel {
   readonly property bool wide: panel.contentWidth >= Style.space(900)
   readonly property bool selected: selectedActivityKey.length > 0
   readonly property var detail: selected ? (activityDetail || {}) : activityAnalytics
+  readonly property var activityMetrics: Model.activityMetricValues(activityDetail, detailRunning, detailError)
   readonly property var stats: selected && detail.activities && detail.activities.length ? detail.activities[0] : null
   readonly property string activityLabel: stats ? String(stats.label) : (selected ? selectedActivityKey : "All activity")
   readonly property real shownSeconds: selected ? (stats ? Number(stats.focused_seconds) : 0) : totalFocused
@@ -134,6 +135,26 @@ Ui.Panel {
   function refresh() { if (hostWidget) { hostWidget.refresh(true); hostWidget.refreshDetail() } }
   function setLens(lens) { if (hostWidget) hostWidget.setPeriod(lens, 0) }
   function setLensOffset(lens, offset) { if (hostWidget) hostWidget.setPeriod(lens, offset) }
+  function focusPeriod(lens) {
+    Qt.callLater(function() {
+      var index = ["day", "week", "month", "year", "life"].indexOf(lens)
+      var button = lensButtons.itemAt(index)
+      if (button) button.forceActiveFocus()
+    })
+  }
+  function openCell(cell) {
+    var destination = Model.cellDestination(cell, Model.dateKey(new Date()))
+    if (!destination || !hostWidget) return
+    // Release chart focus before changing the period can hide its delegate.
+    keyCatcher.forceActiveFocus()
+    if (!hostWidget.openCell(cell)) return
+    resetView()
+    focusPeriod(destination.lens)
+  }
+  function currentPeriod() {
+    setLens(selectedLens)
+    focusPeriod(selectedLens)
+  }
   function selectActivity(kind, key) { if (kind) activityType = kind; if (hostWidget) hostWidget.setActivity(kind, key) }
   function inspectInsight(item) {
     var key = String(item.title || item.label) + String(item.value)
@@ -209,6 +230,12 @@ Ui.Panel {
             Layout.fillWidth: true
             spacing: Style.space(3)
             Label { Layout.fillWidth: true; text: root.periodLabel + (root.selectedOffset === 0 && root.selectedLens !== "day" && root.selectedLens !== "life" ? " to date" : ""); font.pixelSize: Style.font.title * 1.2; font.bold: true }
+          }
+          Action {
+            visible: root.selectedOffset < 0 && root.selectedLens !== "life"
+            text: root.selectedLens === "day" ? "Today" : "This " + root.selectedLens
+            Accessible.name: "Return to " + text.toLowerCase()
+            onClicked: root.currentPeriod()
           }
           Action { text: "‹"; Accessible.name: "Previous period"; enabled: root.selectedLens !== "life"; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset - 1) }
           Action { text: "›"; Accessible.name: "Next period"; enabled: root.selectedLens !== "life" && root.selectedOffset < 0; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset + 1) }
@@ -300,16 +327,16 @@ Ui.Panel {
               columns: root.selected && root.wide ? 4 : 2
               rowSpacing: Style.space(8)
               columnSpacing: Style.space(24)
-              Metric { label: "Time spent"; value: root.selected && !root.activityDetail ? "…" : Model.fmt(root.shownSeconds) }
-              Metric { label: root.selected ? "Days used" : "Apps used"; value: root.selected ? (root.stats ? String(root.stats.days_used) : "…") : String((root.activityAnalytics.activities || []).filter(function(a) { return a.kind === "app" }).length) }
-              Metric { visible: root.selected; label: "Visits"; value: root.stats ? String(root.stats.visits) : "…" }
-              Metric { visible: root.selected; label: "Typical visit"; value: root.stats ? Model.fmt(root.stats.median_visit_seconds) : "…" }
+              Metric { label: "Time spent"; value: root.selected ? root.activityMetrics.time : Model.fmt(root.shownSeconds) }
+              Metric { label: root.selected ? "Days used" : "Apps used"; value: root.selected ? root.activityMetrics.days : String((root.activityAnalytics.activities || []).filter(function(a) { return a.kind === "app" }).length) }
+              Metric { visible: root.selected; label: "Visits"; value: root.activityMetrics.visits }
+              Metric { visible: root.selected; label: "Typical visit"; value: root.activityMetrics.typical }
             }
             Label {
               Layout.fillWidth: true
               visible: !root.panelDataLoaded || (root.selected && !root.activityDetail) || (root.panelDataLoaded && root.shownSeconds === 0)
               text: !root.panelDataLoaded ? (root.refreshRunning ? "Loading your activity…" : "No report yet. Refresh to try again.")
-                : (root.selected && !root.activityDetail ? "Loading this activity…" : "No activity recorded in this period.")
+                : (root.selected && !root.activityDetail ? (root.detailRunning ? "Loading this activity…" : "Activity unavailable. Retry to load this period.") : "No activity recorded in this period.")
               color: root.dim
             }
             GridLayout {
@@ -496,7 +523,7 @@ Ui.Panel {
                   days: root.lineDays
                   maxSeconds: root.maximum(root.lineDays)
                   expanded: true
-                  onActivatedCell: function(cell) { root.chartReadout = Model.trendDetailText(cell) }
+                  onActivatedCell: function(cell) { root.openCell(cell) }
                 }
                 IntensityLegend { Layout.fillWidth: true; visible: root.selectedLens === "month"; contextLabel: "Per calendar day"; maxSeconds: Model.maxHeatSeconds(root.calendarCells) }
                 MonthRhythm {
@@ -511,7 +538,7 @@ Ui.Panel {
                   maxSeconds: root.maximum(root.calendarCells)
                   weekMaxSeconds: root.maximum(root.calendarWeeks)
                   weekdayMaxSeconds: root.maximum(root.calendarWeekdays)
-                  onActivatedCell: function(cell) { root.chartReadout = Model.monthCellDetailText(cell) }
+                  onActivatedCell: function(cell) { root.openCell(cell) }
                 }
                 Label { Layout.fillWidth: true; visible: root.chartReadout.length > 0; text: root.chartReadout; color: root.dim; font.pixelSize: Style.font.caption }
                 ColumnLayout {
@@ -822,6 +849,13 @@ Ui.Panel {
         Canvas {
           id: donutCanvas
 
+          // Canvas pixels do not follow QML color bindings until repainted.
+          Connections {
+            target: root
+            function onAccentChanged() { donutCanvas.requestPaint() }
+            function onForegroundChanged() { donutCanvas.requestPaint() }
+          }
+
           anchors.centerIn: parent
           width: donutRoot.chartSize
           height: donutRoot.chartSize
@@ -1027,6 +1061,13 @@ Ui.Panel {
       Canvas {
         id: ringCanvas
 
+        // Canvas pixels do not follow QML color bindings until repainted.
+        Connections {
+          target: root
+          function onAccentChanged() { ringCanvas.requestPaint() }
+          function onForegroundChanged() { ringCanvas.requestPaint() }
+        }
+
         width: ringRoot.chartSize
         height: ringRoot.chartSize
         anchors.horizontalCenter: parent.horizontalCenter
@@ -1138,22 +1179,23 @@ Ui.Panel {
       return total / list.length
     }
 
+    readonly property real plotInset: Style.space(6)
     function pointX(index) {
       var count = Math.max(1, days.length)
       if (count === 1) return linePlot.width / 2
-      return index * linePlot.width / (count - 1)
+      return plotInset + index * Math.max(0, linePlot.width - 2 * plotInset) / (count - 1)
     }
 
     function pointY(seconds) {
       var value = root.clamp01(Number(seconds || 0) / Math.max(1, lineRoot.maxSeconds))
-      return Math.max(0, Math.min(linePlot.height, linePlot.height - value * linePlot.height))
+      return plotInset + (1 - value) * Math.max(0, linePlot.height - 2 * plotInset)
     }
 
     function indexAt(x) {
       var count = days.length
       if (count <= 0 || linePlot.width <= 0) return -1
       if (count === 1) return 0
-      return Math.max(0, Math.min(count - 1, Math.round(x / linePlot.width * (count - 1))))
+      return Math.max(0, Math.min(count - 1, Math.round((x - plotInset) / Math.max(1, linePlot.width - 2 * plotInset) * (count - 1))))
     }
 
     function requestPaint() {
@@ -1168,7 +1210,11 @@ Ui.Panel {
     onActiveFocusChanged: if (activeFocus) { selectedIndex = Math.max(0, selectedIndex); root.revealControl(lineRoot) }
     Keys.onLeftPressed: selectedIndex = Math.max(0, selectedIndex - 1)
     Keys.onRightPressed: selectedIndex = Math.min(days.length - 1, selectedIndex + 1)
-    Keys.onReturnPressed: if (selectedIndex >= 0) activatedCell(days[selectedIndex])
+    Accessible.role: Accessible.Button
+    Accessible.name: selectedIndex >= 0 && selectedIndex < days.length
+      ? Model.trendDetailText(days[selectedIndex]) + ". " + Model.cellActionText(days[selectedIndex]) : title + ". Use arrow keys to select a period"
+    Keys.onReturnPressed: if (selectedIndex >= 0 && selectedIndex < days.length) activatedCell(days[selectedIndex])
+    Keys.onSpacePressed: if (selectedIndex >= 0 && selectedIndex < days.length) activatedCell(days[selectedIndex])
     border.width: activeFocus ? 1 : 0
     border.color: root.accent
     onDaysChanged: { selectedIndex = -1; hoveredIndex = -1; hoveredText = ""; requestPaint() }
@@ -1232,7 +1278,7 @@ Ui.Panel {
         Label {
           required property real modelData
           x: -Style.space(50)
-          y: (1 - modelData) * linePlot.height - height / 2
+          y: lineRoot.pointY(lineRoot.maxSeconds * modelData) - height / 2
           width: Style.space(44)
           text: Model.fmt(lineRoot.maxSeconds * modelData)
           horizontalAlignment: Text.AlignRight
@@ -1256,7 +1302,7 @@ Ui.Panel {
 
           anchors.left: parent.left
           anchors.right: parent.right
-          y: Math.round((index + 1) * parent.height / 4)
+          y: Math.round(lineRoot.pointY(lineRoot.maxSeconds * (1 - (index + 1) / 4)))
           height: 1
           color: root.line
           opacity: 0.32
@@ -1274,6 +1320,13 @@ Ui.Panel {
 
       Canvas {
         id: lineCanvas
+
+        // Canvas pixels do not follow QML color bindings until repainted.
+        Connections {
+          target: root
+          function onAccentChanged() { lineCanvas.requestPaint() }
+          function onForegroundChanged() { lineCanvas.requestPaint() }
+        }
 
         anchors.fill: parent
         antialiasing: true
@@ -1324,7 +1377,7 @@ Ui.Panel {
             var py = lineRoot.pointY(seconds)
             ctx.beginPath()
             ctx.arc(px, py, active ? Style.space(5) : Style.space(3), 0, Math.PI * 2, false)
-            ctx.fillStyle = active ? root.canvasColor(root.foreground, 0.96) : root.canvasColor(mutedAccent, mutedAccent.a)
+            ctx.fillStyle = active ? root.canvasColor(root.foreground, 0.96) : root.canvasColor(accent, count === 1 ? 0.92 : mutedAccent.a)
             ctx.fill()
             ctx.lineWidth = active ? Style.space(2) : 0
             if (active) {
@@ -1555,11 +1608,13 @@ Ui.Panel {
               readonly property real cellIntensity: Model.heatIntensity(cellSeconds, monthRhythmRoot.maxSeconds)
               readonly property color heatBase: root.sliceColor(0, 1.0)
 
-              activeFocusOnTab: !modelData.blank
+              readonly property bool canOpen: Model.cellDestination(modelData, Model.dateKey(new Date())) !== null
+              activeFocusOnTab: canOpen
               onActiveFocusChanged: if (activeFocus) { monthRhythmRoot.selectedIndex = index; root.revealControl(this) }
-              Keys.onReturnPressed: monthRhythmRoot.activatedCell(modelData)
-              Keys.onSpacePressed: monthRhythmRoot.activatedCell(modelData)
-              Accessible.name: Model.monthCellDetailText(modelData)
+              Keys.onReturnPressed: if (canOpen) monthRhythmRoot.activatedCell(modelData)
+              Keys.onSpacePressed: if (canOpen) monthRhythmRoot.activatedCell(modelData)
+              Accessible.role: Accessible.Button
+              Accessible.name: Model.monthCellDetailText(modelData) + (canOpen ? ". Open day view" : "")
               width: monthRhythmRoot.cellSize
               height: width
               radius: Style.space(4)
@@ -1591,7 +1646,7 @@ Ui.Panel {
 
               MouseArea {
                 anchors.fill: parent
-                enabled: !modelData.blank
+                enabled: parent.canOpen
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onEntered: {

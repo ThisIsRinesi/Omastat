@@ -36,51 +36,21 @@ view.
 `insights --json` emits the same structured insight records with period
 metadata and focus/system totals, but leaves out the heavier app rows and
 daily history. Use `--lens day|week|month|year|life` and `--offset -N` to query
-the same report periods used by exports and the TUI.
+the same report periods used by exports and the widget.
 
 `goals` shows configured daily focus target and app/category budget progress.
 `digest` prints a compact period summary with top apps, high-signal insights,
 and goal status. `widget-insight` returns one rotating fact from the shared
 insight engine for scripts or bar widgets.
 
-## TUI
+## Dashboard navigation
 
-```bash
-omastat tui
-```
-
-Controls:
-
-```text
-Tab / Shift+Tab     Cycle Overview, Insights, Apps, Timeline, System views
-Left/Right or h/l   Cycle Day, Week, Month, Year, Life lenses
-[/]                 Move to previous/next period
-1/2/3/4/5           Jump to a lens
-Up/Down or j/k      Move the app selection
-PageUp/PageDown     Jump the selection
-p                   Toggle overview focus stats / period signals
-r                   Refresh from SQLite
-q or Esc            Quit
-```
-
-The TUI loads theme colors from Noctalia, skwd-wall/Matugen, Omarchy, then the
-built-in fallback palette. Press `r` to reload colors after skwd-wall generates a
-new palette.
-
-## HTML Export
-
-Create a static, self-contained CLI overview:
-
-```bash
-omastat export --lens week --output ~/Pictures/omastat-week.html
-omastat export --lens month --output ~/Pictures/omastat-month.html
-omastat export --lens life --title "Lifetime App Overview"
-```
-
-The export includes focus totals, secondary open-window telemetry, structured period insights, daily
-pattern bars, ranked apps, app composition, workspace ranking, session length
-distribution, a week-by-hour heatmap, title rows when title capture is enabled,
-and Day/Week/Month/Year/Life totals.
+Select a calendar day or daily trend point to open that Day view. Year chart
+months open Month; lifetime chart weeks open Week. Weeks start on Monday.
+Click or use Tab, arrow keys on the trend, and Enter or Space to activate.
+The selected app or website follows you into the new period. Historical views
+provide a Today / This week / This month / This year button to return to the
+current period. Blank cells and future dates cannot be opened.
 
 ## Data Export
 
@@ -206,7 +176,7 @@ Browser titles from local `~/.zen/*/places.sqlite` history files. History
 enrichment is read-only, local, best-effort, and ignored unless
 `title_capture = "all"` is also enabled.
 
-App aliases change display labels in reports, exports, and the TUI while raw
+App aliases change display labels in reports and exports while raw
 exports keep the original app class. Categories are local strings normalized to
 lowercase kebab-case, so `productive`, `distracting`, `neutral`, and custom
 categories can all be used for grouping and budgets.
@@ -219,32 +189,7 @@ omastat repair-titles
 ```
 
 Focused intervals also store workspace and monitor context when Hyprland exposes
-it. This powers the TUI Workspace Focus chart and does not require title capture.
-
-## skwd-wall / Matugen
-
-Omastat reads skwd-wall colors from:
-
-```text
-${XDG_CONFIG_HOME:-~/.config}/omastat/theme/colors.json
-${XDG_CONFIG_HOME:-~/.config}/omastat/theme/matugen.json
-${XDG_CONFIG_HOME:-~/.config}/skwd-wall/colors.json
-${XDG_CACHE_HOME:-~/.cache}/skwd/colors.json
-${XDG_CACHE_HOME:-~/.cache}/skwd-wall/colors.json
-```
-
-For a dedicated integration, copy
-`packaging/skwd-wall/omastat-colors.json` into your skwd-wall templates
-directory and add this to the `integrations` array in
-`~/.config/skwd-wall/config.json`:
-
-```json
-{
-  "name": "omastat",
-  "template": "omastat-colors.json",
-  "output": "~/.config/omastat/theme/colors.json"
-}
-```
+it. This metadata is available in raw exports and does not require title capture.
 
 ## Tracking Model
 

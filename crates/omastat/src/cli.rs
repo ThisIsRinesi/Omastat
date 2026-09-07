@@ -91,17 +91,6 @@ pub enum Commands {
         #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
         offset: i32,
     },
-    /// Export a one-page visual HTML overview.
-    Export {
-        #[arg(long, value_enum, default_value = "month")]
-        lens: LensArg,
-        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
-        offset: i32,
-        #[arg(short, long, default_value = "omastat-export.html")]
-        output: PathBuf,
-        #[arg(long)]
-        title: Option<String>,
-    },
     /// Export raw and aggregate data as JSON or CSV files.
     ExportData {
         #[arg(long, value_enum, default_value = "month")]
@@ -158,8 +147,6 @@ pub enum Commands {
         #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
         offset: i32,
     },
-    /// Open the interactive terminal dashboard.
-    Tui,
     /// Normalize app names and fill missing focused titles in existing data.
     RepairTitles {
         #[arg(long)]
@@ -1026,16 +1013,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_negative_export_offset_as_period_value() {
-        let cli = Cli::try_parse_from(["omastat", "export", "--lens", "month", "--offset", "-2"])
-            .unwrap();
-
-        match cli.command {
-            Commands::Export { lens, offset, .. } => {
-                assert!(matches!(lens, LensArg::Month));
-                assert_eq!(offset, -2);
-            }
-            other => panic!("expected export command, got {other:?}"),
+    fn retired_commands_are_rejected() {
+        for command in ["export", "tui"] {
+            assert!(Cli::try_parse_from(["omastat", command]).is_err());
         }
     }
 

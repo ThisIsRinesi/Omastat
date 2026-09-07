@@ -164,7 +164,7 @@ assert.equal(yearBuckets[0].seconds, 1500);
 
 const lifeBuckets = context.activityCells(
   Array.from({ length: 98 }, (_, index) => ({
-    date: `2026-04-${String(index + 1).padStart(2, "0")}`,
+    date: context.dateKey(new Date(2026, 3, index + 1)),
     focused_seconds: 60,
     observed_seconds: 120,
   })),
@@ -258,3 +258,41 @@ assert.equal(context.fittingInsightCount([100, 100, 100, 100, 100, 100, 100], 65
 assert.equal(context.fittingInsightCount([200, 200, 200], 430, 8), 2);
 assert.equal(context.fittingInsightCount([100], 20, 8), 1);
 assert.equal(context.fittingInsightCount([], 650, 8), 0);
+
+// Calendar navigation uses real local dates, including DST and year boundaries.
+for (const [cell, today, lens, offset] of [
+  [{ date: "2026-03-08" }, "2026-03-09", "day", -1],
+  [{ key: "2026-11-01" }, "2026-11-02", "day", -1],
+  [{ date: "2024-02-29", seconds: 0 }, "2024-03-01", "day", -1],
+  [{ date: "2025-12-01", monthly: true }, "2026-01-15", "month", -1],
+  [{ date: "2025-12-29", weekly: true }, "2026-01-04", "week", 0],
+  [{ date: "2025-12-29", weekly: true }, "2026-01-05", "week", -1],
+  [{ date: "2026-09-07" }, "2026-09-07", "day", 0],
+]) {
+  const target = context.cellDestination(cell, today);
+  assert.equal(target.lens, lens);
+  assert.equal(target.offset, offset);
+}
+for (const cell of [null, {}, { blank: true }, { date: "2026-02-30" }, { date: "2026-13-01" }, { date: "2026-9-01" }, { date: "2026-09-08" }]) {
+  assert.equal(context.cellDestination(cell, "2026-09-07"), null);
+}
+assert.equal(context.cellDestination({ date: "2026-09-07" }, "invalid"), null);
+const calendarWeeks = context.weekCells([
+  { date: "2026-04-01", focused_seconds: 60 },
+  { date: "2026-04-05", focused_seconds: 120 },
+  { date: "2026-04-06", focused_seconds: 30 },
+]);
+assert.equal(calendarWeeks.length, 2);
+assert.equal(calendarWeeks[0].date, "2026-03-30");
+assert.equal(calendarWeeks[0].seconds, 180);
+assert.equal(calendarWeeks[0].label, "2026-04-01 - 2026-04-05");
+assert.equal(calendarWeeks[1].date, "2026-04-06");
+assert.equal(context.activityMetricValues(null, true, "").time, "…");
+assert.equal(context.activityMetricValues(null, false, "Failed").time, "—");
+const emptyMetrics = context.activityMetricValues({ activities: [] }, false, "");
+assert.equal(emptyMetrics.time, "0s");
+assert.equal(emptyMetrics.days, "0");
+assert.equal(emptyMetrics.visits, "0");
+assert.equal(emptyMetrics.typical, "—");
+assert.equal(context.activityMetricValues({ activities: [{ visits: 0, median_visit_seconds: 0 }] }, false, "").typical, "—");
+console.log("Calendar navigation and empty activity checks passed");
