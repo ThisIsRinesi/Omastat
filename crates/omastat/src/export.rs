@@ -210,12 +210,33 @@ impl From<&Insight> for InsightCsvRow {
 }
 
 fn write_csv<T: Serialize>(path: PathBuf, rows: &[T]) -> Result<()> {
-    let mut writer = csv::Writer::from_path(path)?;
+    // Serialize through CSV's own parser so quoted/newline-containing fields
+    // remain intact while untrusted text is made safe for spreadsheet import.
+    let mut serialized = csv::Writer::from_writer(Vec::new());
     for row in rows {
-        writer.serialize(row)?;
+        serialized.serialize(row)?;
+    }
+    let bytes = serialized.into_inner()?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(bytes.as_slice());
+    let mut writer = csv::Writer::from_path(path)?;
+    for record in reader.records() {
+        writer.write_record(record?.iter().map(spreadsheet_cell))?;
     }
     writer.flush()?;
     Ok(())
+}
+
+fn spreadsheet_cell(value: &str) -> String {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with(['=', '+', '-', '@']) && trimmed.parse::<f64>().is_err()
+        || value.starts_with(['\t', '\r', '\n'])
+    {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    }
 }
 
 fn insight_category_label(category: InsightCategory) -> &'static str {
@@ -246,6 +267,43 @@ mod tests {
         steam::SteamResolver,
         storage::{IntervalKind, Storage},
     };
+
+    #[test]
+    fn csv_neutralizes_formulas_in_untrusted_activity_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.csv");
+        let payloads = [
+            "=HYPERLINK(\"https://example.com\")",
+            "+SUM(1,2)",
+            "-1+2",
+            "@SUM(1)",
+            "  =1+1",
+            "\t=1+1",
+            "line\nbreak",
+        ];
+        let rows: Vec<_> = payloads
+            .iter()
+            .map(|value| crate::storage::AppTotals {
+                app_class: value.to_string(),
+                focused_seconds: -1,
+                open_seconds: 2,
+            })
+            .collect();
+        super::write_csv(path.clone(), &rows).unwrap();
+        let mut reader = csv::Reader::from_path(path).unwrap();
+        for (record, original) in reader.records().zip(payloads) {
+            let record = record.unwrap();
+            assert_eq!(
+                &record[0],
+                if original == "line\nbreak" {
+                    original.to_owned()
+                } else {
+                    format!("'{original}")
+                }
+            );
+            assert_eq!(&record[1], "-1");
+        }
+    }
 
     #[test]
     fn builds_json_data_export_with_raw_and_aggregate_rows() {

@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -467,6 +468,25 @@ impl Storage {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        // Activity history is private even when the desktop uses umask 022.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            match fs::set_permissions(Path::new(&sidecar), fs::Permissions::from_mode(0o600)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
 
         let conn = Connection::open(&path)
@@ -3426,7 +3446,18 @@ fn copy_legacy_db_if_needed(path: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::copy(&legacy, path).with_context(|| {
+    let mut source = fs::File::open(&legacy)?;
+    let mut destination = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    std::io::copy(&mut source, &mut destination).with_context(|| {
         format!(
             "failed to copy legacy database {} to {}",
             legacy.display(),
@@ -3689,6 +3720,31 @@ mod tests {
             ",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn database_and_sidecars_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private.db");
+        let config = crate::config::Config::default();
+        let storage = super::Storage::open(Some(&path), &config).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(storage);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _storage = super::Storage::open(Some(&path), &config).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let file = dir.path().join(format!("private.db{suffix}"));
+            if file.exists() {
+                assert_eq!(
+                    std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
     }
 
     #[test]

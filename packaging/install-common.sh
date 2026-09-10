@@ -20,7 +20,7 @@ require_commands() {
 
 require_session() {
   [[ $EUID -ne 0 ]] || fail "Run this as your desktop user, without sudo."
-  require_commands cargo systemctl omarchy omarchy-shell jq
+  require_commands python3 cargo systemctl omarchy omarchy-shell jq
   systemctl --user show-environment >/dev/null || fail "A running systemd user session is required."
   omarchy-shell shell ping >/dev/null || fail "Run this inside your running Omarchy desktop session."
 }

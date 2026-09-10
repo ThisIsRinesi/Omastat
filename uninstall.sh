@@ -35,11 +35,7 @@ elif plugin_known; then
   omarchy plugin disable "$plugin_id"
 fi
 
-if [[ -e "$service_dir/omastat.service" || -L "$service_dir/omastat.service" ]] ||
-   systemctl --user cat omastat.service >/dev/null 2>&1; then
-  systemctl --user disable --now omastat.service
-fi
-rm -f -- "$service_dir/omastat.service"
+python3 "$repo_root/packaging/owned-files.py" uninstall service
 systemctl --user daemon-reload
 
 installed=$(cargo install --list --root "$backend_root")

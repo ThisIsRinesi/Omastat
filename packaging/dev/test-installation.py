@@ -25,7 +25,7 @@ home = pathlib.Path.home()
 plugin = home / '.config/omarchy/plugins/local.omastat'
 if name == 'cargo':
     if '--list' in args:
-        if s.get('installed'): print('omastat v0.1.6:\n    omastat\n    omastatd')
+        if s.get('installed'): print('omastat v0.1.7:\n    omastat\n    omastatd')
     elif args[0] == 'install':
         if s.get('build_fail'): fail()
         s['installed'] = True
@@ -168,6 +168,109 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse((self.home / '.local/bin/omastat-native-host').exists())
         self.assertFalse((self.home / '.local/share/omastat/browser-extension').exists())
         self.assert_preserved()
+
+    def test_foreign_service_is_backed_up_and_replaced(self):
+        service = self.home / '.config/systemd/user/omastat.service'
+        service.parent.mkdir(parents=True)
+        service.write_text('foreign service')
+        self.run_script('install.sh')
+        backups = list(service.parent.glob('omastat.service.bak.*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), 'foreign service')
+        self.assertIn('ExecStart=%h/.cargo/bin/omastatd', service.read_text())
+        self.assertNotIn('/usr/bin/env', service.read_text())
+        self.run_script('uninstall.sh')
+        self.assertFalse(service.exists())
+        self.assertEqual(backups[0].read_text(), 'foreign service')
+
+    def test_modified_owned_service_is_preserved(self):
+        self.run_script('install.sh')
+        service = self.home / '.config/systemd/user/omastat.service'
+        service.write_text('user replacement')
+        self.run_script('uninstall.sh')
+        self.assertEqual(service.read_text(), 'user replacement')
+        self.assertFalse(any('disable' in call and call[0] == 'systemctl'
+                             for call in self.read_state()['calls']))
+
+    def browser_targets(self):
+        return [self.home / relative for relative in [
+            '.local/bin/omastat-native-host',
+            '.config/zen/native-messaging-hosts/io.github.thisisrinesi.omastat.json',
+            '.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi',
+            '.zen/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi']]
+
+    def test_browser_backs_up_foreign_targets(self):
+        self.run_script('install.sh')
+        profile = self.home / '.zen/test-profile'
+        profile.mkdir(parents=True)
+        (profile / 'prefs.js').touch()
+        for target in self.browser_targets():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('foreign')
+        self.run_script('packaging/browser-extension/install.sh')
+        self.run_script('packaging/browser-extension/uninstall.sh')
+        for target in self.browser_targets():
+            self.assertFalse(target.exists())
+            backups = list(target.parent.glob(target.name + '.bak.*'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(), 'foreign')
+
+    def test_browser_modified_files_and_untracked_contents_survive(self):
+        profile = self.home / '.zen/test-profile'
+        profile.mkdir(parents=True)
+        (profile / 'prefs.js').touch()
+        self.run_script('install.sh', '--with-browser')
+        self.run_script('packaging/browser-extension/install.sh')
+        for target in self.browser_targets():
+            target.write_text('user replacement')
+        extra = self.home / '.local/share/omastat/browser-extension/unrelated'
+        extra.write_text('keep')
+        self.run_script('uninstall.sh')
+        self.run_script('uninstall.sh')
+        for target in self.browser_targets():
+            self.assertEqual(target.read_text(), 'user replacement')
+        self.assertEqual(extra.read_text(), 'keep')
+        self.assertFalse((extra.parent / 'omastat-domain-tracker-zen.xpi').exists())
+
+    def test_symlink_replacement_is_preserved(self):
+        self.run_script('install.sh', '--with-browser')
+        wrapper = self.browser_targets()[0]
+        wrapper.unlink()
+        wrapper.symlink_to(self.config)
+        self.run_script('uninstall.sh')
+        self.assertTrue(wrapper.is_symlink())
+        self.assert_preserved()
+
+    def test_reinstall_backs_up_symlink_without_changing_referent(self):
+        self.run_script('install.sh', '--with-browser')
+        wrapper = self.browser_targets()[0]
+        wrapper.unlink()
+        wrapper.symlink_to(self.config)
+        self.run_script('packaging/browser-extension/install.sh')
+        self.assertFalse(wrapper.is_symlink())
+        backups = list(wrapper.parent.glob(wrapper.name + '.bak.*'))
+        self.assertEqual(len(backups), 1)
+        self.assertTrue(backups[0].is_symlink())
+        self.assertEqual(backups[0].readlink(), self.config)
+        self.assert_preserved()
+
+    def test_backup_timestamp_collisions_do_not_overwrite(self):
+        # Freeze time to exercise multiple backups in the same second.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('owned_files', REPO / 'packaging/owned-files.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        from unittest.mock import patch
+        target = self.root / 'target'
+        target.write_text('first')
+        with patch.object(module.time, 'time', return_value=123):
+            first = module.backup_target(target)
+            target.write_text('second')
+            second = module.backup_target(target)
+        self.assertEqual(first.name, 'target.bak.123')
+        self.assertEqual(second.name, 'target.bak.123-1')
+        self.assertEqual(first.read_text(), 'first')
+        self.assertEqual(second.read_text(), 'second')
 
     def test_preflight_and_build_failure_leave_install_untouched(self):
         for failure in ['no_session', 'no_shell', 'build_fail']:

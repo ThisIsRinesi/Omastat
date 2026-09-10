@@ -102,3 +102,14 @@ Your recorded activity and configuration are kept. See [installation details](do
 for plugin backups and existing Git-managed installs.
 
 [MIT license](LICENSE)
+
+Installer file ownership: the user service and optional browser integration use
+SHA-256 and mode receipts under `${XDG_STATE_HOME:-~/.local/state}/omastat/install-ownership`.
+Installation backs up existing untracked or changed targets beside the original
+as `filename.bak.<timestamp>`, following Omarchy’s config refresh convention
+(with numbered suffixes for collisions), then installs the new version. This also
+handles older installations without receipts. Backups are kept during uninstall.
+Writes use temporary files and atomic replacement. Uninstall preserves
+modified files, symlinks, and untracked browser storage contents. Keep the receipts
+until uninstall is complete. Python 3 is required by these installers.
+The user service runs `%h/.cargo/bin/omastatd` directly.
