@@ -399,7 +399,7 @@ function trendDefaultText(days, unit) {
     if (!best || seconds > Number(best.seconds || 0)) best = list[i]
   }
   var parts = []
-  if (best && Number(best.seconds || 0) > 0) parts.push("Busiest: " + String(best.fullLabel || best.label || "day") + ": " + fmt(best.seconds))
+  if (best && Number(best.seconds || 0) > 0) parts.push("Busiest: " + (chartDateLabel(best) || "day") + ": " + fmt(best.seconds))
   parts.push((unit === "day" ? "Daily average " : unit === "week" ? "Weekly average " : "Monthly average ") + fmt(list.length > 0 ? Math.round(total / list.length) : 0))
   parts.push("Used on " + active + " of " + list.length + " " + unit + (list.length === 1 ? "" : "s"))
   return parts.join("  ")
@@ -884,7 +884,7 @@ function hourLabel(hour) {
 function trendDetailText(day) {
   if (!day) return ""
   var parts = []
-  var label = String(day.fullLabel || day.label || day.key || "Day")
+  var label = chartDateLabel(day) || "Day"
   parts.push(label + ": " + fmt(Number(day.seconds || 0)) + (day.cumulative === true ? " cumulative focus" : " focused"))
   if (Number(day.excluded_seconds || 0) > 0) parts.push(fmt(day.excluded_seconds) + " not counted")
   return parts.join("  ")
@@ -1101,6 +1101,25 @@ function visitSummary(activity) {
 
 function insightExplanation(item) {
   return String(item.explanation || item.detail || "")
+}
+
+function routineWindows(item) {
+  var routine = (item.supporting || {}).routine
+  if (!routine) return []
+  var start = Number(routine.start_minute), end = Number(routine.end_minute)
+  if (!isFinite(start) || !isFinite(end) || start < 0 || start >= 1440 || end < 0 || end >= 1440 || start === end) return []
+  return end > start ? [{ start: start / 1440, width: (end - start) / 1440 }]
+    : [{ start: start / 1440, width: (1440 - start) / 1440 }, { start: 0, width: end / 1440 }].filter(function(part) { return part.width > 0 })
+}
+
+function chartDateLabel(cell) {
+  if (!cell) return ""
+  var key = String(cell.date || cell.key || "")
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || cell.monthly || cell.weekly || (cell.lens && cell.lens !== "day"))
+    return String(cell.fullLabel || cell.label || key)
+  var date = parseDateKey(key)
+  if (!date) return String(cell.fullLabel || cell.label || key)
+  return WEEKDAY_LABELS[(date.getDay() + 6) % 7] + ", " + MONTH_LABELS[date.getMonth()] + " " + date.getDate()
 }
 
 function trendTitle(lens) {

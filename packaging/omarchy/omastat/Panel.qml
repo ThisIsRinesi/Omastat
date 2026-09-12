@@ -51,6 +51,10 @@ Ui.Panel {
   property string expandedInsight: ""
   property bool dataExpanded: false
   property string chartReadout: ""
+  property int legendHoverIndex: -1
+  readonly property int motionDuration: root.setting("reduceMotion", false) ? 0 : 150
+  onCompositionChanged: legendHoverIndex = -1
+  onShownDailyChanged: if (panelDataLoaded && motionDuration > 0) dataReveal.restart()
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color accent: Color.accent
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.75)
@@ -278,6 +282,7 @@ Ui.Panel {
                 background: Rectangle {
                   radius: Style.space(4)
                   color: lensButton.checked ? root.withAlpha(root.accent, 0.16) : root.withAlpha(root.foreground, lensButton.hovered ? 0.12 : 0.04)
+                  Behavior on color { ColorAnimation { duration: root.motionDuration } }
                   border.width: 1
                   border.color: lensButton.checked || lensButton.activeFocus ? root.accent : root.line
                   Rectangle {
@@ -310,6 +315,7 @@ Ui.Panel {
           Controls.ScrollBar.vertical: Controls.ScrollBar { }
           ColumnLayout {
             id: body
+            NumberAnimation { id: dataReveal; target: body; property: "opacity"; from: 0.88; to: 1; duration: root.motionDuration; easing.type: Easing.OutCubic }
             width: scroll.width - Style.space(12)
             spacing: Style.space(10)
             RowLayout {
@@ -384,6 +390,36 @@ Ui.Panel {
                       Label { Layout.fillWidth: true; text: insightButton.presentation.category; color: root.dim; font.pixelSize: Style.font.caption }
                       Label { Layout.fillWidth: true; text: insightButton.modelData.title || insightButton.modelData.label || "Insight"; wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
                       Label { Layout.fillWidth: true; text: insightButton.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle; font.bold: true }
+                      ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: Model.routineWindows(insightButton.modelData).length > 0
+                        spacing: Style.space(3)
+                        Rectangle {
+                          Layout.fillWidth: true
+                          implicitHeight: Style.space(7)
+                          radius: height / 2
+                          color: root.fill
+                          Repeater {
+                            model: Model.routineWindows(insightButton.modelData)
+                            Rectangle {
+                              required property var modelData
+                              x: parent.width * modelData.start
+                              width: parent.width * modelData.width
+                              height: parent.height
+                              radius: height / 2
+                              color: root.accent
+                            }
+                          }
+                        }
+                        RowLayout {
+                          Layout.fillWidth: true
+                          Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
+                          Item { Layout.fillWidth: true }
+                          Label { text: "Noon"; color: root.dim; font.pixelSize: Style.font.caption }
+                          Item { Layout.fillWidth: true }
+                          Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
+                        }
+                      }
                       Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); wrapMode: Text.Wrap; color: root.foreground }
                       Label { Layout.fillWidth: true; visible: text.length > 0; text: insightButton.presentation.frequency; color: root.dim; font.pixelSize: Style.font.caption }
                       Flow {
@@ -415,7 +451,15 @@ Ui.Panel {
                         Accessible.name: text + ": " + insightButton.modelData.title
                         onClicked: root.inspectInsight(insightButton.modelData)
                       }
-                      Label { Layout.fillWidth: true; visible: insightButton.expanded; text: root.evidenceText(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
+                      Item {
+                        objectName: "evidenceDisclosure"
+                        Layout.fillWidth: true
+                        implicitHeight: insightButton.expanded ? evidenceCopy.implicitHeight : 0
+                        visible: implicitHeight > 0
+                        clip: true
+                        Behavior on implicitHeight { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
+                        Label { id: evidenceCopy; width: parent.width; text: root.evidenceText(insightButton.modelData); wrapMode: Text.Wrap; color: root.dim; font.pixelSize: Style.font.caption }
+                      }
                       Action {
                         Layout.maximumWidth: insightButton.width
                         visible: insightButton.expanded && insightButton.presentation.activityKey !== "" && insightButton.presentation.activityKey !== root.selectedActivityKey
@@ -447,6 +491,8 @@ Ui.Panel {
                   columns: width >= Style.space(440) ? 2 : 1
                   columnSpacing: Style.space(16)
                   AppDonut {
+                    id: compositionDonut
+                    objectName: "compositionChart"
                     Layout.fillWidth: true
                     Layout.preferredWidth: Style.space(170)
                     Layout.maximumWidth: Style.space(170)
@@ -454,7 +500,7 @@ Ui.Panel {
                     apps: root.composition
                     colors: root.compositionColors
                     totalSeconds: root.composition.reduce(function(n, a) { return n + a.seconds }, 0)
-                    highlightedIndex: root.composition.findIndex(function(a) { return a.kind === root.selectedActivityKind && a.app_class === root.selectedActivityKey })
+                    highlightedIndex: root.legendHoverIndex >= 0 ? root.legendHoverIndex : root.composition.findIndex(function(a) { return a.kind === root.selectedActivityKind && a.app_class === root.selectedActivityKey })
                     onActivatedSlice: function(index) { var a = root.composition[index]; root.selectActivity(a.kind, a.app_class) }
                   }
                   ColumnLayout {
@@ -466,6 +512,9 @@ Ui.Panel {
                       Action {
                         required property var modelData
                         required property int index
+                        onHoveredChanged: { if (hovered) root.legendHoverIndex = index; else if (root.legendHoverIndex === index) root.legendHoverIndex = -1 }
+                        opacity: compositionDonut.activeIndex < 0 || compositionDonut.activeIndex === index ? 1 : 0.5
+                        Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
                         Layout.fillWidth: true
                         implicitHeight: Style.space(28)
                         text: "●  " + modelData.app + " · " + Model.fmt(modelData.seconds) + " · " + modelData.pct + "%"
@@ -530,6 +579,7 @@ Ui.Panel {
                   }
                 }
                 FocusTrendLine {
+                  objectName: "activityTrend"
                   Layout.fillWidth: true
                   Layout.preferredHeight: implicitHeight
                   visible: root.selectedLens !== "day"
@@ -699,8 +749,10 @@ Ui.Panel {
     onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
     Accessible.name: text
     opacity: enabled ? 1 : 0.4
+    scale: down ? 0.98 : 1
+    Behavior on scale { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
     contentItem: Label { text: action.text; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: action.checked }
-    background: Rectangle { radius: Style.space(4); color: action.checked || action.hovered ? root.fill : "transparent"; border.width: action.checked || action.activeFocus ? 1 : 0; border.color: action.activeFocus ? root.accent : root.line }
+    background: Rectangle { radius: Style.space(4); color: action.checked || action.hovered ? root.fill : "transparent"; Behavior on color { ColorAnimation { duration: root.motionDuration } } border.width: action.checked || action.activeFocus ? 1 : 0; border.color: action.activeFocus ? root.accent : root.line }
   }
   component Metric: ColumnLayout {
     property string label: ""
@@ -836,12 +888,16 @@ Ui.Panel {
     readonly property var segments: Model.arcSegments(apps)
     readonly property int activeIndex: hoveredIndex >= 0 ? hoveredIndex : highlightedIndex
     readonly property bool hasActiveApp: activeIndex >= 0 && activeIndex < apps.length
-    readonly property string centerLabel: hasActiveApp ? root.formatDuration(Number((apps[activeIndex] || {}).seconds || 0)) : root.formatDuration(totalSeconds)
+    readonly property string centerLabel: hasActiveApp ? root.formatDuration(Number((apps[activeIndex] || {}).seconds || 0)) + " · " + Math.round(Number((apps[activeIndex] || {}).seconds || 0) / Math.max(1, totalSeconds) * 100) + "%" : root.formatDuration(totalSeconds)
     readonly property string centerDetail: hasActiveApp ? String((apps[activeIndex] || {}).app || "App") : "Time spent"
+    Controls.ToolTip.visible: hoveredIndex >= 0
+    Controls.ToolTip.text: centerDetail + " · " + centerLabel
     readonly property int chartSize: Math.min(Style.space(150), width - Style.space(8))
 
     Layout.minimumHeight: Style.space(158)
     implicitHeight: Style.space(158)
+    scale: hoveredIndex >= 0 ? 1.015 : 1
+    Behavior on scale { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
 
     onAppsChanged: donutCanvas.requestPaint()
     onColorsChanged: donutCanvas.requestPaint()
@@ -1184,8 +1240,11 @@ Ui.Panel {
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < days.length
       ? Model.trendDetailText(days[selectedIndex])
       : ""
-    readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property string readoutText: inspectedDay ? Model.trendDetailText(inspectedDay) + (isCurrentDay(inspectedDay) ? " so far" : "") : ""
     readonly property string defaultText: Model.trendDefaultText(days, root.selectedLens === "year" ? "month" : root.selectedLens === "life" ? "week" : "day")
+    readonly property int inspectedIndex: hoveredIndex >= 0 ? hoveredIndex : selectedIndex
+    readonly property var inspectedDay: inspectedIndex >= 0 && inspectedIndex < days.length ? days[inspectedIndex] : null
+    function isCurrentDay(cell) { return cell && !cell.monthly && !cell.weekly && String(cell.date || cell.key || "") === root.todayKey }
     readonly property real averageSeconds: {
       var list = days || []
       if (list.length <= 0) return 0
@@ -1255,6 +1314,7 @@ Ui.Panel {
         anchors.rightMargin: Style.space(8)
         anchors.verticalCenter: parent.verticalCenter
         text: lineRoot.title
+        visible: lineRoot.inspectedIndex < 0
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -1264,6 +1324,7 @@ Ui.Panel {
 
       Text {
         id: lineDetail
+        visible: lineRoot.inspectedIndex < 0
 
         width: Math.min(implicitWidth, parent.width * 0.46)
         anchors.right: parent.right
@@ -1303,6 +1364,7 @@ Ui.Panel {
       }
       Label {
         anchors.right: parent.right
+        visible: lineRoot.inspectedIndex < 0
         y: Math.max(0, lineRoot.pointY(lineRoot.averageSeconds) - height)
         z: 1
         text: "Average " + Model.fmt(lineRoot.averageSeconds)
@@ -1385,17 +1447,18 @@ Ui.Panel {
           var dotStride = count <= 14 ? 1 : (count <= 31 ? 3 : Math.ceil(count / 12))
           for (var k = 0; k < count; k++) {
             var seconds = Number(list[k].seconds || 0)
-            var active = k === lineRoot.hoveredIndex || k === lineRoot.selectedIndex
-            if (!active && seconds <= 0 && k % dotStride !== 0) continue
-            if (!active && k % dotStride !== 0 && k !== 0 && k !== count - 1) continue
+            var active = k === lineRoot.inspectedIndex
+            var partial = lineRoot.isCurrentDay(list[k])
+            if (!active && !partial && seconds <= 0 && k % dotStride !== 0) continue
+            if (!active && !partial && k % dotStride !== 0 && k !== 0 && k !== count - 1) continue
             var px = lineRoot.pointX(k)
             var py = lineRoot.pointY(seconds)
             ctx.beginPath()
             ctx.arc(px, py, active ? Style.space(5) : Style.space(3), 0, Math.PI * 2, false)
             ctx.fillStyle = active ? root.canvasColor(root.foreground, 0.96) : root.canvasColor(accent, count === 1 ? 0.92 : mutedAccent.a)
-            ctx.fill()
-            ctx.lineWidth = active ? Style.space(2) : 0
-            if (active) {
+            if (!partial) ctx.fill()
+            ctx.lineWidth = active || partial ? Style.space(2) : 0
+            if (active || partial) {
               ctx.strokeStyle = root.canvasColor(accent, 0.95)
               ctx.stroke()
             }
@@ -1415,11 +1478,34 @@ Ui.Panel {
         color: root.withAlpha(root.foreground, 0.24)
       }
 
+      Rectangle {
+        width: Math.min(parent.width, hoverReadout.implicitWidth + Style.space(16))
+        height: hoverReadout.implicitHeight + Style.space(10)
+        x: Math.max(0, Math.min(parent.width - width, lineRoot.pointX(lineRoot.inspectedIndex) - width / 2))
+        y: -height - Style.space(3)
+        opacity: lineRoot.inspectedDay ? 1 : 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
+        radius: Style.space(4)
+        color: root.foreground
+        Label {
+          id: hoverReadout
+          anchors.centerIn: parent
+          width: parent.width - Style.space(16)
+          text: lineRoot.inspectedDay ? Model.chartDateLabel(lineRoot.inspectedDay) + " · " + Model.fmt(lineRoot.inspectedDay.seconds) + (lineRoot.isCurrentDay(lineRoot.inspectedDay) ? " so far" : "") : ""
+          color: Color.background
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.NoWrap
+          elide: Text.ElideRight
+        }
+      }
+
       Text {
         anchors.left: parent.left
         anchors.top: parent.bottom
         anchors.topMargin: Style.space(5)
-        text: days.length > 0 ? String(days[0].label || days[0].fullLabel || "") : ""
+        width: parent.width * 0.46
+        text: days.length > 0 ? Model.chartDateLabel(days[0]) : ""
         color: root.faint
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -1431,7 +1517,7 @@ Ui.Panel {
         anchors.right: parent.right
         anchors.top: parent.bottom
         anchors.topMargin: Style.space(5)
-        text: days.length > 0 ? String(days[days.length - 1].label || days[days.length - 1].fullLabel || "") : ""
+        text: days.length > 0 ? Model.chartDateLabel(days[days.length - 1]) + (lineRoot.isCurrentDay(days[days.length - 1]) ? " · so far" : "") : ""
         color: root.faint
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
