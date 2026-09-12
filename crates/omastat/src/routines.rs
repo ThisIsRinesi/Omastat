@@ -463,7 +463,7 @@ pub(crate) fn humanize(insight: &mut Insight) {
         "days"
     };
     let range = analytics::clock_range(routine.start_minute, routine.end_minute);
-    insight.title = format!("{label} {when}");
+    insight.title = format!("{label}, {when}");
     insight.value = format!("{range} · {count} of {sample} {unit}");
     support.hour_label = Some(range.clone());
     let recent = if routine.status == "recent" {
@@ -474,24 +474,18 @@ pub(crate) fn humanize(insight: &mut Insight) {
     let duration = analytics::duration_words(support.baseline_seconds.unwrap_or(0));
     insight.explanation = if routine.timing_basis == "visit-start" {
         format!(
-            "{recent} often come back here around this time. A typical visit adds up to about {duration} of use."
+            "{recent} made a habit of dropping in around this time. A typical visit includes about {duration} of active use."
         )
     } else {
-        format!("{recent} often spent about {duration} here around this time.")
+        format!(
+            "{recent} settled into a rhythm here: about {duration} of use during this window on a typical matching day."
+        )
     };
     if let Some((start, end)) = routine.visit_start_window {
         insight.explanation.push_str(&format!(
             " You tend to start between {}.",
             analytics::clock_range(start, end).replace('–', " and ")
         ));
-    }
-    insight
-        .explanation
-        .push_str(" Days with too much missing tracking aren't counted.");
-    if insight.confidence == InsightConfidence::Low {
-        insight
-            .explanation
-            .push_str(" This is still an early hint.");
     }
 }
 
@@ -538,7 +532,7 @@ mod tests {
         let routine = insight.supporting.routine.clone();
         let dates = insight.supporting.matching_dates.clone();
         humanize(&mut insight);
-        assert_eq!(insight.title, "Game most evenings");
+        assert_eq!(insight.title, "Game, most evenings");
         assert!(insight.value.contains("PM"));
         assert!(insight.value.contains("14 of 14 days"));
         assert!(insight.explanation.starts_with("Lately, you've"));

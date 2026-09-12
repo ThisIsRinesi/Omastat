@@ -349,7 +349,8 @@ fn push_top_app(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             format_duration(top.focused_seconds),
             percent(share)
         ),
-        explanation: "You spent more of your app time here than anywhere else.".to_string(),
+        explanation: "Of all the apps you used, this one got the biggest slice of your time."
+            .to_string(),
         confidence: confidence(input.daily.len(), 1),
         evidence: evidence(input, 1),
         supporting: period_support(input.period).with_app(
@@ -487,7 +488,7 @@ fn push_day_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::BestDay,
             category: InsightCategory::Patterns,
             tone: InsightTone::Positive,
-            title: "Your busiest day".to_string(),
+            title: "Your big day".to_string(),
             value: format!(
                 "{} - {}",
                 relative_day_label(best, input.today_key),
@@ -511,7 +512,7 @@ fn push_day_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::WorstActiveDay,
             category: InsightCategory::Patterns,
             tone: InsightTone::Neutral,
-            title: "Your quietest day".to_string(),
+            title: "A quieter day".to_string(),
             value: format!(
                 "{} - {}",
                 relative_day_label(worst, input.today_key),
@@ -538,7 +539,7 @@ fn push_peak_facts(input: &AnalysisInput<'_>, out: &mut Vec<Insight>) {
             kind: InsightKind::PeakFocusHour,
             category: InsightCategory::Patterns,
             tone: InsightTone::Info,
-            title: "Your busiest time of day".to_string(),
+            title: "Your day hits its stride".to_string(),
             value: format!(
                 "{} - {}",
                 hour_label(peak.hour),
@@ -611,7 +612,7 @@ fn push_deep_work_facts(input: &AnalysisInput<'_>, blocks: &[FocusBlock], out: &
         } else {
             InsightTone::Caution
         },
-        title: "Time with one app".to_string(),
+        title: if deep_count > 0 { "You stayed a while" } else { "Shorter stretches this time" }.to_string(),
         value: format!(
             "{} - {} total",
             format_blocks(deep_count),
@@ -650,7 +651,7 @@ fn push_switch_facts(input: &AnalysisInput<'_>, blocks: &[FocusBlock], out: &mut
             kind: InsightKind::AppSwitchRate,
             category: InsightCategory::FocusQuality,
             tone: switch_rate_tone(rate),
-            title: "Moving between apps".to_string(),
+            title: "Your app-hopping pace".to_string(),
             value: format!("{} switches an hour", format_rate(rate)),
             explanation: "How often you moved to a different app while using your computer. Breaks and gaps in tracking don't count as switches.".to_string(),
             confidence: confidence(input.focus_intervals.len(), 3),
@@ -669,7 +670,7 @@ fn push_switch_facts(input: &AnalysisInput<'_>, blocks: &[FocusBlock], out: &mut
             } else {
                 InsightTone::Neutral
             },
-            title: "An app you dip in and out of".to_string(),
+            title: "Your regular check-in".to_string(),
             value: format!(
                 "{} · {} stretches an hour",
                 app_label,

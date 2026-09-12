@@ -207,8 +207,8 @@ const routineEvidence = context.insightEvidence({
     routine: { status: "recent", cadence: "everyday", eligible_dates: ["2026-09-01", "2026-09-02"] } }
 });
 assert.match(routineEvidence, /5 of 7 days with enough tracking/);
-assert.match(routineEvidence, /Days we could compare: Sep 1, 2026; Sep 2, 2026/);
-assert.match(routineEvidence, /Days it happened: Sep 1, 2026/);
+assert.match(routineEvidence, /at least 90% tracking/);
+assert.doesNotMatch(routineEvidence, /Days we could compare|Days it happened/);
 assert.match(routineEvidence, /Some supporting history/);
 assert.equal(context.insightExplanation({ explanation: "Legacy fact" }), "Legacy fact");
 assert.equal(context.insightEvidence({ explanation: "Legacy fact" }), "");
@@ -248,6 +248,30 @@ assert.equal(context.clockLabel(6), "06:00");
 assert.equal(context.clockLabel(18), "18:00");
 assert.equal(context.insightExplanation({detail: "Older insight"}), "Older insight");
 assert.equal(context.insightExplanation({}), "");
+
+const visualHabit = {
+  kind: 'app-routine', category: 'patterns', value: 'Original value',
+  supporting: {
+    hour_label: '8–10 PM', occurrence_count: 2, eligible_count: 3, weekday: 0,
+    activity_kind: 'domain', activity_key: 'example.com', app_label: 'Example',
+    matching_dates: ['2026-09-07', '2026-08-24'],
+    routine: { status: 'recent', eligible_dates: ['2026-09-07', '2026-08-24', '2026-08-31'] }
+  }
+};
+const originalHabit = JSON.stringify(visualHabit);
+assert.equal(context.insightPresentation(visualHabit).value, '8–10 PM');
+assert.equal(context.insightPresentation(visualHabit).frequency, '2 of 3 tracked weeks · 67% of the time');
+assert.equal(context.insightPresentation(visualHabit).activityKind, 'domain');
+assert.equal(context.insightQualifier(visualHabit), 'Recent pattern · Last two weeks');
+assert.equal(JSON.stringify(context.insightDays(visualHabit)), JSON.stringify([
+  { date: '2026-08-24', matched: true },
+  { date: '2026-08-31', matched: false },
+  { date: '2026-09-07', matched: true }
+]));
+assert.equal(JSON.stringify(visualHabit), originalHabit);
+assert.equal(context.insightDays({}).length, 0);
+assert.equal(context.insightPresentation({value: 'Legacy fact'}).value, 'Legacy fact');
+assert.equal(context.insightPresentation({}).frequency, '');
 
 assert.deepEqual(Array.from(context.durationLegend(7200)), ["0s", "2h"]);
 assert.deepEqual(Array.from(context.durationLegend(0)), ["0s", "0s"]);

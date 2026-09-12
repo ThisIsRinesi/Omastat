@@ -49,7 +49,6 @@ Ui.Panel {
   property bool showAllActivities: false
   property bool showAllInsights: false
   property string expandedInsight: ""
-  property string pendingEvidenceKey: ""
   property bool dataExpanded: false
   property string chartReadout: ""
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
@@ -80,9 +79,9 @@ Ui.Panel {
   }
   readonly property string baselineText: detail.baseline_start
     ? Model.insightDateRange(detail.baseline_start, detail.baseline_end) : "Up to eight weeks of history"
-  onSelectedLensChanged: { pendingEvidenceKey = ""; resetView() }
-  onSelectedOffsetChanged: { pendingEvidenceKey = ""; resetView() }
-  onSelectedActivityKeyChanged: { var pending = pendingEvidenceKey; resetView(); expandedInsight = pending; pendingEvidenceKey = "" }
+  onSelectedLensChanged: resetView()
+  onSelectedOffsetChanged: resetView()
+  onSelectedActivityKeyChanged: resetView()
 
   readonly property color faint: dim
   readonly property color noFill: "transparent"
@@ -159,9 +158,6 @@ Ui.Panel {
   function inspectInsight(item) {
     var key = String(item.title || item.label) + String(item.value)
     expandedInsight = expandedInsight === key ? "" : key
-    var support = item.supporting || {}
-    var activityKey = String(support.activity_key || support.app_class || "")
-    if (activityKey && activityKey !== selectedActivityKey) { pendingEvidenceKey = expandedInsight; selectActivity(String(support.activity_kind || "app"), activityKey) }
   }
   function maximum(list) {
     var max = 1
@@ -344,13 +340,107 @@ Ui.Panel {
               columns: root.wide ? 2 : 1
               columnSpacing: Style.space(12)
               rowSpacing: Style.space(12)
+              ColumnLayout {
+                id: insightsSection
+                Layout.row: root.wide ? 0 : 2
+                Layout.column: root.wide ? 1 : 0
+                Layout.rowSpan: root.wide ? 3 : 1
+                Layout.fillWidth: true
+                Layout.preferredWidth: root.wide ? body.width * 0.4 : body.width
+                Layout.alignment: Qt.AlignTop
+                spacing: Style.space(14)
+                Label { Layout.fillWidth: true; text: "Patterns & insights"; font.pixelSize: Style.font.subtitle; font.bold: true }
+                Label {
+                  Layout.fillWidth: true
+                  visible: root.insights.length === 0
+                  text: root.detailRunning || !root.panelDataLoaded ? "Finding the little things in your day…" : "Your story is still taking shape. A few more days of activity will help recurring habits stand out."
+                  color: root.dim
+                }
+                GridLayout {
+                  id: insightList
+                  Layout.fillWidth: true
+                  columns: 1
+                  columnSpacing: Style.space(24)
+                  rowSpacing: Style.space(20)
+                  readonly property int fittedCount: root.wide ? 4 : 2
+                  Repeater {
+                    id: insightItems
+                    model: root.insights
+                    ColumnLayout {
+                      id: insightButton
+                      required property var modelData
+                      required property int index
+                      readonly property string identityKey: String(modelData.title || modelData.label) + String(modelData.value)
+                      readonly property bool expanded: root.expandedInsight === identityKey
+                      readonly property var presentation: Model.insightPresentation(modelData)
+                      readonly property var days: Model.insightDays(modelData)
+                      Layout.fillWidth: true
+                      Layout.preferredWidth: 1
+                      Layout.minimumWidth: 0
+                      Layout.alignment: Qt.AlignTop
+                      visible: root.showAllInsights || index < insightList.fittedCount
+                      spacing: Style.space(7)
+                      Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
+                      Label { Layout.fillWidth: true; text: insightButton.presentation.category; color: root.dim; font.pixelSize: Style.font.caption }
+                      Label { Layout.fillWidth: true; text: insightButton.modelData.title || insightButton.modelData.label || "Insight"; wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
+                      Label { Layout.fillWidth: true; text: insightButton.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle; font.bold: true }
+                      Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); wrapMode: Text.Wrap; color: root.foreground }
+                      Label { Layout.fillWidth: true; visible: text.length > 0; text: insightButton.presentation.frequency; color: root.dim; font.pixelSize: Style.font.caption }
+                      Flow {
+                        Layout.fillWidth: true
+                        spacing: Style.space(3)
+                        visible: insightButton.days.length > 0
+                        Repeater {
+                          model: insightButton.days
+                          Rectangle {
+                            required property var modelData
+                            width: Style.space(10)
+                            height: Style.space(10)
+                            radius: Style.space(2)
+                            color: modelData.matched ? root.accent : root.fill
+                            border.width: modelData.matched ? 0 : 1
+                            border.color: root.line
+                            HoverHandler { id: dayHover }
+                            Controls.ToolTip.visible: dayHover.hovered
+                            Controls.ToolTip.text: Model.insightDate(modelData.date) + (modelData.matched ? " · Pattern appeared" : " · Pattern did not appear")
+                          }
+                        }
+                      }
+                      Label { Layout.fillWidth: true; visible: text.length > 0; text: Model.insightQualifier(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
+                      Action {
+                        Layout.alignment: Qt.AlignLeft
+                        Layout.maximumWidth: insightButton.width
+                        visible: root.evidenceText(insightButton.modelData).length > 0
+                        text: insightButton.expanded ? "Hide details ↑" : "How we know ↓"
+                        Accessible.name: text + ": " + insightButton.modelData.title
+                        onClicked: root.inspectInsight(insightButton.modelData)
+                      }
+                      Label { Layout.fillWidth: true; visible: insightButton.expanded; text: root.evidenceText(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
+                      Action {
+                        Layout.maximumWidth: insightButton.width
+                        visible: insightButton.expanded && insightButton.presentation.activityKey !== "" && insightButton.presentation.activityKey !== root.selectedActivityKey
+                        text: "Explore " + insightButton.presentation.activityLabel + " →"
+                        contentItem: Label { text: parent.text; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        onClicked: root.selectActivity(insightButton.presentation.activityKind, insightButton.presentation.activityKey)
+                      }
+                    }
+                  }
+                }
+                Action {
+                  Layout.fillWidth: true
+                  visible: root.insights.length > insightList.fittedCount
+                  text: root.showAllInsights ? "Show fewer insights" : "Show all " + root.insights.length + " insights · " + (root.insights.length - insightList.fittedCount) + " more"
+                  onClicked: root.showAllInsights = !root.showAllInsights
+                }
+
+              }
               Section {
                 title: root.activityType === "app" ? "Time by app" : "Time by website"
                 Layout.row: 0
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.64) : body.width
+                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
@@ -399,87 +489,12 @@ Ui.Panel {
                 Label { Layout.fillWidth: true; text: "Overall period · Select an activity to update its charts"; color: root.dim; font.pixelSize: Style.font.caption }
               }
               Section {
-                id: insightsSection
-                title: "Patterns & insights"
-                Layout.row: root.wide ? 0 : 2
-                Layout.column: root.wide ? 1 : 0
-                Layout.rowSpan: root.wide ? 3 : 1
-                Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.36) : body.width
-                Layout.alignment: Qt.AlignTop
-                Label {
-                  Layout.fillWidth: true
-                  visible: root.insights.length === 0
-                  text: "Still getting to know your habits. We look for things you do on several days, or return to week after week."
-                  color: root.dim
-                }
-                Column {
-                  id: insightList
-                  Layout.fillWidth: true
-                  spacing: Style.space(8)
-                  // Measure every explanation at its actual width. Expanded evidence
-                  // does not change the default list, so opening it never hides peers.
-                  readonly property int fittedCount: {
-                    var heights = []
-                    for (var i = 0; i < insightItems.count; i++) {
-                      var item = insightItems.itemAt(i)
-                      if (!item) return Math.min(6, root.insights.length)
-                      heights.push(item.collapsedHeight)
-                    }
-                    var available = root.wide ? scroll.height - (insightsSection.y + insightsSection.parent.y) - Style.space(90) : Style.space(470)
-                    return Model.fittingInsightCount(heights, available, spacing)
-                  }
-                  Repeater {
-                    id: insightItems
-                    model: root.insights
-                    Controls.AbstractButton {
-                      id: insightButton
-                      required property var modelData
-                      required property int index
-                      readonly property string identityKey: String(modelData.title || modelData.label) + String(modelData.value)
-                      readonly property bool expanded: root.expandedInsight === identityKey
-                      width: insightList.width
-                      height: implicitHeight
-                      visible: root.showAllInsights || index < insightList.fittedCount
-                      readonly property real collapsedHeight: implicitHeight - (expanded ? evidenceLabel.implicitHeight + insightBody.spacing : 0)
-                      implicitHeight: insightBody.implicitHeight + Style.space(16)
-                      activeFocusOnTab: true
-                      onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
-                      Accessible.name: String(modelData.title || modelData.label) + ". " + modelData.value + ". See how we know"
-                      onClicked: root.inspectInsight(modelData)
-                      leftPadding: Style.space(8)
-                      rightPadding: Style.space(8)
-                      topPadding: Style.space(8)
-                      bottomPadding: Style.space(8)
-                      background: Rectangle { color: insightButton.hovered ? root.fill : "transparent"; radius: Style.space(4); border.width: insightButton.activeFocus ? 1 : 0; border.color: root.accent }
-                      contentItem: ColumnLayout {
-                        id: insightBody
-                        spacing: Style.space(5)
-                        Label { Layout.fillWidth: true; text: insightButton.modelData.title || insightButton.modelData.label || "Insight"; font.bold: true }
-                        Label { Layout.fillWidth: true; text: insightButton.modelData.value || ""; color: root.accent }
-                        Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
-                        Label { visible: Model.insightQualifier(insightButton.modelData).length > 0; text: Model.insightQualifier(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
-                        Label { id: evidenceLabel; Layout.fillWidth: true; visible: insightButton.expanded; text: root.evidenceText(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
-                        Label { visible: root.evidenceText(insightButton.modelData).length > 0; text: insightButton.expanded ? "Hide details ↑" : "How we know →"; color: root.dim; font.pixelSize: Style.font.caption }
-                      }
-                    }
-                  }
-                }
-                Action {
-                  Layout.fillWidth: true
-                  visible: root.insights.length > insightList.fittedCount
-                  text: root.showAllInsights ? "Show fewer insights" : "Show all " + root.insights.length + " insights · " + (root.insights.length - insightList.fittedCount) + " more"
-                  onClicked: root.showAllInsights = !root.showAllInsights
-                }
-
-              }
-              Section {
                 title: "Your rhythm"
                 Layout.row: 1
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.64) : body.width
+                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
@@ -557,7 +572,7 @@ Ui.Panel {
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.64) : body.width
+                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
                 Layout.alignment: Qt.AlignTop
                 RowLayout {
                   Layout.fillWidth: true

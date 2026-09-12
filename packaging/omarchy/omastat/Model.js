@@ -1043,19 +1043,16 @@ function insightEvidence(item) {
   var support = item.supporting || {}
   var text = ""
   if (support.period_start_date && support.period_end_date)
-    text += "\nLooking back at " + insightDateRange(support.period_start_date, support.period_end_date) + "."
+    text += "\n\nLooking back at " + insightDateRange(support.period_start_date, support.period_end_date) + "."
   if (support.routine) {
-    var routine = support.routine
-    text += "\nThis happened on " + Number(support.occurrence_count || 0) + " of " + Number(support.eligible_count || 0) + " days with enough tracking."
-    text += "\nWe only compare times when tracking covered at least 90% of the time."
-    if (routine.eligible_dates && routine.eligible_dates.length)
-      text += "\nDays we could compare: " + routine.eligible_dates.map(insightDate).join("; ")
+    text += "\n\nThis happened on " + Number(support.occurrence_count || 0) + " of " + Number(support.eligible_count || 0) + " days with enough tracking."
+    text += " Only time windows with at least 90% tracking are compared."
   }
-  if (support.matching_dates && support.matching_dates.length)
-    text += "\n" + (support.routine ? "Days it happened: " : "Days used for comparison: ") + support.matching_dates.map(insightDate).join("; ")
+  if (!support.routine && support.matching_dates && support.matching_dates.length)
+    text += "\n\nDays used for comparison: " + support.matching_dates.map(insightDate).join("; ")
   if (item.evidence) {
     var confidence = { low: "Limited evidence so far", medium: "Some supporting history", high: "Strong supporting history" }
-    text += "\n" + (confidence[String(item.confidence)] || "Tracking history")
+    text += "\n\n" + (confidence[String(item.confidence)] || "Tracking history")
   }
   return text.trim()
 }
@@ -1068,7 +1065,33 @@ function widgetInsights(items) {
 }
 
 function insightQualifier(item) {
-  return item && item.confidence === "low" ? "Early hint" : ""
+  if (item && item.confidence === "low") return "Early hint"
+  var routine = item && item.supporting && item.supporting.routine
+  return routine && routine.status === "recent" ? "Recent pattern · Last two weeks" : ""
+}
+
+function insightPresentation(item) {
+  var support = item.supporting || {}, routine = support.routine
+  var categories = { patterns: "Your rhythm", "focus-quality": "How you spend your time", apps: "In your apps" }
+  var count = Number(support.occurrence_count || 0), total = Number(support.eligible_count || 0)
+  return {
+    category: routine ? "A familiar habit" : (categories[item.category] || "Worth a look"),
+    value: routine && support.hour_label ? String(support.hour_label) : String(item.value || ""),
+    frequency: routine && total > 0 ? count + " of " + total + " tracked " + (support.weekday !== undefined && support.weekday !== null ? "weeks" : "days") + " · " + Math.round(count / total * 100) + "% of the time" : "",
+    activityKey: String(support.activity_key || support.app_class || ""),
+    activityKind: String(support.activity_kind || "app"),
+    activityLabel: String(support.app_label || support.activity_key || support.app_class || "activity")
+  }
+}
+
+// Only comparable days appear here; missing tracking is never shown as a miss.
+function insightDays(item) {
+  var support = item.supporting || {}, routine = support.routine
+  if (!routine || !routine.eligible_dates) return []
+  var matches = support.matching_dates || []
+  return routine.eligible_dates.slice().sort().map(function(date) {
+    return { date: date, matched: matches.indexOf(date) >= 0 }
+  })
 }
 
 function visitSummary(activity) {
