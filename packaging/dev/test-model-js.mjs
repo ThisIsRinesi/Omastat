@@ -260,7 +260,7 @@ const visualHabit = {
 };
 const originalHabit = JSON.stringify(visualHabit);
 assert.equal(context.insightPresentation(visualHabit).value, '8–10 PM');
-assert.equal(context.insightPresentation(visualHabit).frequency, '2 of 3 tracked weeks · 67% of the time');
+assert.equal(context.insightPresentation(visualHabit).frequency, '67% of tracked days');
 assert.equal(context.insightPresentation(visualHabit).activityKind, 'domain');
 assert.equal(context.insightQualifier(visualHabit), 'Recent pattern · Last two weeks');
 assert.equal(JSON.stringify(context.insightDays(visualHabit)), JSON.stringify([

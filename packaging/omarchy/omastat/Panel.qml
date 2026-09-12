@@ -48,7 +48,8 @@ Ui.Panel {
   property string activityType: "app"
   property bool showAllActivities: false
   property bool showAllInsights: false
-  property string expandedInsight: ""
+  property var inspectedInsight: null
+  property var insightReturnControl: null
   property bool dataExpanded: false
   property string chartReadout: ""
   property int legendHoverIndex: -1
@@ -134,7 +135,7 @@ Ui.Panel {
   }
 
 
-  function resetView() { dataExpanded = false; chartReadout = ""; expandedInsight = ""; showAllInsights = false; scroll.contentY = 0 }
+  function resetView() { dataExpanded = false; chartReadout = ""; inspectedInsight = null; insightReturnControl = null; showAllInsights = false; scroll.contentY = 0 }
   function refresh() { if (hostWidget) { hostWidget.refresh(true); hostWidget.refreshDetail() } }
   function setLens(lens) { if (hostWidget) hostWidget.setPeriod(lens, 0) }
   function setLensOffset(lens, offset) { if (hostWidget) hostWidget.setPeriod(lens, offset) }
@@ -159,9 +160,14 @@ Ui.Panel {
     focusPeriod(selectedLens)
   }
   function selectActivity(kind, key) { if (kind) activityType = kind; if (hostWidget) hostWidget.setActivity(kind, key) }
-  function inspectInsight(item) {
-    var key = String(item.title || item.label) + String(item.value)
-    expandedInsight = expandedInsight === key ? "" : key
+  function inspectInsight(item, control) {
+    insightReturnControl = control || null
+    inspectedInsight = item
+    Qt.callLater(function() { insightBack.forceActiveFocus(); root.revealControl(insightBack) })
+  }
+  function closeInsight() {
+    inspectedInsight = null
+    Qt.callLater(function() { if (insightReturnControl) insightReturnControl.forceActiveFocus() })
   }
   function maximum(list) {
     var max = 1
@@ -180,11 +186,11 @@ Ui.Panel {
 
   IpcHandler {
     target: root.moduleName
-    function open() { root.open(); root.refresh() }
+    function open() { root.open(); if (root.hostWidget) root.hostWidget.preparePanel() }
     function close() { root.close() }
-    function show() { root.open(); root.refresh() }
+    function show() { root.open(); if (root.hostWidget) root.hostWidget.preparePanel() }
     function hide() { root.close() }
-    function toggle() { root.toggle(); if (root.opened) root.refresh() }
+    function toggle() { root.toggle(); if (root.opened && root.hostWidget) root.hostWidget.preparePanel() }
     function refresh() { root.refresh() }
     function status(): string { return root.statusText || "idle" }
     function period(lens: string, offset: string): void { root.setLensOffset(lens, offset) }
@@ -215,7 +221,8 @@ Ui.Panel {
       focus: true
       Keys.onPressed: function(event) {
         if (event.key === Qt.Key_Escape) {
-          if (root.selected) root.selectActivity("", "")
+          if (root.inspectedInsight) root.closeInsight()
+          else if (root.selected) root.selectActivity("", "")
           else root.close()
           event.accepted = true
         } else if (event.key === Qt.Key_Slash) { search.forceActiveFocus(); event.accepted = true }
@@ -358,12 +365,13 @@ Ui.Panel {
                 Label { Layout.fillWidth: true; text: "Patterns & insights"; font.pixelSize: Style.font.subtitle; font.bold: true }
                 Label {
                   Layout.fillWidth: true
-                  visible: root.insights.length === 0
+                  visible: !root.inspectedInsight && root.insights.length === 0
                   text: root.detailRunning || !root.panelDataLoaded ? "Finding the little things in your day…" : "Your story is still taking shape. A few more days of activity will help recurring habits stand out."
                   color: root.dim
                 }
                 GridLayout {
                   id: insightList
+                  visible: !root.inspectedInsight
                   Layout.fillWidth: true
                   columns: 1
                   columnSpacing: Style.space(24)
@@ -372,109 +380,120 @@ Ui.Panel {
                   Repeater {
                     id: insightItems
                     model: root.insights
-                    ColumnLayout {
+                    Controls.AbstractButton {
                       id: insightButton
+                      objectName: "insightEntry" + index
                       required property var modelData
                       required property int index
-                      readonly property string identityKey: String(modelData.title || modelData.label) + String(modelData.value)
-                      readonly property bool expanded: root.expandedInsight === identityKey
                       readonly property var presentation: Model.insightPresentation(modelData)
-                      readonly property var days: Model.insightDays(modelData)
                       Layout.fillWidth: true
-                      Layout.preferredWidth: 1
                       Layout.minimumWidth: 0
                       Layout.alignment: Qt.AlignTop
                       visible: root.showAllInsights || index < insightList.fittedCount
-                      spacing: Style.space(7)
-                      Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
-                      Label { Layout.fillWidth: true; text: insightButton.presentation.category; color: root.dim; font.pixelSize: Style.font.caption }
-                      Label { Layout.fillWidth: true; text: insightButton.modelData.title || insightButton.modelData.label || "Insight"; wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
-                      Label { Layout.fillWidth: true; text: insightButton.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle; font.bold: true }
-                      ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: Model.routineWindows(insightButton.modelData).length > 0
-                        spacing: Style.space(3)
-                        Rectangle {
-                          Layout.fillWidth: true
-                          implicitHeight: Style.space(7)
-                          radius: height / 2
-                          color: root.fill
-                          Repeater {
-                            model: Model.routineWindows(insightButton.modelData)
-                            Rectangle {
-                              required property var modelData
-                              x: parent.width * modelData.start
-                              width: parent.width * modelData.width
-                              height: parent.height
-                              radius: height / 2
-                              color: root.accent
-                            }
-                          }
-                        }
+                      implicitHeight: insightSummary.implicitHeight + Style.space(20)
+                      padding: Style.space(10)
+                      activeFocusOnTab: true
+                      Accessible.name: modelData.title + ". " + presentation.value + ". " + presentation.frequency
+                      onActiveFocusChanged: if (activeFocus) root.revealControl(insightButton)
+                      onClicked: root.inspectInsight(modelData, insightButton)
+                      scale: down ? 0.99 : 1
+                      Behavior on scale { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
+                      background: Rectangle {
+                        radius: Style.space(4)
+                        color: insightButton.hovered || insightButton.activeFocus ? root.fill : "transparent"
+                        Behavior on color { ColorAnimation { duration: root.motionDuration } }
+                        border.width: insightButton.activeFocus ? 1 : 0
+                        border.color: root.accent
+                        Rectangle { width: parent.width; height: 1; color: root.line }
+                      }
+                      contentItem: ColumnLayout {
+                        id: insightSummary
+                        spacing: Style.space(8)
                         RowLayout {
                           Layout.fillWidth: true
-                          Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
-                          Item { Layout.fillWidth: true }
-                          Label { text: "Noon"; color: root.dim; font.pixelSize: Style.font.caption }
-                          Item { Layout.fillWidth: true }
-                          Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
+                          Label { Layout.fillWidth: true; text: insightButton.modelData.title || "Insight"; wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
+                          Label { text: "›"; color: root.dim; font.pixelSize: Style.font.subtitle }
                         }
-                      }
-                      Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); wrapMode: Text.Wrap; color: root.foreground }
-                      Label { Layout.fillWidth: true; visible: text.length > 0; text: insightButton.presentation.frequency; color: root.dim; font.pixelSize: Style.font.caption }
-                      Flow {
-                        Layout.fillWidth: true
-                        spacing: Style.space(3)
-                        visible: insightButton.days.length > 0
-                        Repeater {
-                          model: insightButton.days
-                          Rectangle {
-                            required property var modelData
-                            width: Style.space(10)
-                            height: Style.space(10)
-                            radius: Style.space(2)
-                            color: modelData.matched ? root.accent : root.fill
-                            border.width: modelData.matched ? 0 : 1
-                            border.color: root.line
-                            HoverHandler { id: dayHover }
-                            Controls.ToolTip.visible: dayHover.hovered
-                            Controls.ToolTip.text: Model.insightDate(modelData.date) + (modelData.matched ? " · Pattern appeared" : " · Pattern did not appear")
-                          }
-                        }
-                      }
-                      Label { Layout.fillWidth: true; visible: text.length > 0; text: Model.insightQualifier(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
-                      Action {
-                        Layout.alignment: Qt.AlignLeft
-                        Layout.maximumWidth: insightButton.width
-                        visible: root.evidenceText(insightButton.modelData).length > 0
-                        text: insightButton.expanded ? "Hide details ↑" : "How we know ↓"
-                        Accessible.name: text + ": " + insightButton.modelData.title
-                        onClicked: root.inspectInsight(insightButton.modelData)
-                      }
-                      Item {
-                        objectName: "evidenceDisclosure"
-                        Layout.fillWidth: true
-                        implicitHeight: insightButton.expanded ? evidenceCopy.implicitHeight : 0
-                        visible: implicitHeight > 0
-                        clip: true
-                        Behavior on implicitHeight { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
-                        Label { id: evidenceCopy; width: parent.width; text: root.evidenceText(insightButton.modelData); wrapMode: Text.Wrap; color: root.dim; font.pixelSize: Style.font.caption }
-                      }
-                      Action {
-                        Layout.maximumWidth: insightButton.width
-                        visible: insightButton.expanded && insightButton.presentation.activityKey !== "" && insightButton.presentation.activityKey !== root.selectedActivityKey
-                        text: "Explore " + insightButton.presentation.activityLabel + " →"
-                        contentItem: Label { text: parent.text; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                        onClicked: root.selectActivity(insightButton.presentation.activityKind, insightButton.presentation.activityKey)
+                        Label { Layout.fillWidth: true; text: insightButton.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle; font.bold: true }
+                        Label { Layout.fillWidth: true; visible: text.length > 0; text: insightButton.presentation.frequency; color: root.accent }
+                        Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); wrapMode: Text.Wrap }
                       }
                     }
                   }
                 }
                 Action {
                   Layout.fillWidth: true
-                  visible: root.insights.length > insightList.fittedCount
+                  visible: !root.inspectedInsight && root.insights.length > insightList.fittedCount
                   text: root.showAllInsights ? "Show fewer insights" : "Show all " + root.insights.length + " insights · " + (root.insights.length - insightList.fittedCount) + " more"
                   onClicked: root.showAllInsights = !root.showAllInsights
+                }
+                ColumnLayout {
+                  id: insightDetail
+                  objectName: "insightDetail"
+                  Layout.fillWidth: true
+                  visible: root.inspectedInsight !== null
+                  readonly property var item: root.inspectedInsight || {}
+                  readonly property var presentation: Model.insightPresentation(item)
+                  spacing: Style.space(12)
+                  opacity: visible ? 1 : 0
+                  Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
+                  Action { id: insightBack; text: "‹ Back to insights"; onClicked: root.closeInsight() }
+                  Label { Layout.fillWidth: true; text: insightDetail.item.title || ""; wrapMode: Text.Wrap; font.pixelSize: Style.font.subtitle; font.bold: true }
+                  Label { Layout.fillWidth: true; text: insightDetail.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle }
+                  Label { Layout.fillWidth: true; text: insightDetail.presentation.frequency; color: root.accent; visible: text.length > 0 }
+                  Label { Layout.fillWidth: true; text: Model.insightExplanation(insightDetail.item); wrapMode: Text.Wrap }
+                  Label { Layout.fillWidth: true; text: "How we know"; font.bold: true }
+                  Label { Layout.fillWidth: true; text: Model.insightQualifier(insightDetail.item); visible: text.length > 0; color: root.dim }
+                  Label { Layout.fillWidth: true; text: root.evidenceText(insightDetail.item) || "No additional evidence is available for this finding."; wrapMode: Text.Wrap; color: root.dim }
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: Model.routineWindows(insightDetail.item).length > 0
+                    spacing: Style.space(4)
+                    Rectangle {
+                      Layout.fillWidth: true
+                      implicitHeight: Style.space(7)
+                      radius: height / 2
+                      color: root.fill
+                      Repeater {
+                        model: Model.routineWindows(insightDetail.item)
+                        Rectangle {
+                          required property var modelData
+                          x: parent.width * modelData.start
+                          width: parent.width * modelData.width
+                          height: parent.height
+                          radius: height / 2
+                          color: root.accent
+                        }
+                      }
+                    }
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
+                      Item { Layout.fillWidth: true }
+                      Label { text: "Noon"; color: root.dim; font.pixelSize: Style.font.caption }
+                      Item { Layout.fillWidth: true }
+                      Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
+                    }
+                  }
+                  Label { text: "Compared days"; font.bold: true; visible: Model.insightDays(insightDetail.item).length > 0 }
+                  Repeater {
+                    model: Model.insightDays(insightDetail.item)
+                    Label {
+                      required property var modelData
+                      Layout.fillWidth: true
+                      text: Model.insightDate(modelData.date) + " · " + (modelData.matched ? "Pattern appeared" : "Pattern did not appear")
+                      wrapMode: Text.Wrap
+                      color: root.dim
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                  Action {
+                    Layout.fillWidth: true
+                    visible: insightDetail.presentation.activityKey !== "" && insightDetail.presentation.activityKey !== root.selectedActivityKey
+                    text: "Explore " + insightDetail.presentation.activityLabel + " →"
+                    contentItem: Label { text: parent.text; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
+                    onClicked: root.selectActivity(insightDetail.presentation.activityKind, insightDetail.presentation.activityKey)
+                  }
                 }
 
               }

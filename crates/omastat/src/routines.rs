@@ -433,6 +433,8 @@ pub(crate) fn detect(
 
 /// Describe only selected findings, so copy changes cannot change ranking or evidence.
 pub(crate) fn humanize(insight: &mut Insight) {
+    let title_variant = crate::insights::wording_variant(insight, "routine-title", 4);
+    let copy_variant = crate::insights::wording_variant(insight, "routine-copy", 5);
     let support = &mut insight.supporting;
     let Some(routine) = &support.routine else {
         return;
@@ -463,24 +465,95 @@ pub(crate) fn humanize(insight: &mut Insight) {
         "days"
     };
     let range = analytics::clock_range(routine.start_minute, routine.end_minute);
-    insight.title = format!("{label}, {when}");
+    let recent = routine.status == "recent";
+    let tentative = insight.confidence == InsightConfidence::Low;
+    insight.title = if tentative {
+        [
+            format!("A possible rhythm with {label}"),
+            format!("{label} might be finding a place"),
+            format!("An early pattern with {label}"),
+            format!("A hint of a {label} routine"),
+        ][title_variant]
+            .clone()
+    } else {
+        [
+            format!("{label}, {when}"),
+            format!("You return to {label} {when}"),
+            format!("{label} keeps showing up {when}"),
+            format!("There's time for {label} {when}"),
+        ][title_variant]
+            .clone()
+    };
     insight.value = format!("{range} · {count} of {sample} {unit}");
     support.hour_label = Some(range.clone());
-    let recent = if routine.status == "recent" {
-        "Lately, you've"
-    } else {
-        "You've"
-    };
     let duration = analytics::duration_words(support.baseline_seconds.unwrap_or(0));
-    insight.explanation = if routine.timing_basis == "visit-start" {
-        format!(
-            "{recent} made a habit of dropping in around this time. A typical visit includes about {duration} of active use."
-        )
+    let lead = if recent {
+        [
+            "Lately, ",
+            "Over the past two weeks, ",
+            "Recently, ",
+            "These past two weeks, ",
+            "In your recent activity, ",
+        ][copy_variant]
     } else {
-        format!(
-            "{recent} settled into a rhythm here: about {duration} of use during this window on a typical matching day."
-        )
+        ["", "Looking back, ", "", "Over this stretch, ", ""][copy_variant]
     };
+    let when = if routine.cadence == "everyday" {
+        format!("in the {part}")
+    } else {
+        when
+    };
+    let frequency = if tentative { "sometimes" } else { "often" };
+    let visit_start = routine.timing_basis == "visit-start";
+    let phrases = if visit_start {
+        [
+            format!(
+                "{lead}you've {frequency} dropped in {when}. A typical visit adds up to about {duration} of use."
+            ),
+            format!(
+                "{lead}your visits have {frequency} begun around this time {when}, with about {duration} of use per visit."
+            ),
+            format!(
+                "{lead}a typical visit starting around this time includes about {duration} of use. You've {frequency} come back {when}."
+            ),
+            format!(
+                "{lead}this has {frequency} been a time to come back {when}. Your usual visit adds up to about {duration}."
+            ),
+            format!(
+                "{lead}visits beginning {when} have {frequency} clustered around this time, with about {duration} of use per visit."
+            ),
+        ]
+    } else {
+        [
+            format!(
+                "{lead}you've {frequency} spent about {duration} here {when}, around this time of day."
+            ),
+            format!(
+                "{lead}this has {frequency} been part of the day {when}. On days it shows up, about {duration} goes here during this window."
+            ),
+            format!(
+                "{lead}about {duration} of use falls in this part of the day when the pattern appears. You've {frequency} found your way here {when}."
+            ),
+            format!("{lead}about {duration} here has {frequency} been part of the picture {when}."),
+            format!(
+                "{lead}a typical day with this pattern includes about {duration} here {when}, around this time."
+            ),
+        ]
+    };
+    insight.explanation = phrases[copy_variant].clone();
+    if let Some(first) = insight.explanation.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    if tentative {
+        insight
+            .explanation
+            .push_str(" This may be a pattern taking shape.");
+    }
+    if visit_start && support.baseline_seconds.unwrap_or(0) <= 600 {
+        insight
+            .explanation
+            .push_str(" These tend to be brief visits.");
+    }
     if let Some((start, end)) = routine.visit_start_window {
         insight.explanation.push_str(&format!(
             " You tend to start between {}.",
@@ -532,16 +605,65 @@ mod tests {
         let routine = insight.supporting.routine.clone();
         let dates = insight.supporting.matching_dates.clone();
         humanize(&mut insight);
-        assert_eq!(insight.title, "Game, most evenings");
+        assert!(insight.title.contains("Game"));
+        assert!(insight.title.contains("most evenings"));
         assert!(insight.value.contains("PM"));
         assert!(insight.value.contains("14 of 14 days"));
-        assert!(insight.explanation.starts_with("Lately, you've"));
+        assert!(insight.explanation.contains("evenings"));
         assert_eq!(insight.evidence, evidence);
         assert_eq!(insight.supporting.routine, routine);
         assert_eq!(insight.supporting.matching_dates, dates);
         for jargon in ["foreground", "eligible", "baseline", "recurrence", "median"] {
             assert!(!insight.explanation.contains(jargon));
         }
+    }
+
+    #[test]
+    fn routine_wording_varies_without_changing_or_randomizing_facts() {
+        let times = (42..56).map(|d| (d, 1230, 30)).collect::<Vec<_>>();
+        let mut original = detect_fixture(&times).remove(0);
+        original.supporting.baseline_seconds = Some(1800);
+        let mut titles = std::collections::BTreeSet::new();
+        let mut explanations = std::collections::BTreeSet::new();
+        for n in 0..32 {
+            let mut insight = original.clone();
+            insight.supporting.activity_key = Some(format!("activity-{n}"));
+            humanize(&mut insight);
+            let rendered = insight.clone();
+            humanize(&mut insight);
+            assert_eq!(rendered, insight);
+            assert_eq!(insight.evidence, original.evidence);
+            assert_eq!(
+                insight.supporting.matching_dates,
+                original.supporting.matching_dates
+            );
+            assert_eq!(insight.supporting.routine, original.supporting.routine);
+            assert!(insight.explanation.contains("30 minutes"));
+            titles.insert(insight.title);
+            explanations.insert(insight.explanation);
+        }
+        assert_eq!(titles.len(), 4);
+        assert_eq!(explanations.len(), 5);
+    }
+
+    #[test]
+    fn tentative_short_visits_keep_their_qualifications_and_cadence() {
+        let times = (42..56).map(|d| (d, 1230, 30)).collect::<Vec<_>>();
+        let mut insight = detect_fixture(&times).remove(0);
+        insight.confidence = InsightConfidence::Low;
+        insight.supporting.baseline_seconds = Some(300);
+        insight.supporting.weekday_label = Some("Monday".into());
+        insight.supporting.weekday = Some(0);
+        let routine = insight.supporting.routine.as_mut().unwrap();
+        routine.cadence = "weekly".into();
+        routine.timing_basis = "visit-start".into();
+        routine.visit_start_window = None;
+        humanize(&mut insight);
+        assert!(insight.explanation.contains("Monday evenings"));
+        assert!(insight.explanation.contains("5 minutes"));
+        assert!(insight.explanation.contains("may be a pattern"));
+        assert!(insight.explanation.contains("brief visits"));
+        assert!(!insight.explanation.contains("often"));
     }
 
     #[test]

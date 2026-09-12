@@ -9,7 +9,7 @@ and which habits keep showing up. No timers, accounts, or cloud service.
 - Browse a day, week, month, year, or your full history.
 - Select an app or website to see its usage, visits, and patterns.
 - Click a calendar day or chart point to open that period. Your selection follows you.
-- Open **How we know** to see the evidence behind a pattern.
+- Click an insight to see **How we know**, then return to the observations.
 
 <details>
 <summary>Month and day views</summary>

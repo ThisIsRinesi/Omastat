@@ -1072,12 +1072,10 @@ function insightQualifier(item) {
 
 function insightPresentation(item) {
   var support = item.supporting || {}, routine = support.routine
-  var categories = { patterns: "Your rhythm", "focus-quality": "How you spend your time", apps: "In your apps" }
   var count = Number(support.occurrence_count || 0), total = Number(support.eligible_count || 0)
   return {
-    category: routine ? "A familiar habit" : (categories[item.category] || "Worth a look"),
     value: routine && support.hour_label ? String(support.hour_label) : String(item.value || ""),
-    frequency: routine && total > 0 ? count + " of " + total + " tracked " + (support.weekday !== undefined && support.weekday !== null ? "weeks" : "days") + " · " + Math.round(count / total * 100) + "% of the time" : "",
+    frequency: routine && total > 0 ? Math.round(count / total * 100) + "% of tracked " + (support.weekday_label ? support.weekday_label + "s" : "days") : "",
     activityKey: String(support.activity_key || support.app_class || ""),
     activityKind: String(support.activity_kind || "app"),
     activityLabel: String(support.app_label || support.activity_key || support.app_class || "activity")

@@ -292,7 +292,141 @@ pub fn analyze(input: AnalysisInput<'_>) -> Vec<Insight> {
             insight.confidence = confidence(points, insight.evidence.minimum_data_points);
         }
     }
+    for insight in &mut out {
+        humanize_observation(insight);
+    }
     out
+}
+
+// Keep a finding's wording stable across refreshes and overview/detail requests.
+pub(crate) fn wording_variant(insight: &Insight, salt: &str, count: usize) -> usize {
+    let support = &insight.supporting;
+    let key = format!(
+        "{:?}|{}|{}|{}|{}|{}|{}",
+        insight.kind,
+        support
+            .activity_key
+            .as_deref()
+            .or(support.app_class.as_deref())
+            .unwrap_or(""),
+        support.period_start_date.as_deref().unwrap_or(""),
+        support.period_end_date.as_deref().unwrap_or(""),
+        support.weekday.unwrap_or(7),
+        support.hour.unwrap_or(24),
+        salt,
+    );
+    key.bytes().fold(2166136261u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16777619)
+    }) as usize
+        % count
+}
+
+fn humanize_observation(insight: &mut Insight) {
+    if insight.kind == InsightKind::DeepWorkBlocks {
+        let support = &insight.supporting;
+        let longest = analytics::duration_words(support.longest_seconds.unwrap_or(0));
+        let typical = analytics::duration_words(support.median_seconds.unwrap_or(0));
+        let threshold =
+            analytics::duration_words(support.threshold_seconds.unwrap_or(DEEP_BLOCK_SECONDS));
+        let phrases = if support.block_count.unwrap_or(0) == 0 {
+            [
+                format!(
+                    "Your time came in shorter stretches. The longest with one app was {longest}, below the {threshold} mark."
+                ),
+                format!(
+                    "No single-app stretch reached {threshold} this time. The longest lasted {longest}."
+                ),
+                format!(
+                    "A period of shorter visits: your longest stretch with one app was {longest}. None reached {threshold}."
+                ),
+            ]
+        } else {
+            [
+                format!(
+                    "You had stretches of at least {threshold} with one app. The longest lasted {longest}; a typical stretch was {typical}."
+                ),
+                format!(
+                    "Your longest stay with one app reached {longest}. The total above brings together stretches lasting at least {threshold}."
+                ),
+                format!(
+                    "Some visits had room to stretch out: at least {threshold} with one app, and {longest} for the longest. A typical stretch was {typical}."
+                ),
+            ]
+        };
+        insight.explanation = phrases[wording_variant(insight, "stretches", phrases.len())].clone();
+        return;
+    }
+    if insight.kind == InsightKind::AppSwitchRate {
+        let support = &insight.supporting;
+        let rate = format_rate(support.rate_per_hour.unwrap_or(0.0));
+        let phrases = if support.switch_count.unwrap_or(0) == 0 {
+            [
+                "No direct switches between apps were recorded in this period.".into(),
+                "There were no recorded moves straight from one app to another.".into(),
+                "Your recorded activity had no direct app-to-app switches this time.".into(),
+            ]
+        } else {
+            [
+                format!(
+                    "You moved between apps about {rate} times per hour of use. Breaks between sessions are left out."
+                ),
+                format!(
+                    "Your app time included about {rate} changes of app an hour, counting direct switches rather than returns after a break."
+                ),
+                format!(
+                    "Across your active time, you changed apps about {rate} times an hour. Time away doesn't add to the count."
+                ),
+            ]
+        };
+        insight.explanation = phrases[wording_variant(insight, "switches", phrases.len())].clone();
+        return;
+    }
+    let phrases: &[&str] = match insight.kind {
+        InsightKind::TopApp => &[
+            "Of all the apps you used, this one got the biggest slice of your time.",
+            "This was the app you spent the most time with in this period.",
+            "This app was at the top of your list for time spent in this period.",
+            "This app took the largest share of your time across the period.",
+        ],
+        InsightKind::BestDay => &[
+            "This was your biggest app day in the period.",
+            "You spent more time in apps on this day than on any other in the period.",
+            "Looking across the period, this day had the most app time.",
+        ],
+        InsightKind::WorstActiveDay => &[
+            "Among days when you used apps, this one had the lightest total.",
+            "You logged less app time here than on the other active days in this period.",
+            "A lighter day on screen: this was the smallest total among your active days.",
+        ],
+        InsightKind::PeakFocusHour => &[
+            "Across this period, more of your app time landed in this hour than any other.",
+            "This hour was the busiest part of your app day, adding up the days in this period.",
+            "Your activity leaned toward this time of day. It had the highest combined app use.",
+            "This was your busiest hour on the clock across the period.",
+        ],
+        InsightKind::PeakFocusWeekday => &[
+            "This day of the week accounted for the most app time in the period.",
+            "Your app time leaned toward this weekday, with the largest total across the period.",
+            "Add up the days in this period and this weekday comes out busiest.",
+        ],
+        InsightKind::FragmentedApp => &[
+            "You came back to this app most often relative to the time you spent in it.",
+            "This was your most frequent return stop for the amount of app time it took up.",
+            "You dipped in and out of this app more often per hour of use than the others.",
+        ],
+        InsightKind::StrongestWorkspace => &[
+            "You spent more app time on this workspace than on any other.",
+            "This workspace was home to the largest slice of your app time.",
+            "This workspace had the highest total, ahead of the others you used.",
+        ],
+        InsightKind::AppAnomaly => &[
+            "At least three quarters of your app time went here.",
+            "One app dominated this period, taking at least 75% of your app time.",
+            "Your time was concentrated here: this app accounted for three quarters or more.",
+        ],
+        _ => return,
+    };
+    insight.explanation = phrases[wording_variant(insight, "observation", phrases.len())].into();
 }
 
 const DEEP_BLOCK_SECONDS: i64 = analytics::DEEP_BLOCK_SECONDS;

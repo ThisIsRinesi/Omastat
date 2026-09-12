@@ -74,6 +74,14 @@ The selected app or website follows you into the new period. Historical views
 provide a Today / This week / This month / This year button to return to the
 current period. Blank cells and future dates cannot be opened.
 
+The widget preloads the current period shortly after its lightweight bar update
+when no cached report is available. Recent reports and activity details are
+reused when navigating back, with up to 12 entries in each in-memory cache.
+Current-period data refreshes after the configured bar refresh interval;
+historical results are reused for up to five minutes. A cached result stays
+visible during refresh within that window. Refresh explicitly requests new data,
+and caches from a previous local date are not reused.
+
 ## Data Export
 
 Export raw intervals, aggregate rows, or both:
@@ -244,6 +252,22 @@ resume signal closes the sleep interval and rebuilds live Hyprland state from a
 fresh snapshot.
 
 ## Activity details
+
+### Observation wording
+
+Insights describe the rhythms of everyday app use: familiar times, brief visits,
+longer stretches, and where your time went. The main list leads with the
+observation and readable numbers, including percentages. Click a finding for
+the dates, tracking coverage, and confidence behind it.
+
+Wording varies with the finding, activity, cadence, time of day, and history.
+The same finding keeps its wording across refreshes and overview/detail views;
+phrases are selected locally, without random changes or a cloud service. Recent
+patterns and early hints use qualified language. App time alone does not tell
+us whether you were working, relaxing, enjoying yourself, or being productive,
+so observations do not make those claims or treat more screen time as better.
+
+### Queries
 
 ```bash
 omastat activity-detail --lens week --app zen
