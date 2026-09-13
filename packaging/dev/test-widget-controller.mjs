@@ -14,6 +14,7 @@ function controller() {
     Qt: { callLater() {}, formatTime: () => "12:00:00" },
     reportProcess: { running: false },
     detailProcess: { running: false },
+    preloadTimer: { restart() {} },
     panelLoader: { item: null },
     opened: false,
     glyph: "timer",
@@ -191,3 +192,80 @@ for (const kind of ["app", "domain"]) {
   assert.equal(c.selectedOffset, 0);
 }
 console.log("Chart drilldown controller checks passed");
+
+{
+  const c = controller();
+  c.refresh(true);
+  c.refresh(true);
+  assert.equal(c.refreshQueued, false, "opening during the same full query does not queue another");
+  deliver(c, payload(c));
+  c.preparePanel();
+  assert.equal(c.refreshRunning, false, "fresh preloaded report opens without a query");
+  c.setPeriod("week", 0);
+  deliver(c, payload(c, 1200));
+  c.setPeriod("day", 0);
+  assert.equal(c.totalFocused, 600);
+  assert.equal(c.refreshRunning, false, "returning to a fresh tab uses the cache");
+  c.reportsByKey[c.currentKey].updatedAt -= 61000;
+  c.preparePanel();
+  assert.equal(c.totalFocused, 600, "stale cached report remains visible while refreshing");
+  assert.equal(c.refreshRunning, true);
+}
+{
+  const c = controller();
+  c.preloadPanel();
+  assert.equal(c.loadingFullReport, true);
+  c.preparePanel();
+  assert.equal(c.refreshQueued, false, "opening joins an ongoing preload");
+  deliver(c, payload(c));
+  c.preloadPanel();
+  assert.equal(c.refreshRunning, false, "a warm cache does not keep preloading");
+}
+{
+  const c = controller();
+  c.refresh(true);
+  c.setPeriod("week", 0);
+  c.setPeriod("day", 0);
+  deliver(c, payload(c));
+  assert.equal(c.refreshRunning, false, "returning to an in-flight period cancels obsolete queued work");
+}
+{
+  const c = controller();
+  c.setActivity("app", "editor");
+  c.refreshDetail(false);
+  assert.equal(c.detailQueued, false, "report application does not duplicate an activity request");
+  c.setActivity("domain", "example.com");
+  const editorKey = c.loadingDetailKey;
+  deliverDetail(c, detailPayload("editor"));
+  assert.ok(c.detailCache[editorKey], "superseded successful results still warm the cache");
+  deliverDetail(c, detailPayload("example.com"));
+  c.setActivity("app", "editor");
+  assert.equal(c.activityDetail.activities[0].key, "editor");
+  assert.equal(c.detailRunning, false, "fresh activity detail requires no second query");
+  c.detailCache[c.detailKey()].at -= 61000;
+  c.refreshDetail(false);
+  assert.equal(c.detailRunning, true, "live activity detail refreshes after its freshness window");
+  assert.equal(c.detailProcess.command[1], "-c", "activity queries avoid login-shell startup");
+}
+{
+  const c = controller();
+  c.setActivity("app", "editor");
+  c.loadingDetailDate = "2000-01-01";
+  deliverDetail(c, detailPayload("editor"));
+  assert.equal(Object.keys(c.detailCache).length, 0, "midnight-crossing detail is not cached under yesterday's key");
+  assert.equal(c.activityDetail, null);
+}
+console.log("Cache reuse, preloading, and request deduplication checks passed");
+{
+  const c = controller();
+  c.refresh(true);
+  deliver(c, payload(c));
+  c.setPeriod("week", 0);
+  c.setPeriod("month", 0);
+  assert.equal(c.refreshQueued, true);
+  c.setPeriod("day", 0);
+  assert.equal(c.refreshQueued, false, "returning to a cached tab cancels queued navigation");
+  deliver(c, payload(c, 1800));
+  assert.equal(c.refreshRunning, false);
+  assert.equal(c.totalFocused, 600, "background result cannot replace the cached selected tab");
+}

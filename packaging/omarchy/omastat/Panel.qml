@@ -48,10 +48,14 @@ Ui.Panel {
   property string activityType: "app"
   property bool showAllActivities: false
   property bool showAllInsights: false
-  property string expandedInsight: ""
-  property string pendingEvidenceKey: ""
+  property var inspectedInsight: null
+  property var insightReturnControl: null
   property bool dataExpanded: false
   property string chartReadout: ""
+  property int legendHoverIndex: -1
+  readonly property int motionDuration: root.setting("reduceMotion", false) ? 0 : 150
+  onCompositionChanged: legendHoverIndex = -1
+  onShownDailyChanged: if (panelDataLoaded && motionDuration > 0) dataReveal.restart()
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color accent: Color.accent
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.75)
@@ -80,9 +84,9 @@ Ui.Panel {
   }
   readonly property string baselineText: detail.baseline_start
     ? Model.insightDateRange(detail.baseline_start, detail.baseline_end) : "Up to eight weeks of history"
-  onSelectedLensChanged: { pendingEvidenceKey = ""; resetView() }
-  onSelectedOffsetChanged: { pendingEvidenceKey = ""; resetView() }
-  onSelectedActivityKeyChanged: { var pending = pendingEvidenceKey; resetView(); expandedInsight = pending; pendingEvidenceKey = "" }
+  onSelectedLensChanged: resetView()
+  onSelectedOffsetChanged: resetView()
+  onSelectedActivityKeyChanged: resetView()
 
   readonly property color faint: dim
   readonly property color noFill: "transparent"
@@ -131,7 +135,7 @@ Ui.Panel {
   }
 
 
-  function resetView() { dataExpanded = false; chartReadout = ""; expandedInsight = ""; showAllInsights = false; scroll.contentY = 0 }
+  function resetView() { dataExpanded = false; chartReadout = ""; inspectedInsight = null; insightReturnControl = null; showAllInsights = false; scroll.contentY = 0 }
   function refresh() { if (hostWidget) { hostWidget.refresh(true); hostWidget.refreshDetail() } }
   function setLens(lens) { if (hostWidget) hostWidget.setPeriod(lens, 0) }
   function setLensOffset(lens, offset) { if (hostWidget) hostWidget.setPeriod(lens, offset) }
@@ -156,12 +160,14 @@ Ui.Panel {
     focusPeriod(selectedLens)
   }
   function selectActivity(kind, key) { if (kind) activityType = kind; if (hostWidget) hostWidget.setActivity(kind, key) }
-  function inspectInsight(item) {
-    var key = String(item.title || item.label) + String(item.value)
-    expandedInsight = expandedInsight === key ? "" : key
-    var support = item.supporting || {}
-    var activityKey = String(support.activity_key || support.app_class || "")
-    if (activityKey && activityKey !== selectedActivityKey) { pendingEvidenceKey = expandedInsight; selectActivity(String(support.activity_kind || "app"), activityKey) }
+  function inspectInsight(item, control) {
+    insightReturnControl = control || null
+    inspectedInsight = item
+    Qt.callLater(function() { insightBack.forceActiveFocus(); root.revealControl(insightBack) })
+  }
+  function closeInsight() {
+    inspectedInsight = null
+    Qt.callLater(function() { if (insightReturnControl) insightReturnControl.forceActiveFocus() })
   }
   function maximum(list) {
     var max = 1
@@ -180,11 +186,11 @@ Ui.Panel {
 
   IpcHandler {
     target: root.moduleName
-    function open() { root.open(); root.refresh() }
+    function open() { root.open(); if (root.hostWidget) root.hostWidget.preparePanel() }
     function close() { root.close() }
-    function show() { root.open(); root.refresh() }
+    function show() { root.open(); if (root.hostWidget) root.hostWidget.preparePanel() }
     function hide() { root.close() }
-    function toggle() { root.toggle(); if (root.opened) root.refresh() }
+    function toggle() { root.toggle(); if (root.opened && root.hostWidget) root.hostWidget.preparePanel() }
     function refresh() { root.refresh() }
     function status(): string { return root.statusText || "idle" }
     function period(lens: string, offset: string): void { root.setLensOffset(lens, offset) }
@@ -215,7 +221,8 @@ Ui.Panel {
       focus: true
       Keys.onPressed: function(event) {
         if (event.key === Qt.Key_Escape) {
-          if (root.selected) root.selectActivity("", "")
+          if (root.inspectedInsight) root.closeInsight()
+          else if (root.selected) root.selectActivity("", "")
           else root.close()
           event.accepted = true
         } else if (event.key === Qt.Key_Slash) { search.forceActiveFocus(); event.accepted = true }
@@ -282,6 +289,7 @@ Ui.Panel {
                 background: Rectangle {
                   radius: Style.space(4)
                   color: lensButton.checked ? root.withAlpha(root.accent, 0.16) : root.withAlpha(root.foreground, lensButton.hovered ? 0.12 : 0.04)
+                  Behavior on color { ColorAnimation { duration: root.motionDuration } }
                   border.width: 1
                   border.color: lensButton.checked || lensButton.activeFocus ? root.accent : root.line
                   Rectangle {
@@ -314,6 +322,7 @@ Ui.Panel {
           Controls.ScrollBar.vertical: Controls.ScrollBar { }
           ColumnLayout {
             id: body
+            NumberAnimation { id: dataReveal; target: body; property: "opacity"; from: 0.88; to: 1; duration: root.motionDuration; easing.type: Easing.OutCubic }
             width: scroll.width - Style.space(12)
             spacing: Style.space(10)
             RowLayout {
@@ -344,19 +353,165 @@ Ui.Panel {
               columns: root.wide ? 2 : 1
               columnSpacing: Style.space(12)
               rowSpacing: Style.space(12)
+              ColumnLayout {
+                id: insightsSection
+                Layout.row: root.wide ? 0 : 2
+                Layout.column: root.wide ? 1 : 0
+                Layout.rowSpan: root.wide ? 3 : 1
+                Layout.fillWidth: true
+                Layout.preferredWidth: root.wide ? body.width * 0.4 : body.width
+                Layout.alignment: Qt.AlignTop
+                spacing: Style.space(14)
+                Label { Layout.fillWidth: true; text: "Patterns & insights"; font.pixelSize: Style.font.subtitle; font.bold: true }
+                Label {
+                  Layout.fillWidth: true
+                  visible: !root.inspectedInsight && root.insights.length === 0
+                  text: root.detailRunning || !root.panelDataLoaded ? "Finding the little things in your day…" : "Your story is still taking shape. A few more days of activity will help recurring habits stand out."
+                  color: root.dim
+                }
+                GridLayout {
+                  id: insightList
+                  visible: !root.inspectedInsight
+                  Layout.fillWidth: true
+                  columns: 1
+                  columnSpacing: Style.space(24)
+                  rowSpacing: Style.space(20)
+                  readonly property int fittedCount: root.wide ? 4 : 2
+                  Repeater {
+                    id: insightItems
+                    model: root.insights
+                    Controls.AbstractButton {
+                      id: insightButton
+                      objectName: "insightEntry" + index
+                      required property var modelData
+                      required property int index
+                      readonly property var presentation: Model.insightPresentation(modelData)
+                      Layout.fillWidth: true
+                      Layout.minimumWidth: 0
+                      Layout.alignment: Qt.AlignTop
+                      visible: root.showAllInsights || index < insightList.fittedCount
+                      implicitHeight: insightSummary.implicitHeight + Style.space(20)
+                      padding: Style.space(10)
+                      activeFocusOnTab: true
+                      Accessible.name: modelData.title + ". " + presentation.value + ". " + presentation.frequency
+                      onActiveFocusChanged: if (activeFocus) root.revealControl(insightButton)
+                      onClicked: root.inspectInsight(modelData, insightButton)
+                      scale: down ? 0.99 : 1
+                      Behavior on scale { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
+                      background: Rectangle {
+                        radius: Style.space(4)
+                        color: insightButton.hovered || insightButton.activeFocus ? root.fill : "transparent"
+                        Behavior on color { ColorAnimation { duration: root.motionDuration } }
+                        border.width: insightButton.activeFocus ? 1 : 0
+                        border.color: root.accent
+                        Rectangle { width: parent.width; height: 1; color: root.line }
+                      }
+                      contentItem: ColumnLayout {
+                        id: insightSummary
+                        spacing: Style.space(8)
+                        RowLayout {
+                          Layout.fillWidth: true
+                          Label { Layout.fillWidth: true; text: insightButton.modelData.title || "Insight"; wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
+                          Label { text: "›"; color: root.dim; font.pixelSize: Style.font.subtitle }
+                        }
+                        Label { Layout.fillWidth: true; text: insightButton.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle; font.bold: true }
+                        Label { Layout.fillWidth: true; visible: text.length > 0; text: insightButton.presentation.frequency; color: root.accent }
+                        Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); wrapMode: Text.Wrap }
+                      }
+                    }
+                  }
+                }
+                Action {
+                  Layout.fillWidth: true
+                  visible: !root.inspectedInsight && root.insights.length > insightList.fittedCount
+                  text: root.showAllInsights ? "Show fewer insights" : "Show all " + root.insights.length + " insights · " + (root.insights.length - insightList.fittedCount) + " more"
+                  onClicked: root.showAllInsights = !root.showAllInsights
+                }
+                ColumnLayout {
+                  id: insightDetail
+                  objectName: "insightDetail"
+                  Layout.fillWidth: true
+                  visible: root.inspectedInsight !== null
+                  readonly property var item: root.inspectedInsight || {}
+                  readonly property var presentation: Model.insightPresentation(item)
+                  spacing: Style.space(12)
+                  opacity: visible ? 1 : 0
+                  Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
+                  Action { id: insightBack; text: "‹ Back to insights"; onClicked: root.closeInsight() }
+                  Label { Layout.fillWidth: true; text: insightDetail.item.title || ""; wrapMode: Text.Wrap; font.pixelSize: Style.font.subtitle; font.bold: true }
+                  Label { Layout.fillWidth: true; text: insightDetail.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle }
+                  Label { Layout.fillWidth: true; text: insightDetail.presentation.frequency; color: root.accent; visible: text.length > 0 }
+                  Label { Layout.fillWidth: true; text: Model.insightExplanation(insightDetail.item); wrapMode: Text.Wrap }
+                  Label { Layout.fillWidth: true; text: "How we know"; font.bold: true }
+                  Label { Layout.fillWidth: true; text: Model.insightQualifier(insightDetail.item); visible: text.length > 0; color: root.dim }
+                  Label { Layout.fillWidth: true; text: root.evidenceText(insightDetail.item) || "No additional evidence is available for this finding."; wrapMode: Text.Wrap; color: root.dim }
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: Model.routineWindows(insightDetail.item).length > 0
+                    spacing: Style.space(4)
+                    Rectangle {
+                      Layout.fillWidth: true
+                      implicitHeight: Style.space(7)
+                      radius: height / 2
+                      color: root.fill
+                      Repeater {
+                        model: Model.routineWindows(insightDetail.item)
+                        Rectangle {
+                          required property var modelData
+                          x: parent.width * modelData.start
+                          width: parent.width * modelData.width
+                          height: parent.height
+                          radius: height / 2
+                          color: root.accent
+                        }
+                      }
+                    }
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
+                      Item { Layout.fillWidth: true }
+                      Label { text: "Noon"; color: root.dim; font.pixelSize: Style.font.caption }
+                      Item { Layout.fillWidth: true }
+                      Label { text: "Midnight"; color: root.dim; font.pixelSize: Style.font.caption }
+                    }
+                  }
+                  Label { text: "Compared days"; font.bold: true; visible: Model.insightDays(insightDetail.item).length > 0 }
+                  Repeater {
+                    model: Model.insightDays(insightDetail.item)
+                    Label {
+                      required property var modelData
+                      Layout.fillWidth: true
+                      text: Model.insightDate(modelData.date) + " · " + (modelData.matched ? "Pattern appeared" : "Pattern did not appear")
+                      wrapMode: Text.Wrap
+                      color: root.dim
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                  Action {
+                    Layout.fillWidth: true
+                    visible: insightDetail.presentation.activityKey !== "" && insightDetail.presentation.activityKey !== root.selectedActivityKey
+                    text: "Explore " + insightDetail.presentation.activityLabel + " →"
+                    contentItem: Label { text: parent.text; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
+                    onClicked: root.selectActivity(insightDetail.presentation.activityKind, insightDetail.presentation.activityKey)
+                  }
+                }
+
+              }
               Section {
                 title: root.activityType === "app" ? "Time by app" : "Time by website"
                 Layout.row: 0
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.64) : body.width
+                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
                   columns: width >= Style.space(440) ? 2 : 1
                   columnSpacing: Style.space(16)
                   AppDonut {
+                    id: compositionDonut
+                    objectName: "compositionChart"
                     Layout.fillWidth: true
                     Layout.preferredWidth: Style.space(170)
                     Layout.maximumWidth: Style.space(170)
@@ -364,7 +519,7 @@ Ui.Panel {
                     apps: root.composition
                     colors: root.compositionColors
                     totalSeconds: root.composition.reduce(function(n, a) { return n + a.seconds }, 0)
-                    highlightedIndex: root.composition.findIndex(function(a) { return a.kind === root.selectedActivityKind && a.app_class === root.selectedActivityKey })
+                    highlightedIndex: root.legendHoverIndex >= 0 ? root.legendHoverIndex : root.composition.findIndex(function(a) { return a.kind === root.selectedActivityKind && a.app_class === root.selectedActivityKey })
                     onActivatedSlice: function(index) { var a = root.composition[index]; root.selectActivity(a.kind, a.app_class) }
                   }
                   ColumnLayout {
@@ -376,6 +531,9 @@ Ui.Panel {
                       Action {
                         required property var modelData
                         required property int index
+                        onHoveredChanged: { if (hovered) root.legendHoverIndex = index; else if (root.legendHoverIndex === index) root.legendHoverIndex = -1 }
+                        opacity: compositionDonut.activeIndex < 0 || compositionDonut.activeIndex === index ? 1 : 0.5
+                        Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
                         Layout.fillWidth: true
                         implicitHeight: Style.space(28)
                         text: "●  " + modelData.app + " · " + Model.fmt(modelData.seconds) + " · " + modelData.pct + "%"
@@ -399,87 +557,12 @@ Ui.Panel {
                 Label { Layout.fillWidth: true; text: "Overall period · Select an activity to update its charts"; color: root.dim; font.pixelSize: Style.font.caption }
               }
               Section {
-                id: insightsSection
-                title: "Patterns & insights"
-                Layout.row: root.wide ? 0 : 2
-                Layout.column: root.wide ? 1 : 0
-                Layout.rowSpan: root.wide ? 3 : 1
-                Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.36) : body.width
-                Layout.alignment: Qt.AlignTop
-                Label {
-                  Layout.fillWidth: true
-                  visible: root.insights.length === 0
-                  text: "Still getting to know your habits. We look for things you do on several days, or return to week after week."
-                  color: root.dim
-                }
-                Column {
-                  id: insightList
-                  Layout.fillWidth: true
-                  spacing: Style.space(8)
-                  // Measure every explanation at its actual width. Expanded evidence
-                  // does not change the default list, so opening it never hides peers.
-                  readonly property int fittedCount: {
-                    var heights = []
-                    for (var i = 0; i < insightItems.count; i++) {
-                      var item = insightItems.itemAt(i)
-                      if (!item) return Math.min(6, root.insights.length)
-                      heights.push(item.collapsedHeight)
-                    }
-                    var available = root.wide ? scroll.height - (insightsSection.y + insightsSection.parent.y) - Style.space(90) : Style.space(470)
-                    return Model.fittingInsightCount(heights, available, spacing)
-                  }
-                  Repeater {
-                    id: insightItems
-                    model: root.insights
-                    Controls.AbstractButton {
-                      id: insightButton
-                      required property var modelData
-                      required property int index
-                      readonly property string identityKey: String(modelData.title || modelData.label) + String(modelData.value)
-                      readonly property bool expanded: root.expandedInsight === identityKey
-                      width: insightList.width
-                      height: implicitHeight
-                      visible: root.showAllInsights || index < insightList.fittedCount
-                      readonly property real collapsedHeight: implicitHeight - (expanded ? evidenceLabel.implicitHeight + insightBody.spacing : 0)
-                      implicitHeight: insightBody.implicitHeight + Style.space(16)
-                      activeFocusOnTab: true
-                      onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
-                      Accessible.name: String(modelData.title || modelData.label) + ". " + modelData.value + ". See how we know"
-                      onClicked: root.inspectInsight(modelData)
-                      leftPadding: Style.space(8)
-                      rightPadding: Style.space(8)
-                      topPadding: Style.space(8)
-                      bottomPadding: Style.space(8)
-                      background: Rectangle { color: insightButton.hovered ? root.fill : "transparent"; radius: Style.space(4); border.width: insightButton.activeFocus ? 1 : 0; border.color: root.accent }
-                      contentItem: ColumnLayout {
-                        id: insightBody
-                        spacing: Style.space(5)
-                        Label { Layout.fillWidth: true; text: insightButton.modelData.title || insightButton.modelData.label || "Insight"; font.bold: true }
-                        Label { Layout.fillWidth: true; text: insightButton.modelData.value || ""; color: root.accent }
-                        Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
-                        Label { visible: Model.insightQualifier(insightButton.modelData).length > 0; text: Model.insightQualifier(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
-                        Label { id: evidenceLabel; Layout.fillWidth: true; visible: insightButton.expanded; text: root.evidenceText(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
-                        Label { visible: root.evidenceText(insightButton.modelData).length > 0; text: insightButton.expanded ? "Hide details ↑" : "How we know →"; color: root.dim; font.pixelSize: Style.font.caption }
-                      }
-                    }
-                  }
-                }
-                Action {
-                  Layout.fillWidth: true
-                  visible: root.insights.length > insightList.fittedCount
-                  text: root.showAllInsights ? "Show fewer insights" : "Show all " + root.insights.length + " insights · " + (root.insights.length - insightList.fittedCount) + " more"
-                  onClicked: root.showAllInsights = !root.showAllInsights
-                }
-
-              }
-              Section {
                 title: "Your rhythm"
                 Layout.row: 1
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.64) : body.width
+                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
@@ -515,6 +598,7 @@ Ui.Panel {
                   }
                 }
                 FocusTrendLine {
+                  objectName: "activityTrend"
                   Layout.fillWidth: true
                   Layout.preferredHeight: implicitHeight
                   visible: root.selectedLens !== "day"
@@ -557,7 +641,7 @@ Ui.Panel {
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * (0.64) : body.width
+                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
                 Layout.alignment: Qt.AlignTop
                 RowLayout {
                   Layout.fillWidth: true
@@ -684,8 +768,10 @@ Ui.Panel {
     onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
     Accessible.name: text
     opacity: enabled ? 1 : 0.4
+    scale: down ? 0.98 : 1
+    Behavior on scale { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
     contentItem: Label { text: action.text; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: action.checked }
-    background: Rectangle { radius: Style.space(4); color: action.checked || action.hovered ? root.fill : "transparent"; border.width: action.checked || action.activeFocus ? 1 : 0; border.color: action.activeFocus ? root.accent : root.line }
+    background: Rectangle { radius: Style.space(4); color: action.checked || action.hovered ? root.fill : "transparent"; Behavior on color { ColorAnimation { duration: root.motionDuration } } border.width: action.checked || action.activeFocus ? 1 : 0; border.color: action.activeFocus ? root.accent : root.line }
   }
   component Metric: ColumnLayout {
     property string label: ""
@@ -821,12 +907,16 @@ Ui.Panel {
     readonly property var segments: Model.arcSegments(apps)
     readonly property int activeIndex: hoveredIndex >= 0 ? hoveredIndex : highlightedIndex
     readonly property bool hasActiveApp: activeIndex >= 0 && activeIndex < apps.length
-    readonly property string centerLabel: hasActiveApp ? root.formatDuration(Number((apps[activeIndex] || {}).seconds || 0)) : root.formatDuration(totalSeconds)
+    readonly property string centerLabel: hasActiveApp ? root.formatDuration(Number((apps[activeIndex] || {}).seconds || 0)) + " · " + Math.round(Number((apps[activeIndex] || {}).seconds || 0) / Math.max(1, totalSeconds) * 100) + "%" : root.formatDuration(totalSeconds)
     readonly property string centerDetail: hasActiveApp ? String((apps[activeIndex] || {}).app || "App") : "Time spent"
+    Controls.ToolTip.visible: hoveredIndex >= 0
+    Controls.ToolTip.text: centerDetail + " · " + centerLabel
     readonly property int chartSize: Math.min(Style.space(150), width - Style.space(8))
 
     Layout.minimumHeight: Style.space(158)
     implicitHeight: Style.space(158)
+    scale: hoveredIndex >= 0 ? 1.015 : 1
+    Behavior on scale { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
 
     onAppsChanged: donutCanvas.requestPaint()
     onColorsChanged: donutCanvas.requestPaint()
@@ -1169,8 +1259,11 @@ Ui.Panel {
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < days.length
       ? Model.trendDetailText(days[selectedIndex])
       : ""
-    readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
+    readonly property string readoutText: inspectedDay ? Model.trendDetailText(inspectedDay) + (isCurrentDay(inspectedDay) ? " so far" : "") : ""
     readonly property string defaultText: Model.trendDefaultText(days, root.selectedLens === "year" ? "month" : root.selectedLens === "life" ? "week" : "day")
+    readonly property int inspectedIndex: hoveredIndex >= 0 ? hoveredIndex : selectedIndex
+    readonly property var inspectedDay: inspectedIndex >= 0 && inspectedIndex < days.length ? days[inspectedIndex] : null
+    function isCurrentDay(cell) { return cell && !cell.monthly && !cell.weekly && String(cell.date || cell.key || "") === root.todayKey }
     readonly property real averageSeconds: {
       var list = days || []
       if (list.length <= 0) return 0
@@ -1240,6 +1333,7 @@ Ui.Panel {
         anchors.rightMargin: Style.space(8)
         anchors.verticalCenter: parent.verticalCenter
         text: lineRoot.title
+        visible: lineRoot.inspectedIndex < 0
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -1249,6 +1343,7 @@ Ui.Panel {
 
       Text {
         id: lineDetail
+        visible: lineRoot.inspectedIndex < 0
 
         width: Math.min(implicitWidth, parent.width * 0.46)
         anchors.right: parent.right
@@ -1288,6 +1383,7 @@ Ui.Panel {
       }
       Label {
         anchors.right: parent.right
+        visible: lineRoot.inspectedIndex < 0
         y: Math.max(0, lineRoot.pointY(lineRoot.averageSeconds) - height)
         z: 1
         text: "Average " + Model.fmt(lineRoot.averageSeconds)
@@ -1370,17 +1466,18 @@ Ui.Panel {
           var dotStride = count <= 14 ? 1 : (count <= 31 ? 3 : Math.ceil(count / 12))
           for (var k = 0; k < count; k++) {
             var seconds = Number(list[k].seconds || 0)
-            var active = k === lineRoot.hoveredIndex || k === lineRoot.selectedIndex
-            if (!active && seconds <= 0 && k % dotStride !== 0) continue
-            if (!active && k % dotStride !== 0 && k !== 0 && k !== count - 1) continue
+            var active = k === lineRoot.inspectedIndex
+            var partial = lineRoot.isCurrentDay(list[k])
+            if (!active && !partial && seconds <= 0 && k % dotStride !== 0) continue
+            if (!active && !partial && k % dotStride !== 0 && k !== 0 && k !== count - 1) continue
             var px = lineRoot.pointX(k)
             var py = lineRoot.pointY(seconds)
             ctx.beginPath()
             ctx.arc(px, py, active ? Style.space(5) : Style.space(3), 0, Math.PI * 2, false)
             ctx.fillStyle = active ? root.canvasColor(root.foreground, 0.96) : root.canvasColor(accent, count === 1 ? 0.92 : mutedAccent.a)
-            ctx.fill()
-            ctx.lineWidth = active ? Style.space(2) : 0
-            if (active) {
+            if (!partial) ctx.fill()
+            ctx.lineWidth = active || partial ? Style.space(2) : 0
+            if (active || partial) {
               ctx.strokeStyle = root.canvasColor(accent, 0.95)
               ctx.stroke()
             }
@@ -1400,11 +1497,34 @@ Ui.Panel {
         color: root.withAlpha(root.foreground, 0.24)
       }
 
+      Rectangle {
+        width: Math.min(parent.width, hoverReadout.implicitWidth + Style.space(16))
+        height: hoverReadout.implicitHeight + Style.space(10)
+        x: Math.max(0, Math.min(parent.width - width, lineRoot.pointX(lineRoot.inspectedIndex) - width / 2))
+        y: -height - Style.space(3)
+        opacity: lineRoot.inspectedDay ? 1 : 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
+        radius: Style.space(4)
+        color: root.foreground
+        Label {
+          id: hoverReadout
+          anchors.centerIn: parent
+          width: parent.width - Style.space(16)
+          text: lineRoot.inspectedDay ? Model.chartDateLabel(lineRoot.inspectedDay) + " · " + Model.fmt(lineRoot.inspectedDay.seconds) + (lineRoot.isCurrentDay(lineRoot.inspectedDay) ? " so far" : "") : ""
+          color: Color.background
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.NoWrap
+          elide: Text.ElideRight
+        }
+      }
+
       Text {
         anchors.left: parent.left
         anchors.top: parent.bottom
         anchors.topMargin: Style.space(5)
-        text: days.length > 0 ? String(days[0].label || days[0].fullLabel || "") : ""
+        width: parent.width * 0.46
+        text: days.length > 0 ? Model.chartDateLabel(days[0]) : ""
         color: root.faint
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -1416,7 +1536,7 @@ Ui.Panel {
         anchors.right: parent.right
         anchors.top: parent.bottom
         anchors.topMargin: Style.space(5)
-        text: days.length > 0 ? String(days[days.length - 1].label || days[days.length - 1].fullLabel || "") : ""
+        text: days.length > 0 ? Model.chartDateLabel(days[days.length - 1]) + (lineRoot.isCurrentDay(days[days.length - 1]) ? " · so far" : "") : ""
         color: root.faint
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

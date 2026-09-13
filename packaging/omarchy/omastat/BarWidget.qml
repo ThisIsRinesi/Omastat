@@ -16,6 +16,7 @@ Ui.BarWidget {
   property bool detailRunning: false
   property bool detailQueued: false
   property string loadingDetailKey: ""
+  property string loadingDetailDate: ""
   property string detailOutput: ""
   property bool detailOutputReady: false
   property bool detailExitReady: false
@@ -48,41 +49,55 @@ Ui.BarWidget {
     detailError = ""
     var cached = detailCache[detailKey()]
     if (cached && Date.now() - cached.at < fullReportTtlMs) activityDetail = cached.data
-    if (selectedActivityKey) refreshDetail()
+    if (selectedActivityKey) refreshDetail(false)
     scheduleInjectPanel()
   }
 
-  function refreshDetail() {
+  function refreshDetail(force) {
     if (!selectedActivityKey) return
-    if (detailRunning) { detailQueued = true; return }
+    var cached = detailCache[detailKey()]
+    var ttl = selectedOffset === 0 ? summaryTtlMs : fullReportTtlMs
+    if (force === false && cached && Date.now() - cached.at < ttl) {
+      activityDetail = cached.data
+      detailQueued = false
+      return
+    }
+    if (detailRunning) {
+      detailQueued = loadingDetailKey !== detailKey() || force !== false
+      return
+    }
     loadingDetailKey = detailKey()
+    loadingDetailDate = Model.dateKey(new Date())
     detailOutputReady = false
     detailExitReady = false
     detailOutput = ""
     detailError = ""
     detailRunning = true
-    detailProcess.command = ["bash", "-lc", 'PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; exec omastat activity-detail "$@"', "omastat",
+    detailProcess.command = ["bash", "-c", 'PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; exec omastat activity-detail "$@"', "omastat",
       "--lens", selectedLens, "--offset", String(selectedOffset), "--" + selectedActivityKind, selectedActivityKey]
     detailProcess.running = true
   }
 
   function finishDetail() {
     if (!detailExitReady || !detailOutputReady) return
-    if (loadingDetailKey === detailKey() && selectedActivityKey) {
+    if (loadingDetailDate === Model.dateKey(new Date())) {
       try {
         if (detailExitCode !== 0) throw new Error("Activity query failed")
         var parsed = JSON.parse(detailOutput)
         if (!parsed || !Array.isArray(parsed.activities) || !Array.isArray(parsed.daily) || !Array.isArray(parsed.heatmap)) throw new Error("Invalid activity report")
-        activityDetail = parsed
+        if (loadingDetailKey === detailKey() && selectedActivityKey) activityDetail = parsed
         var cache = detailCache
         cache[loadingDetailKey] = { at: Date.now(), data: parsed }
         var keys = Object.keys(cache).sort(function(a,b) { return cache[b].at - cache[a].at })
         for (var i = cacheMaxEntries; i < keys.length; i++) delete cache[keys[i]]
         detailCache = cache
-      } catch (error) { detailError = "Could not refresh this activity. " + (activityDetail ? "Showing the last result." : "Try again.") }
+      } catch (error) {
+        if (loadingDetailKey === detailKey() && selectedActivityKey)
+          detailError = "Could not refresh this activity. " + (activityDetail ? "Showing the last result." : "Try again.")
+      }
     }
     detailRunning = false
-    if (detailQueued) { detailQueued = false; refreshDetail() }
+    if (detailQueued) { detailQueued = false; refreshDetail(false) }
     scheduleInjectPanel()
   }
 
@@ -173,6 +188,16 @@ Ui.BarWidget {
   onRefreshRunningChanged: scheduleInjectPanel()
 
   Timer {
+    id: preloadTimer
+    interval: 750
+    onTriggered: root.preloadPanel()
+  }
+
+  function preloadPanel() {
+    if (!root.opened && !refreshRunning && !detailRunning && !cachedReport(currentKey)) refresh(true)
+  }
+
+  Timer {
     interval: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 1000
     running: true
     repeat: true
@@ -235,6 +260,12 @@ Ui.BarWidget {
   function refresh(forceFull) {
     var full = forceFull === true || root.opened
     if (refreshRunning) {
+      if (loadingLens === selectedLens && loadingOffset === selectedOffset
+          && loadingDate === Model.dateKey(new Date()) && (loadingFullReport || !full)) {
+        refreshQueued = false
+        refreshQueuedFull = false
+        return
+      }
       refreshQueued = true
       refreshQueuedFull = refreshQueuedFull || full
       return
@@ -265,13 +296,16 @@ Ui.BarWidget {
     selectedOffset = nextOffset
     activityDetail = null
     detailError = ""
-    refreshDetail()
+    var detail = detailCache[detailKey()]
+    if (detail && Date.now() - detail.at < fullReportTtlMs) activityDetail = detail.data
+    refreshDetail(false)
     var key = reportKey(selectedLens, selectedOffset)
     var livePeriod = selectedOffset === 0
     var cached = cachedReport(key)
     if (cached) {
       applyReport(cached, false)
-      if (livePeriod) refresh(true)
+      if (livePeriod && nowMs() - reportsByKey[key].updatedAt >= summaryTtlMs) refresh(true)
+      else { refreshQueued = false; refreshQueuedFull = false }
       return
     }
     beginPeriodLoad(selectedLens, selectedOffset)
@@ -303,6 +337,8 @@ Ui.BarWidget {
       refreshQueued = false
       refreshQueuedFull = false
       refresh(queuedFull)
+    } else if (!root.opened && !loadingFullReport) {
+      preloadTimer.restart()
     }
   }
 
@@ -354,7 +390,7 @@ Ui.BarWidget {
 
   function applyReport(report, markUpdated) {
     activityAnalytics = report.activityAnalytics || {}
-    if (selectedActivityKey && root.opened) refreshDetail()
+    if (selectedActivityKey && root.opened) refreshDetail(false)
     rows = report.rows
     reportApps = report.apps
     browserActivity = report.browserActivity
@@ -381,7 +417,7 @@ Ui.BarWidget {
   }
 
   function applyWidgetSummary(summary, markUpdated) {
-    if (!root.opened) {
+    if (!root.opened && !cachedReport(currentKey)) {
       activityAnalytics = {}
       rows = []
       reportApps = []
@@ -518,7 +554,7 @@ Ui.BarWidget {
   function open() {
     if (panelLoader.item) {
       panelLoader.item.open()
-      refresh(true)
+      preparePanel()
     }
   }
 
@@ -530,7 +566,15 @@ Ui.BarWidget {
     if (!panelLoader.item) return
     var wasOpen = opened
     panelLoader.item.toggle()
-    if (!wasOpen) refresh(true)
+    if (!wasOpen) preparePanel()
+  }
+
+  function preparePanel() {
+    var cached = cachedReport(currentKey)
+    if (cached) applyReport(cached, false)
+    var ttl = selectedOffset === 0 ? summaryTtlMs : fullReportTtlMs
+    if (!cached || nowMs() - reportsByKey[currentKey].updatedAt >= ttl) refresh(true)
+    else { refreshQueued = false; refreshQueuedFull = false }
   }
 
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
@@ -566,7 +610,7 @@ Ui.BarWidget {
   }
 
   function shellCommand(command) {
-    return ["bash", "-lc", "PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; " + command]
+    return ["bash", "-c", "PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; exec " + command]
   }
 
   function reportKey(lens, offset) {

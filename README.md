@@ -4,23 +4,23 @@ Local app and website activity tracking for **Arch Linux, Hyprland, and Omarchy
 Quattro**. Open the bar widget to see where your time went, when you were active,
 and which habits keep showing up. No timers, accounts, or cloud service.
 
-![Week of August 24–30: app usage, daily totals, hourly activity, and recurring habits](docs/assets/widget-week.png)
+![Week of September 7: app usage and rich graphs on the left, personal observations and recurring habits on the right](assets/screenshots/widget-week.png)
 
 - Browse a day, week, month, year, or your full history.
 - Select an app or website to see its usage, visits, and patterns.
 - Click a calendar day or chart point to open that period. Your selection follows you.
-- Open **How we know** to see the evidence behind a pattern.
+- Click an insight to see **How we know**, then return to the observations.
 
 <details>
 <summary>Month and day views</summary>
 
-![August 2026: daily activity, calendar, and weekly totals](docs/assets/widget-month.png)
+![September 2026: daily activity, calendar, and recurring habits](assets/screenshots/widget-month.png)
 
-![August 30, 2026: app breakdown and hour-by-hour activity](docs/assets/widget-day.png)
+![September 12, 2026: app breakdown, hour-by-hour activity, and insights](assets/screenshots/widget-day.png)
 
 </details>
 
-*Screenshots show real activity from August 2026.*
+*Screenshots captured September 12, 2026, using real activity data.*
 
 ## Install
 
