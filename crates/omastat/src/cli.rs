@@ -549,11 +549,12 @@ pub fn print_purge_report(report: &PurgeReport, json: bool) -> Result<()> {
         report.daemon_runs_deleted
     );
     println!(
-        "Trimmed: {} app, {} session, {} system, {} browser-domain",
+        "Trimmed: {} app, {} session, {} system, {} browser-domain, {} daemon runs",
         report.intervals_trimmed,
         report.session_intervals_trimmed,
         report.system_intervals_trimmed,
-        report.browser_domain_intervals_trimmed
+        report.browser_domain_intervals_trimmed,
+        report.daemon_runs_trimmed
     );
     if report.vacuumed {
         println!("Vacuum: completed");

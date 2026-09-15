@@ -1,0 +1,3 @@
+# Exclude documentation from release source archives.
+/docs export-ignore
+/docs/** export-ignore

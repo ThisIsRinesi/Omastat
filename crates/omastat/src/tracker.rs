@@ -4,7 +4,10 @@ use crate::{
     hyprland::{self, Event, EventStream, Snapshot, Window},
     identity, session,
     steam::SteamResolver,
-    storage::{IntervalKind, IntervalMetadata, SessionIntervalKind, Storage, SystemIntervalKind},
+    storage::{
+        IntervalKind, IntervalMetadata, SessionIntervalKind, SessionTransition, Storage,
+        SystemIntervalKind,
+    },
     terminal,
 };
 use anyhow::Result;
@@ -18,6 +21,12 @@ pub struct Tracker {
     steam: SteamResolver,
     state: TrackerState,
     daemon_run_id: Option<i64>,
+    observing: bool,
+    last_observed_at: Option<i64>,
+    observation_started_at: Option<i64>,
+    last_audio_at: Option<i64>,
+    last_resume_at: Option<i64>,
+    outage_interval_id: Option<i64>,
 }
 
 #[derive(Default)]
@@ -78,6 +87,12 @@ impl Tracker {
             steam: SteamResolver::default(),
             state: TrackerState::default(),
             daemon_run_id: None,
+            observing: true,
+            last_observed_at: None,
+            observation_started_at: None,
+            last_audio_at: None,
+            last_resume_at: None,
+            outage_interval_id: None,
         }
     }
 
@@ -90,14 +105,24 @@ impl Tracker {
                 recovery.closed_at, recovery.unobserved_seconds
             );
         }
-        self.refresh_session_status().await?;
-        self.recover_startup_state().await?;
-
-        let mut reconnect_backoff = Duration::from_secs(1);
-        let ctrl_c = tokio::signal::ctrl_c();
-        tokio::pin!(ctrl_c);
+        // Cancellation covers startup, snapshot queries and monitor setup too.
         let mut terminate = terminate_signal();
+        let result = tokio::select! {
+            result = self.track_events() => Some(result),
+            _ = tokio::signal::ctrl_c() => None,
+            _ = recv_terminate_signal(&mut terminate) => None,
+        };
+        match result {
+            Some(result) => result,
+            None => self.shutdown(),
+        }
+    }
 
+    async fn track_events(&mut self) -> Result<()> {
+        self.begin_outage(clock::unix_now())?;
+        let mut stream: Option<EventStream> = None;
+        let mut reconnect_backoff = Duration::from_secs(1);
+        let mut reconnect_at = time::Instant::now();
         let mut reconcile_timer = time::interval(Duration::from_secs(
             self.config.tracking.reconcile_seconds.max(30),
         ));
@@ -128,113 +153,142 @@ impl Tracker {
         idle_monitor_retry.tick().await;
 
         loop {
-            let mut stream = match EventStream::connect().await {
-                Ok(stream) => {
-                    reconnect_backoff = Duration::from_secs(1);
-                    stream
+            tokio::select! {
+                connection = async {
+                    time::sleep_until(reconnect_at).await;
+                    let stream = EventStream::connect().await?;
+                    let status = session::status().await;
+                    let snapshot = hyprland::snapshot().await?;
+                    Ok::<_, anyhow::Error>((stream, snapshot, status))
+                }, if stream.is_none() && self.state.sleep_pause.is_none() => {
+                    match connection {
+                        Ok((connected, snapshot, status)) => {
+                            let now = clock::unix_now();
+                            self.end_outage(now)?;
+                            self.observation_started_at = Some(now);
+                            self.last_audio_at = None;
+                            self.last_resume_at = None;
+                            self.observing = true;
+                            if let Ok(status) = status {
+                                self.apply_session_status(status, now)?;
+                            }
+                            self.apply_startup_snapshot(snapshot, now)?;
+                            self.record_heartbeat()?;
+                            stream = Some(connected);
+                            reconnect_backoff = Duration::from_secs(1);
+                            info!("tracking Hyprland usage");
+                        }
+                        Err(error) => {
+                            warn!("Hyprland connection/snapshot unavailable: {error:#}");
+                            reconnect_at = time::Instant::now() + reconnect_backoff;
+                            reconnect_backoff = (reconnect_backoff * 2).min(Duration::from_secs(30));
+                        }
+                    }
                 }
-                Err(error) => {
-                    warn!("failed to connect Hyprland event stream: {error:#}");
+                event = next_hyprland_event(&mut stream), if stream.is_some() => {
+                    match event {
+                        Ok(Some(event)) => {
+                            self.apply_event(event).await?;
+                            if self.observing {
+                                self.last_observed_at = Some(clock::unix_now());
+                            } else {
+                                stream = None;
+                                reconnect_at = time::Instant::now();
+                            }
+                        }
+                        Ok(None) | Err(_) => {
+                            warn!("Hyprland event stream disconnected");
+                            self.begin_outage(clock::unix_now())?;
+                            stream = None;
+                            reconnect_at = time::Instant::now();
+                        }
+                    }
+                }
+                _ = reconcile_timer.tick(), if stream.is_some() => {
+                    self.reconcile().await?;
+                    if !self.observing {
+                        stream = None;
+                        reconnect_at = time::Instant::now();
+                    }
+                }
+                _ = session_timer.tick(), if self.observing => {
+                    self.refresh_session_status().await?;
+                    self.last_observed_at = Some(clock::unix_now());
+                }
+                _ = terminal_timer.tick(), if self.observing => {
+                    self.refresh_terminal_focus().await?;
+                    self.last_observed_at = Some(clock::unix_now());
+                }
+                _ = heartbeat_timer.tick(), if self.observing || self.state.sleep_pause.is_some() => {
                     self.record_heartbeat()?;
-                    time::sleep(reconnect_backoff).await;
-                    reconnect_backoff = (reconnect_backoff * 2).min(Duration::from_secs(30));
-                    continue;
                 }
-            };
-
-            info!("tracking Hyprland usage");
-            loop {
-                tokio::select! {
-                    event = stream.next_event() => {
-                        match event {
-                            Ok(Some(event)) => self.apply_event(event).await?,
-                            Ok(None) => {
-                                warn!("Hyprland event stream closed");
-                                self.reconcile().await?;
-                                break;
-                            }
-                            Err(error) => {
-                                warn!("Hyprland event stream error: {error:#}");
-                                self.reconcile().await?;
-                                break;
-                            }
-                        }
-                    }
-                    _ = reconcile_timer.tick() => {
-                        self.reconcile().await?;
-                    }
-                    _ = session_timer.tick() => {
-                        self.refresh_session_status().await?;
-                    }
-                    _ = terminal_timer.tick() => {
-                        self.refresh_terminal_focus().await?;
-                    }
-                    _ = heartbeat_timer.tick() => {
-                        self.record_heartbeat()?;
-                    }
-                    sleep_event = next_sleep_event(&mut sleep_monitor) => {
-                        match sleep_event {
-                            Ok(Some(event)) => {
-                                self.apply_sleep_event(event).await?;
-                                if let Some(monitor) = sleep_monitor.as_mut()
-                                    && let Err(error) = monitor.mark_handled(event).await
-                                {
-                                    warn!("failed to update logind sleep inhibitor: {error:#}");
-                                    sleep_monitor = None;
-                                }
-                            }
-                            Ok(None) => {
-                                warn!("logind sleep monitor disconnected");
-                                sleep_monitor = None;
-                            }
-                            Err(error) => {
-                                warn!("logind sleep monitor failed: {error:#}");
+                sleep_event = next_sleep_event(&mut sleep_monitor) => {
+                    match sleep_event {
+                        Ok(Some(event)) => {
+                            self.apply_sleep_event(event).await?;
+                            stream = None;
+                            reconnect_at = time::Instant::now();
+                            if let Some(monitor) = sleep_monitor.as_mut()
+                                && let Err(error) = monitor.mark_handled(event).await
+                            {
+                                warn!("failed to update logind sleep inhibitor: {error:#}");
                                 sleep_monitor = None;
                             }
                         }
-                    }
-                    idle_event = next_idle_event(&mut idle_monitor), if self.config.tracking.pause_on_session_idle => {
-                        match idle_event {
-                            Ok(Some(event)) => self.apply_idle_event(event).await?,
-                            Ok(None) => {
-                                warn!("Wayland idle monitor disconnected");
-                                idle_monitor = None;
-                            }
-                            Err(error) => {
-                                warn!("Wayland idle monitor failed: {error:#}");
-                                idle_monitor = None;
-                            }
+                        Ok(None) => {
+                            warn!("logind sleep monitor disconnected");
+                            sleep_monitor = None;
+                        }
+                        Err(error) => {
+                            warn!("logind sleep monitor failed: {error:#}");
+                            sleep_monitor = None;
                         }
                     }
-                    _ = sleep_monitor_retry.tick(), if sleep_monitor.is_none() => {
-                        sleep_monitor = self.connect_sleep_monitor().await;
+                }
+                idle_event = next_idle_event(&mut idle_monitor), if self.config.tracking.pause_on_session_idle => {
+                    match idle_event {
+                        Ok(Some(event)) => {
+                            if self.observing { self.apply_idle_event(event).await?; }
+                        },
+                        Ok(None) => {
+                            warn!("Wayland idle monitor disconnected");
+                            idle_monitor = None;
+                        }
+                        Err(error) => {
+                            warn!("Wayland idle monitor failed: {error:#}");
+                            idle_monitor = None;
+                        }
                     }
-                    _ = idle_monitor_retry.tick(), if idle_monitor.is_none() && self.config.tracking.pause_on_session_idle => {
-                        idle_monitor = self.connect_idle_monitor().await;
-                    }
-                    _ = &mut ctrl_c => {
-                        self.shutdown()?;
-                        return Ok(());
-                    }
-                    _ = recv_terminate_signal(&mut terminate) => {
-                        self.shutdown()?;
-                        return Ok(());
-                    }
+                }
+                _ = sleep_monitor_retry.tick(), if sleep_monitor.is_none() => {
+                    sleep_monitor = self.connect_sleep_monitor().await;
+                }
+                _ = idle_monitor_retry.tick(), if idle_monitor.is_none() && self.config.tracking.pause_on_session_idle => {
+                    idle_monitor = self.connect_idle_monitor().await;
                 }
             }
         }
     }
 
-    async fn recover_startup_state(&mut self) -> Result<()> {
-        let now = clock::unix_now();
-        match hyprland::snapshot().await {
-            Ok(snapshot) => self.apply_startup_snapshot(snapshot, now),
-            Err(error) => {
-                warn!("startup snapshot failed; closing unverified intervals: {error:#}");
-                self.storage.close_open_intervals(now)?;
-                Ok(())
-            }
+    fn begin_outage(&mut self, now: i64) -> Result<()> {
+        self.observing = false;
+        if self.outage_interval_id.is_some() || self.state.sleep_pause.is_some() {
+            return Ok(());
         }
+        let boundary = self.last_observed_at.unwrap_or(now).min(now);
+        let id = self.storage.begin_observation_gap(boundary)?;
+        self.state = TrackerState::default();
+        self.outage_interval_id = Some(id);
+        self.observation_started_at = None;
+        Ok(())
+    }
+
+    fn end_outage(&mut self, now: i64) -> Result<()> {
+        if let Some(id) = self.outage_interval_id {
+            self.storage.close_system_interval(id, now)?;
+            self.outage_interval_id = None;
+        }
+        Ok(())
     }
 
     async fn apply_event(&mut self, event: Event) -> Result<()> {
@@ -267,10 +321,14 @@ impl Tracker {
 
     async fn reconcile(&mut self) -> Result<()> {
         match hyprland::snapshot().await {
-            Ok(snapshot) => self.apply_snapshot(snapshot),
+            Ok(snapshot) => {
+                self.apply_snapshot(snapshot)?;
+                self.last_observed_at = Some(clock::unix_now());
+                Ok(())
+            }
             Err(error) => {
                 warn!("snapshot reconciliation failed: {error:#}");
-                Ok(())
+                self.begin_outage(clock::unix_now())
             }
         }
     }
@@ -460,6 +518,7 @@ impl Tracker {
         self.set_focus_paused_at(paused, clock::unix_now())
     }
 
+    #[cfg(test)]
     fn set_focus_paused_at(&mut self, paused: bool, now: i64) -> Result<()> {
         if self.state.focus_paused == paused {
             return Ok(());
@@ -480,23 +539,63 @@ impl Tracker {
             return Ok(());
         }
 
-        if let Some(previous) = self.state.session_pause.take() {
-            self.storage
-                .close_session_interval(previous.interval_id, now)?;
-        }
-
-        if let Some(kind) = kind {
-            let interval_id = self
-                .storage
-                .start_session_interval(kind, source, transition_at)?;
-            self.state.session_pause = Some(SessionPauseInterval {
-                kind,
-                source: source.map(str::to_string),
+        let segment_start = self.observation_started_at.unwrap_or(i64::MIN);
+        let at = if kind == Some(SessionIntervalKind::Idle) && current.is_none() {
+            transition_at
+                .min(now)
+                .max(segment_start)
+                .max(self.last_audio_at.unwrap_or(i64::MIN))
+                .max(self.last_resume_at.unwrap_or(i64::MIN))
+        } else {
+            now.max(segment_start)
+        };
+        let target = if kind.is_none() {
+            self.focus_target_unpaused()
+        } else {
+            None
+        };
+        let (pause_id, focus_id) = self.storage.transition_session(SessionTransition {
+            previous_id: self.state.session_pause.as_ref().map(|p| p.interval_id),
+            kind,
+            source,
+            at,
+            segment_start,
+            resume_focus: target.as_ref().map(|t| {
+                (
+                    t.app_class.as_str(),
+                    IntervalMetadata {
+                        window_address: Some(&t.address),
+                        title: t.title.as_deref(),
+                        workspace: t.workspace.as_deref(),
+                        monitor: t.monitor.as_deref(),
+                    },
+                )
+            }),
+        })?;
+        // Do not discard live IDs until the complete database change commits.
+        self.state.session_pause =
+            pause_id
+                .zip(kind)
+                .map(|(interval_id, kind)| SessionPauseInterval {
+                    kind,
+                    source: source.map(str::to_string),
+                    interval_id,
+                });
+        self.state.focused = focus_id
+            .zip(target)
+            .map(|(interval_id, target)| FocusedInterval {
+                address: target.address,
+                app_class: target.app_class,
+                title: target.title,
+                workspace: target.workspace,
+                monitor: target.monitor,
                 interval_id,
             });
+        self.state.focus_paused = kind.is_some();
+        if kind.is_none() {
+            self.last_resume_at = Some(at);
         }
-
-        self.set_focus_paused_at(kind.is_some(), transition_at)
+        Ok(())
     }
 
     async fn refresh_session_status(&mut self) -> Result<()> {
@@ -504,20 +603,24 @@ impl Tracker {
             return Ok(());
         }
         match session::status().await {
-            Ok(status) => {
-                if self.wayland_idle_pause_is_authoritative(&status) {
-                    return Ok(());
-                }
-                let pause_kind = self.session_pause_kind(&status);
-                let now = clock::unix_now();
-                let transition_at = self.session_pause_transition_at(pause_kind, &status, now);
-                self.set_session_pause(pause_kind, Some(status.source), transition_at, now)?;
-            }
+            Ok(status) => self.apply_session_status(status, clock::unix_now())?,
             Err(error) => {
                 debug!("session status unavailable: {error:#}");
             }
         }
         Ok(())
+    }
+
+    fn apply_session_status(&mut self, status: session::SessionStatus, now: i64) -> Result<()> {
+        if status.audio_playing {
+            self.last_audio_at = Some(now);
+        }
+        if self.wayland_idle_pause_is_authoritative(&status) {
+            return Ok(());
+        }
+        let pause_kind = self.session_pause_kind(&status);
+        let transition_at = self.session_pause_transition_at(pause_kind, &status, now);
+        self.set_session_pause(pause_kind, Some(status.source), transition_at, now)
     }
 
     fn session_pause_kind(&self, status: &session::SessionStatus) -> Option<SessionIntervalKind> {
@@ -561,8 +664,8 @@ impl Tracker {
             session::SleepEvent::Preparing => self.start_sleep_at(now)?,
             session::SleepEvent::Resumed => {
                 self.finish_sleep_at(now)?;
-                self.refresh_session_status().await?;
-                self.recover_startup_state().await?;
+                self.last_observed_at = Some(now);
+                self.begin_outage(now)?;
             }
         }
         self.record_heartbeat()?;
@@ -609,6 +712,7 @@ impl Tracker {
                         )?;
                     }
                     Ok(status) if status.audio_playing => {
+                        self.last_audio_at = Some(now);
                         debug!("Wayland idle event ignored while audio is playing");
                     }
                     Ok(_) | Err(_) => {
@@ -622,6 +726,7 @@ impl Tracker {
                 }
             }
             session::IdleEvent::Resumed { at_unix } => {
+                self.last_resume_at = Some(at_unix);
                 if self
                     .state
                     .session_pause
@@ -641,7 +746,10 @@ impl Tracker {
             return Ok(());
         }
 
+        self.end_outage(now)?;
         self.storage.close_observed_intervals(now)?;
+        self.observing = false;
+        self.last_observed_at = Some(now);
         let interval_id =
             self.storage
                 .start_system_interval(SystemIntervalKind::Sleep, Some("logind"), now)?;
@@ -774,6 +882,10 @@ impl Tracker {
             return None;
         }
 
+        self.focus_target_unpaused()
+    }
+
+    fn focus_target_unpaused(&mut self) -> Option<FocusTarget> {
         let address = self.state.active_address.clone()?;
         let window = self.state.windows.get(&address).cloned()?;
         if !terminal::should_track_class(&window.class) {
@@ -804,6 +916,10 @@ impl Tracker {
             self.storage
                 .close_session_interval(previous.interval_id, now)?;
         }
+        if let Some(sleep) = self.state.sleep_pause.take() {
+            self.storage.close_system_interval(sleep.interval_id, now)?;
+        }
+        self.end_outage(now)?;
         if let Some(run_id) = self.daemon_run_id.take() {
             self.storage.finish_daemon_run(run_id, now)?;
         }
@@ -811,11 +927,21 @@ impl Tracker {
     }
 
     fn record_heartbeat(&mut self) -> Result<()> {
+        if self.observing {
+            self.last_observed_at = Some(clock::unix_now());
+        }
         if let Some(run_id) = self.daemon_run_id {
             self.storage
                 .record_daemon_heartbeat(run_id, clock::unix_now())?;
         }
         Ok(())
+    }
+}
+
+async fn next_hyprland_event(stream: &mut Option<EventStream>) -> Result<Option<Event>> {
+    match stream {
+        Some(stream) => stream.next_event().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -878,6 +1004,219 @@ mod tests {
         session::SessionStatus,
         storage::{IntervalKind, SessionIntervalKind, Storage},
     };
+
+    fn timed_tracker(dir: &tempfile::TempDir) -> Tracker {
+        let mut config = Config::default();
+        config.privacy.title_capture = TitleCapture::All;
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+        tracker.observation_started_at = Some(100);
+        tracker
+            .apply_startup_snapshot(
+                Snapshot {
+                    active_address: Some("0x1".into()),
+                    windows: vec![window("0x1", "firefox")],
+                },
+                100,
+            )
+            .unwrap();
+        tracker
+    }
+
+    #[test]
+    fn late_idle_trims_all_focus_fragments_and_resumes_without_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = timed_tracker(&dir);
+        for (at, title) in [(250, "second"), (275, "third")] {
+            tracker.state.windows.get_mut("0x1").unwrap().title = Some(title.into());
+            tracker.sync_focused_interval_at(at).unwrap();
+        }
+        tracker
+            .set_session_pause(
+                Some(SessionIntervalKind::Idle),
+                Some("wayland-idle"),
+                200,
+                300,
+            )
+            .unwrap();
+        tracker
+            .set_session_pause(
+                Some(SessionIntervalKind::Idle),
+                Some("wayland-idle"),
+                200,
+                310,
+            )
+            .unwrap();
+        tracker.set_session_pause(None, None, 350, 350).unwrap();
+        let focus = tracker.storage.focused_timeline_between(100, 400).unwrap();
+        assert_eq!(
+            focus
+                .iter()
+                .map(|i| (i.started_at, i.ended_at))
+                .filter(|(a, b)| b > a)
+                .collect::<Vec<_>>(),
+            vec![(100, 200), (350, 400)]
+        );
+        assert_eq!(
+            tracker.storage.totals_between(100, 400).unwrap()[0].focused_seconds,
+            150
+        );
+        assert_eq!(
+            tracker
+                .storage
+                .session_totals_between(100, 400)
+                .unwrap()
+                .idle_seconds,
+            150
+        );
+    }
+
+    #[test]
+    fn idle_backdating_preserves_observation_and_audio_boundaries() {
+        for (audio, expected) in [(None, 100), (Some(230), 230)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut tracker = timed_tracker(&dir);
+            tracker.last_audio_at = audio;
+            tracker
+                .set_session_pause(Some(SessionIntervalKind::Idle), Some("test"), 50, 300)
+                .unwrap();
+            let rows = tracker.storage.raw_export_between(0, 400).unwrap();
+            assert_eq!(rows.session_intervals[0].started_at, expected);
+            assert_eq!(
+                rows.intervals
+                    .iter()
+                    .find(|i| i.kind == IntervalKind::Focused)
+                    .unwrap()
+                    .ended_at,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn idle_backdating_never_overlaps_an_earlier_pause_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = timed_tracker(&dir);
+        tracker
+            .set_session_pause(Some(SessionIntervalKind::Locked), Some("test"), 200, 200)
+            .unwrap();
+        tracker.set_session_pause(None, None, 300, 300).unwrap();
+        tracker
+            .set_session_pause(Some(SessionIntervalKind::Idle), Some("test"), 150, 400)
+            .unwrap();
+        let rows = tracker.storage.raw_export_between(0, 500).unwrap();
+        let idle = rows
+            .session_intervals
+            .iter()
+            .find(|r| r.kind == SessionIntervalKind::Idle)
+            .unwrap();
+        assert_eq!(idle.started_at, 300);
+        assert_eq!(
+            tracker
+                .storage
+                .session_totals_between(0, 500)
+                .unwrap()
+                .locked_seconds,
+            100
+        );
+    }
+
+    #[test]
+    fn startup_locked_session_never_creates_a_focused_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+        tracker.observation_started_at = Some(100);
+        tracker
+            .apply_session_status(
+                SessionStatus {
+                    locked: true,
+                    ..SessionStatus::default()
+                },
+                100,
+            )
+            .unwrap();
+        tracker
+            .apply_startup_snapshot(
+                Snapshot {
+                    active_address: Some("0x1".into()),
+                    windows: vec![window("0x1", "firefox")],
+                },
+                100,
+            )
+            .unwrap();
+        assert!(tracker.state.focused.is_none());
+        assert_eq!(
+            tracker
+                .storage
+                .session_totals_between(100, 200)
+                .unwrap()
+                .locked_seconds,
+            100
+        );
+    }
+
+    #[test]
+    fn failed_idle_transaction_preserves_focus_and_tracker_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = timed_tracker(&dir);
+        let focused_id = tracker.state.focused.as_ref().unwrap().interval_id;
+        // Force the pause INSERT to fail after its tentative focus UPDATE.
+        tracker
+            .storage
+            .start_session_interval(SessionIntervalKind::Idle, None, 150)
+            .unwrap();
+        assert!(
+            tracker
+                .set_session_pause(Some(SessionIntervalKind::Idle), None, 200, 300)
+                .is_err()
+        );
+        assert_eq!(
+            tracker.state.focused.as_ref().unwrap().interval_id,
+            focused_id
+        );
+        assert!(!tracker.state.focus_paused);
+        assert!(
+            tracker
+                .storage
+                .unclosed_intervals()
+                .unwrap()
+                .iter()
+                .any(|i| i.id == focused_id)
+        );
+    }
+
+    #[test]
+    fn disconnect_excludes_gap_and_sleep_remains_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = timed_tracker(&dir);
+        tracker.last_observed_at = Some(150);
+        tracker.begin_outage(180).unwrap();
+        tracker.begin_outage(190).unwrap();
+        assert!(tracker.state.focused.is_none());
+        tracker.start_sleep_at(200).unwrap();
+        tracker.finish_sleep_at(300).unwrap();
+        tracker.last_observed_at = Some(300);
+        tracker.begin_outage(300).unwrap();
+        tracker.end_outage(350).unwrap();
+        tracker
+            .apply_startup_snapshot(
+                Snapshot {
+                    active_address: Some("0x1".into()),
+                    windows: vec![window("0x1", "firefox")],
+                },
+                350,
+            )
+            .unwrap();
+        assert_eq!(
+            tracker.storage.totals_between(100, 400).unwrap()[0].focused_seconds,
+            100
+        );
+        let totals = tracker.storage.session_totals_between(100, 400).unwrap();
+        assert_eq!(totals.unobserved_seconds, 100);
+        assert_eq!(totals.sleep_seconds, 100);
+    }
 
     #[test]
     fn snapshot_starts_one_open_interval_per_app() {

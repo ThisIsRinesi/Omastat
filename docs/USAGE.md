@@ -95,7 +95,7 @@ omastat export-data --scope aggregate --format csv --output ~/omastat-aggregate
 
 JSON writes one file. CSV writes a directory containing `metadata.json` plus
 tables such as `raw_intervals.csv`, `raw_session_intervals.csv`,
-`raw_system_intervals.csv`, `app_totals.csv`, `app_breakdown.csv`,
+`raw_system_intervals.csv`, `raw_browser_domain_intervals.csv`, `app_totals.csv`, `app_breakdown.csv`,
 `daily_totals.csv`, and `insights.csv`. Raw rows include Unix seconds and local
 timestamp strings so exports are explicit about the local time window. System
 rows include idle, locked, sleep, and unobserved gaps.
@@ -106,14 +106,25 @@ Delete older local telemetry after reviewing a dry run:
 
 ```bash
 omastat purge --older-than-days 90 --dry-run
+systemctl --user stop omastat.service
 omastat purge --older-than-days 90 --confirm --vacuum
-omastat purge --before 2026-01-01 --confirm
+systemctl --user start omastat.service
 ```
 
 `purge` requires exactly one selector: `--before YYYY-MM-DD`,
 `--older-than-days N`, or `--all`. Destructive purges require `--confirm`;
 `--dry-run` reports the affected rows without deleting them. Intervals that
-cross the cutoff are trimmed instead of deleted wholesale.
+cross the cutoff, including daemon-run coverage, are trimmed instead of deleted
+wholesale. Destructive purges are refused while a tracker owns the database;
+stop the service (and any manually launched daemon) first. Dry runs remain
+available while tracking. Use `--before 2026-01-01` for a date cutoff or `--all`
+to delete all retained telemetry. Tracking and optional browser integration can
+record new activity after deletion.
+
+A database-scoped process lock prevents competing daemons from treating each
+other as crashed. Different databases can be tracked independently. On the first
+upgrade from a version without locking, stop the old daemon before starting the
+updated one or running a destructive purge.
 
 ## Configuration
 
@@ -243,7 +254,13 @@ The daemon also records local heartbeat events. If it restarts after an
 unclean stop, open focus/session intervals are closed at the last observed
 boundary and the remaining gap is reported as unobserved excluded time rather
 than active focus. Open time continues while apps remain open and the daemon is
-observing the session.
+observing the session. A Hyprland connection or snapshot failure ends verified
+activity at the last observation and records the outage as unobserved. Tracking
+resumes only after reconnecting and obtaining a fresh snapshot. Shutdown signals
+remain responsive during retries and desktop queries have bounded timeouts.
+
+Delayed idle notifications trim focus back to the inferred idle onset within the
+current observation segment, without removing confirmed audio-active time.
 
 On systemd desktops, Omastat listens for logind's `PrepareForSleep` signal on
 the system D-Bus and holds a short sleep delay inhibitor when available so it

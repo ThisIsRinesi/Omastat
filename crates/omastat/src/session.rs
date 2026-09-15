@@ -393,7 +393,7 @@ async fn audio_playing() -> Result<bool> {
 async fn command_output(program: &str, args: &[&str]) -> Result<String> {
     let output = timeout(
         Duration::from_secs(2),
-        Command::new(program).args(args).output(),
+        Command::new(program).args(args).kill_on_drop(true).output(),
     )
     .await
     .with_context(|| format!("timed out running {program} {}", args.join(" ")))?

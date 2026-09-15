@@ -106,6 +106,10 @@ pub fn write_data_export_csv(export: &DataExport, output_dir: &Path) -> Result<(
     }
 
     if let Some(raw) = &export.raw {
+        write_csv(
+            output_dir.join("raw_browser_domain_intervals.csv"),
+            &raw.browser_domain_intervals,
+        )?;
         write_csv(output_dir.join("raw_intervals.csv"), &raw.intervals)?;
         write_csv(
             output_dir.join("raw_session_intervals.csv"),
@@ -267,6 +271,74 @@ mod tests {
         steam::SteamResolver,
         storage::{IntervalKind, Storage},
     };
+
+    #[test]
+    fn browser_csv_preserves_raw_rows_with_safe_fields_and_empty_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let focus = storage
+            .start_interval(IntervalKind::Focused, "firefox", None, None, 100)
+            .unwrap();
+        storage.close_interval(focus, 200).unwrap();
+        storage
+            .record_browser_domain("=source", "firefox", "example.org", 100)
+            .unwrap();
+        storage
+            .record_browser_state("=source", "firefox", None, 180)
+            .unwrap();
+        for scope in [DataExportScope::Raw, DataExportScope::All] {
+            let mut export = build_data_export(
+                &storage,
+                &mut SteamResolver::default(),
+                &config,
+                DataExportOptions {
+                    lens: Lens::Life,
+                    offset: 0,
+                    scope,
+                },
+            )
+            .unwrap();
+            let json = serde_json::to_value(&export).unwrap();
+            let out = dir.path().join("csv");
+            write_data_export_csv(&export, &out).unwrap();
+            let mut csv =
+                csv::Reader::from_path(out.join("raw_browser_domain_intervals.csv")).unwrap();
+            let headers = csv.headers().unwrap().clone();
+            let records = csv.records().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(
+                records.len(),
+                json["raw"]["browser_domain_intervals"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            );
+            for (name, value) in headers.iter().zip(records[0].iter()) {
+                let original = &json["raw"]["browser_domain_intervals"][0][name];
+                let expected = if name == "source" {
+                    "'=source".into()
+                } else if let Some(text) = original.as_str() {
+                    text.to_owned()
+                } else {
+                    original.to_string()
+                };
+                assert_eq!(value, expected);
+            }
+            export
+                .raw
+                .as_mut()
+                .unwrap()
+                .browser_domain_intervals
+                .clear();
+            write_data_export_csv(&export, &out).unwrap();
+            assert_eq!(
+                std::fs::metadata(out.join("raw_browser_domain_intervals.csv"))
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
+    }
 
     #[test]
     fn csv_neutralizes_formulas_in_untrusted_activity_fields() {

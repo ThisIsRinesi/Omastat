@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate};
 use omastat::{
     config::Config,
-    storage::{IntervalKind, Storage},
+    storage::{IntervalKind, SessionIntervalKind, Storage, SystemIntervalKind},
 };
 use serde_json::Value;
 use std::process::Command;
@@ -29,6 +29,14 @@ fn local_day_and_hour_totals_reconcile_through_dst_transitions() {
             .start_interval(IntervalKind::Focused, "editor", None, None, from)
             .unwrap();
         storage.close_interval(id, to).unwrap();
+        let idle = storage
+            .start_session_interval(SessionIntervalKind::Idle, None, from)
+            .unwrap();
+        storage.close_session_interval(idle, to).unwrap();
+        let sleep = storage
+            .start_system_interval(SystemIntervalKind::Sleep, None, from)
+            .unwrap();
+        storage.close_system_interval(sleep, to).unwrap();
         // Read the target timezone's current date from the CLI itself, avoiding process-global TZ mutation.
         let current = Command::new(env!("CARGO_BIN_EXE_omastat"))
             .env("TZ", "America/New_York")
@@ -72,6 +80,30 @@ fn local_day_and_hour_totals_reconcile_through_dst_transitions() {
             String::from_utf8_lossy(&output.stderr)
         );
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let summary = Command::new(env!("CARGO_BIN_EXE_omastat"))
+            .env("TZ", "America/New_York")
+            .args([
+                "--database",
+                db.to_str().unwrap(),
+                "summary",
+                "--lens",
+                "day",
+                "--offset",
+                &offset,
+                "--days",
+                "1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            summary.status.success(),
+            "{}",
+            String::from_utf8_lossy(&summary.stderr)
+        );
+        let summary: Value = serde_json::from_slice(&summary.stdout).unwrap();
+        for field in ["focused_seconds", "idle_seconds", "sleep_seconds"] {
+            assert_eq!(summary["daily"][0][field], 7200, "{date}: {field}");
+        }
         assert_eq!(report["activities"][0]["focused_seconds"], 7200);
         assert_eq!(report["daily"].as_array().unwrap().len(), 1);
         assert_eq!(report["daily"][0]["focused_seconds"], 7200);

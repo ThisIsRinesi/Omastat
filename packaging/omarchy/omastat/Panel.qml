@@ -55,7 +55,70 @@ Ui.Panel {
   property int legendHoverIndex: -1
   readonly property int motionDuration: root.setting("reduceMotion", false) ? 0 : 150
   onCompositionChanged: legendHoverIndex = -1
-  onShownDailyChanged: if (panelDataLoaded && motionDuration > 0) dataReveal.restart()
+  property bool refreshBusyVisible: false
+  property bool detailBusyVisible: false
+  property bool revealQueued: false
+  property string revealedViewKey: ""
+  readonly property string viewKey: JSON.stringify([selectedLens, selectedOffset, selectedActivityKind, selectedActivityKey])
+  readonly property bool viewReady: panelDataLoaded && (!selected || activityDetail !== null)
+  signal viewRevealed()
+
+  onRefreshRunningChanged: updateBusyFeedback()
+  onDetailRunningChanged: updateBusyFeedback()
+  onViewKeyChanged: scheduleViewReveal()
+  onViewReadyChanged: scheduleViewReveal()
+  onOpenedChanged: {
+    updateBusyFeedback()
+    if (opened) scheduleViewReveal()
+    else {
+      revealedViewKey = ""
+      dataReveal.stop()
+      body.opacity = 1
+    }
+  }
+  onMotionDurationChanged: if (motionDuration === 0) {
+    dataReveal.stop()
+    body.opacity = 1
+  }
+
+  Timer {
+    id: refreshFeedbackDelay
+    interval: 150
+    onTriggered: root.refreshBusyVisible = root.opened && root.refreshRunning
+  }
+  Timer {
+    id: detailFeedbackDelay
+    interval: 150
+    onTriggered: root.detailBusyVisible = root.opened && root.detailRunning
+  }
+
+  function updateBusyFeedback() {
+    if (!opened || !refreshRunning) {
+      refreshFeedbackDelay.stop()
+      refreshBusyVisible = false
+    } else if (!refreshBusyVisible && !refreshFeedbackDelay.running) refreshFeedbackDelay.start()
+    if (!opened || !detailRunning) {
+      detailFeedbackDelay.stop()
+      detailBusyVisible = false
+    } else if (!detailBusyVisible && !detailFeedbackDelay.running) detailFeedbackDelay.start()
+  }
+
+  function scheduleViewReveal() {
+    if (revealQueued) return
+    revealQueued = true
+    // Wait for the controller to finish injecting the entire selected report.
+    Qt.callLater(function() {
+      revealQueued = false
+      if (!opened || !viewReady || revealedViewKey === viewKey) return
+      revealedViewKey = viewKey
+      if (motionDuration > 0) dataReveal.restart()
+      else {
+        dataReveal.stop()
+        body.opacity = 1
+      }
+      viewRevealed()
+    })
+  }
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color accent: Color.accent
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.75)
@@ -186,13 +249,13 @@ Ui.Panel {
 
   IpcHandler {
     target: root.moduleName
-    function open() { root.open(); if (root.hostWidget) root.hostWidget.preparePanel() }
+    function open() { if (root.hostWidget) root.hostWidget.open(); else root.open() }
     function close() { root.close() }
-    function show() { root.open(); if (root.hostWidget) root.hostWidget.preparePanel() }
+    function show() { if (root.hostWidget) root.hostWidget.open(); else root.open() }
     function hide() { root.close() }
-    function toggle() { root.toggle(); if (root.opened && root.hostWidget) root.hostWidget.preparePanel() }
+    function toggle() { if (root.hostWidget) root.hostWidget.togglePanel(); else root.toggle() }
     function refresh() { root.refresh() }
-    function status(): string { return root.statusText || "idle" }
+    function status(): string { return (root.hostWidget ? root.hostWidget.statusText : root.statusText) || "idle" }
     function period(lens: string, offset: string): void { root.setLensOffset(lens, offset) }
     function day() { root.setLens("day") }
     function week() { root.setLens("week") }
@@ -246,7 +309,18 @@ Ui.Panel {
           }
           Action { text: "‹"; Accessible.name: "Previous period"; enabled: root.selectedLens !== "life"; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset - 1) }
           Action { text: "›"; Accessible.name: "Next period"; enabled: root.selectedLens !== "life" && root.selectedOffset < 0; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset + 1) }
-          Action { text: root.refreshRunning ? "Refreshing…" : "Refresh"; enabled: !root.refreshRunning; onClicked: root.refresh() }
+          Action {
+            id: refreshAction
+            text: root.refreshBusyVisible ? "Refreshing…" : "Refresh"
+            implicitWidth: Math.max(Style.space(36), refreshTextMetrics.width + Style.space(22))
+            Layout.minimumWidth: implicitWidth
+            enabled: !root.refreshRunning
+            // Fast requests remain visually quiet while still blocking duplicate clicks.
+            opacity: root.refreshBusyVisible ? 0.6 : 1
+            Accessible.description: root.refreshRunning ? "Refreshing activity" : ""
+            onClicked: root.refresh()
+            TextMetrics { id: refreshTextMetrics; font: refreshAction.contentItem.font; text: "Refreshing…" }
+          }
         }
         Rectangle {
           Layout.fillWidth: true
@@ -329,7 +403,7 @@ Ui.Panel {
               Layout.fillWidth: true
               Action { text: "All activity"; visible: root.selected; onClicked: root.selectActivity("", "") }
               Label { Layout.fillWidth: true; text: root.activityLabel; font.pixelSize: Style.font.title; font.bold: true }
-              Label { text: root.detailRunning ? "Updating activity…" : ""; color: root.dim }
+              Label { text: root.detailBusyVisible ? "Updating activity…" : ""; color: root.dim }
             }
             GridLayout {
               Layout.fillWidth: true
@@ -1596,7 +1670,7 @@ Ui.Panel {
     property int selectedIndex: -1
     property int hoveredIndex: -1
     property string hoveredText: ""
-    property real revealProgress: 0
+    property real revealProgress: 1
     signal activatedCell(var cell)
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < cells.length
       ? Model.monthCellDetailText(cells[selectedIndex])
@@ -1613,14 +1687,25 @@ Ui.Panel {
     readonly property real sideHeight: weeklyPaceHeight + Style.space(10) + Style.space(54)
     readonly property real bodyHeight: compact ? calendarHeight + Style.space(10) + sideHeight : Math.max(calendarHeight, sideHeight)
 
+    function settleReveal() {
+      monthRhythmReveal.stop()
+      revealProgress = 1
+    }
+
     function restartReveal() {
-      revealProgress = 0
+      if (!visible || !root.opened || root.motionDuration === 0) {
+        settleReveal()
+        return
+      }
       monthRhythmReveal.restart()
     }
 
-    onCellsChanged: restartReveal()
-    onMaxSecondsChanged: restartReveal()
-    Component.onCompleted: restartReveal()
+    Connections {
+      target: root
+      function onViewRevealed() { monthRhythmRoot.restartReveal() }
+      function onOpenedChanged() { if (!root.opened) monthRhythmRoot.settleReveal() }
+      function onMotionDurationChanged() { if (root.motionDuration === 0) monthRhythmRoot.settleReveal() }
+    }
 
     implicitHeight: Style.space(12) + monthRhythmHeader.height + Style.space(10) + bodyHeight + Style.space(10) + monthRhythmReadout.height + Style.space(10)
     radius: 0
@@ -1634,7 +1719,7 @@ Ui.Panel {
       property: "revealProgress"
       from: 0
       to: 1
-      duration: 620
+      duration: root.motionDuration > 0 ? 180 : 0
       easing.type: Easing.OutCubic
     }
 
@@ -1748,11 +1833,11 @@ Ui.Panel {
               scale: (monthRhythmRoot.hoveredIndex === index || monthRhythmRoot.selectedIndex === index) && !modelData.blank ? 1.05 : 1.0
 
               Behavior on color {
-                ColorAnimation { duration: 140 }
+                ColorAnimation { duration: root.motionDuration }
               }
 
               Behavior on scale {
-                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic }
               }
 
               Text {
@@ -1968,11 +2053,11 @@ Ui.Panel {
     scale: visible ? 1 : 0.98
 
     Behavior on opacity {
-      NumberAnimation { duration: 120 }
+      NumberAnimation { duration: root.motionDuration }
     }
 
     Behavior on scale {
-      NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+      NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic }
     }
 
     Text {

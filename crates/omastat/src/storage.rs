@@ -266,6 +266,7 @@ pub struct PurgeReport {
     pub session_intervals_trimmed: i64,
     pub system_intervals_trimmed: i64,
     pub browser_domain_intervals_trimmed: i64,
+    pub daemon_runs_trimmed: i64,
     pub vacuumed: bool,
 }
 
@@ -321,9 +322,48 @@ pub struct TitleRepair {
     pub normalized_titles: i64,
 }
 
+pub(crate) struct SessionTransition<'a> {
+    pub previous_id: Option<i64>,
+    pub kind: Option<SessionIntervalKind>,
+    pub source: Option<&'a str>,
+    pub at: i64,
+    pub segment_start: i64,
+    pub resume_focus: Option<(&'a str, IntervalMetadata<'a>)>,
+}
+
 pub struct Storage {
     conn: Connection,
     path: PathBuf,
+    exclusive_lock: Option<fs::File>,
+    tracking: bool,
+}
+
+// Keep the sidecar in place: unlinking a held lock would let another process
+// acquire a different inode. The operating system releases the lock on exit.
+fn database_lock(path: &Path) -> Result<fs::File> {
+    let canonical = if path.exists() {
+        fs::canonicalize(path)?
+    } else {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        fs::canonicalize(parent)?.join(path.file_name().context("database path needs a filename")?)
+    };
+    let mut lock_path = canonical.into_os_string();
+    lock_path.push(".lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(Path::new(&lock_path))?;
+    file.try_lock().context(
+        "database is in use; stop omastatd before starting another tracker or purging data",
+    )?;
+    Ok(file)
 }
 
 struct Migration {
@@ -396,6 +436,24 @@ impl Storage {
         Self::open_with_mode(explicit_path, _config, StorageOpenMode::ReadWriteMigrate)
     }
 
+    /// Lock before initialization/migration, for daemon startup and maintenance.
+    pub fn open_exclusive(explicit_path: Option<&Path>, config: &Config) -> Result<Self> {
+        let path = explicit_path
+            .map(PathBuf::from)
+            .unwrap_or_else(default_db_path);
+        let lock = database_lock(&path)?;
+        let mut storage = Self::open(explicit_path, config)?;
+        storage.exclusive_lock = Some(lock);
+        Ok(storage)
+    }
+
+    fn acquire_exclusive(&mut self) -> Result<()> {
+        if self.exclusive_lock.is_none() {
+            self.exclusive_lock = Some(database_lock(&self.path)?);
+        }
+        Ok(())
+    }
+
     pub fn open_read_only(explicit_path: Option<&Path>, config: &Config) -> Result<Self> {
         Self::open_with_mode(explicit_path, config, StorageOpenMode::ReadOnly)
     }
@@ -456,7 +514,12 @@ impl Storage {
             }
             let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .with_context(|| format!("failed to open database {} read-only", path.display()))?;
-            let storage = Self { conn, path };
+            let storage = Self {
+                conn,
+                path,
+                exclusive_lock: None,
+                tracking: false,
+            };
             storage.validate_schema()?;
             storage.prepare_report_views(_config)?;
             return Ok(storage);
@@ -491,7 +554,12 @@ impl Storage {
 
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open database {}", path.display()))?;
-        let mut storage = Self { conn, path };
+        let mut storage = Self {
+            conn,
+            path,
+            exclusive_lock: None,
+            tracking: false,
+        };
         storage.migrate()?;
         storage.prepare_report_views(_config)?;
         Ok(storage)
@@ -633,7 +701,7 @@ impl Storage {
     pub fn close_interval(&self, id: i64, ended_at: i64) -> Result<()> {
         let updated = self.conn.execute(
             "UPDATE intervals
-             SET ended_at = ?1
+             SET ended_at = MAX(started_at, ?1)
              WHERE id = ?2 AND ended_at IS NULL",
             params![ended_at, id],
         )?;
@@ -643,7 +711,7 @@ impl Storage {
 
     pub fn close_open_intervals(&self, ended_at: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE intervals SET ended_at = ?1 WHERE ended_at IS NULL",
+            "UPDATE intervals SET ended_at = MAX(started_at, ?1) WHERE ended_at IS NULL",
             params![ended_at],
         )?;
         Ok(())
@@ -666,7 +734,7 @@ impl Storage {
     pub fn close_session_interval(&self, id: i64, ended_at: i64) -> Result<()> {
         let updated = self.conn.execute(
             "UPDATE session_intervals
-             SET ended_at = ?1
+             SET ended_at = MAX(started_at, ?1)
              WHERE id = ?2 AND ended_at IS NULL",
             params![ended_at, id],
         )?;
@@ -676,7 +744,7 @@ impl Storage {
 
     pub fn close_session_intervals(&self, ended_at: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE session_intervals SET ended_at = ?1 WHERE ended_at IS NULL",
+            "UPDATE session_intervals SET ended_at = MAX(started_at, ?1) WHERE ended_at IS NULL",
             params![ended_at],
         )?;
         Ok(())
@@ -700,6 +768,69 @@ impl Storage {
             params![ended_at],
         )?;
         Ok(())
+    }
+
+    /// Change pause/focus together, including focus fragments recorded while an
+    /// idle notification was in flight. Earlier observation segments are untouched.
+    pub(crate) fn transition_session(
+        &mut self,
+        transition: SessionTransition<'_>,
+    ) -> Result<(Option<i64>, Option<i64>)> {
+        let tx = self.conn.transaction()?;
+        let mut at = transition.at;
+        if let Some(id) = transition.previous_id {
+            let started_at: i64 = tx.query_row(
+                "SELECT started_at FROM session_intervals WHERE id = ?1 AND ended_at IS NULL",
+                [id],
+                |r| r.get(0),
+            )?;
+            at = at.max(started_at);
+            tx.execute(
+                "UPDATE session_intervals SET ended_at = ?1 WHERE id = ?2",
+                params![at, id],
+            )?;
+        }
+        let mut pause_id = None;
+        let mut focus_id = None;
+        if let Some(kind) = transition.kind {
+            tx.execute(
+                "UPDATE intervals SET ended_at = MAX(started_at, ?1)
+                 WHERE kind = 'focused' AND started_at >= ?2
+                 AND (ended_at IS NULL OR ended_at > ?1)",
+                params![at, transition.segment_start],
+            )?;
+            tx.execute(
+                "INSERT INTO session_intervals (kind, source, started_at) VALUES (?1, ?2, ?3)",
+                params![kind.as_str(), transition.source, at],
+            )?;
+            pause_id = Some(tx.last_insert_rowid());
+        } else if let Some((app_class, metadata)) = transition.resume_focus {
+            tx.execute(
+                "INSERT INTO intervals (kind, app_class, window_address, title, workspace, monitor, started_at)
+                 VALUES ('focused', ?1, ?2, ?3, ?4, ?5, ?6)",
+                params![app_class, metadata.window_address, metadata.title, metadata.workspace, metadata.monitor, at],
+            )?;
+            focus_id = Some(tx.last_insert_rowid());
+        }
+        tx.commit()?;
+        Ok((pause_id, focus_id))
+    }
+
+    pub fn begin_observation_gap(&mut self, boundary: i64) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        close_unclosed_observed_intervals_tx(&tx, boundary)?;
+        // Persist the last confirmed observation, not the later disconnect time.
+        tx.execute(
+            "UPDATE daemon_runs SET last_heartbeat_at = MAX(last_heartbeat_at, ?1) WHERE stopped_at IS NULL",
+            [boundary],
+        )?;
+        tx.execute(
+            "INSERT INTO unobserved_intervals (kind, source, started_at) VALUES ('unobserved', 'hyprland-disconnect', ?1)",
+            [boundary],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn start_system_interval(
@@ -795,15 +926,24 @@ impl Storage {
     }
 
     pub fn start_daemon_run(&mut self, now: i64) -> Result<DaemonRunStart> {
+        anyhow::ensure!(
+            !self.tracking,
+            "this connection already has an active daemon run"
+        );
+        self.acquire_exclusive()?;
         let tx = self.conn.transaction()?;
         let previous_run = latest_daemon_run(&tx)?;
         let stale_boundary = latest_unclosed_interval_start(&tx)?;
         let active_sleep_started_at = earliest_active_system_interval_start(&tx, "sleep")?;
+        let active_gap_started_at = earliest_active_system_interval_start(&tx, "unobserved")?;
+        close_unclosed_system_intervals_tx(&tx, "unobserved", now)?;
         let previous_unclosed = previous_run
             .as_ref()
             .is_some_and(|run| run.stopped_at.is_none());
-        let needs_recovery =
-            previous_unclosed || stale_boundary.is_some() || active_sleep_started_at.is_some();
+        let needs_recovery = previous_unclosed
+            || stale_boundary.is_some()
+            || active_sleep_started_at.is_some()
+            || active_gap_started_at.is_some();
 
         let recovery = if needs_recovery {
             let previous_run_id = previous_run
@@ -823,11 +963,14 @@ impl Storage {
                     let closed_at = heartbeat_boundary
                         .into_iter()
                         .chain(stale_boundary)
+                        .chain(active_gap_started_at)
                         .max()
                         .unwrap_or(now)
                         .min(now);
                     close_unclosed_observed_intervals_tx(&tx, closed_at)?;
-                    let unobserved_seconds = if now > closed_at {
+                    let unobserved_seconds = if let Some(gap_start) = active_gap_started_at {
+                        (now - gap_start).max(0)
+                    } else if now > closed_at {
                         tx.execute(
                             "
                         INSERT INTO unobserved_intervals (kind, source, started_at, ended_at)
@@ -889,6 +1032,7 @@ impl Storage {
         insert_daemon_event_tx(&tx, run_id, "start", now, None)?;
 
         tx.commit()?;
+        self.tracking = true;
         Ok(DaemonRunStart { run_id, recovery })
     }
 
@@ -929,6 +1073,7 @@ impl Storage {
         }
         insert_daemon_event_tx(&tx, run_id, "clean-stop", now, None)?;
         tx.commit()?;
+        self.tracking = false;
         Ok(())
     }
 
@@ -1123,7 +1268,8 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (kind, started_at, ended_at) in intervals {
-            for (index, window) in boundaries.windows(2).enumerate() {
+            for index in overlapping_days(&boundaries, started_at, ended_at.min(query_end)) {
+                let window = &boundaries[index..=index + 1];
                 let overlap = ended_at.min(window[1]).min(query_end) - started_at.max(window[0]);
                 if overlap <= 0 {
                     continue;
@@ -1158,7 +1304,8 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (kind, started_at, ended_at) in session_intervals {
-            for (index, window) in boundaries.windows(2).enumerate() {
+            for index in overlapping_days(&boundaries, started_at, ended_at.min(query_end)) {
+                let window = &boundaries[index..=index + 1];
                 let overlap = ended_at.min(window[1]).min(query_end) - started_at.max(window[0]);
                 if overlap <= 0 {
                     continue;
@@ -1193,7 +1340,8 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (kind, started_at, ended_at) in unobserved_intervals {
-            for (index, window) in boundaries.windows(2).enumerate() {
+            for index in overlapping_days(&boundaries, started_at, ended_at.min(query_end)) {
+                let window = &boundaries[index..=index + 1];
                 let overlap = ended_at.min(window[1]).min(query_end) - started_at.max(window[0]);
                 if overlap > 0 {
                     match kind.as_str() {
@@ -1519,6 +1667,116 @@ impl Storage {
 
     /// Foreground-only domain slices. Latest attribution wins overlaps from older sources.
     pub fn browser_focused_intervals(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(String, TimelineInterval)>> {
+        self.browser_focused_intervals_from_metadata(
+            start,
+            end,
+            &self.focused_interval_metadata_between(start, end)?,
+        )
+    }
+
+    pub(crate) fn browser_focused_intervals_from_metadata(
+        &self,
+        start: i64,
+        end: i64,
+        focus: &[FocusedIntervalMetadata],
+    ) -> Result<Vec<(String, TimelineInterval)>> {
+        // Read each attribution once; an SQL overlap join repeatedly scans history
+        // for every focused interval, even when only a few pairs overlap.
+        let mut stmt = self.conn.prepare(
+            "SELECT id, app_class, domain,
+            MAX(started_at,?1),
+            MIN(COALESCE(ended_at,?2),
+                COALESCE(last_confirmed_at + 90, ended_at, started_at),?2), started_at
+            FROM browser_domain_intervals
+            WHERE started_at < ?2 AND COALESCE(ended_at,?2) > ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![start, end], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Events carry (time, entering, attribution index); None marks focus coverage.
+        // Exits sort before entries at equal timestamps for half-open intervals.
+        let mut events = BTreeMap::<String, Vec<(i64, bool, Option<usize>)>>::new();
+        for (i, (_, app, _, a, b, _)) in rows.iter().enumerate() {
+            if b > a {
+                let e = events.entry(app.clone()).or_default();
+                e.push((*a, true, Some(i)));
+                e.push((*b, false, Some(i)));
+            }
+        }
+        for interval in focus {
+            let a = interval.started_at.max(start);
+            let b = interval.ended_at.min(end);
+            if b > a
+                && let Some(events) = events.get_mut(&interval.app_class)
+            {
+                events.push((a, true, None));
+                events.push((b, false, None));
+            }
+        }
+        let mut output: Vec<(String, TimelineInterval)> = Vec::new();
+        for (app, mut events) in events {
+            events.sort_unstable();
+            let mut active = BTreeSet::new();
+            let mut cursor = start;
+            let mut focused = 0usize;
+            for (at, add, i) in events {
+                if at > cursor
+                    && focused > 0
+                    && let Some(&(_, _, selected)) = active.last()
+                {
+                    let row: &(i64, String, String, i64, i64, i64) = &rows[selected];
+                    if let Some((last_app, last)) = output.last_mut()
+                        && last_app == &app
+                        && last.app_class == row.2
+                        && last.ended_at == cursor
+                    {
+                        last.ended_at = at;
+                    } else {
+                        output.push((
+                            app.clone(),
+                            TimelineInterval {
+                                kind: IntervalKind::Focused,
+                                app_class: row.2.clone(),
+                                started_at: cursor,
+                                ended_at: at,
+                            },
+                        ));
+                    }
+                }
+                if let Some(i) = i {
+                    let key = (rows[i].5, rows[i].0, i);
+                    if add {
+                        active.insert(key);
+                    } else {
+                        active.remove(&key);
+                    }
+                } else if add {
+                    focused += 1;
+                } else {
+                    focused -= 1;
+                }
+                cursor = at;
+            }
+        }
+        Ok(output)
+    }
+
+    // Reference implementation for differential tests of the interval sweep.
+    #[cfg(test)]
+    fn browser_focused_intervals_reference(
         &self,
         start: i64,
         end: i64,
@@ -2790,6 +3048,17 @@ fn unknown_migration_version(applied: &BTreeSet<i64>) -> Option<i64> {
     })
 }
 
+// Half-open intervals visit only the local days they actually overlap.
+fn overlapping_days(boundaries: &[i64], start: i64, end: i64) -> std::ops::Range<usize> {
+    let days = boundaries.len().saturating_sub(1);
+    let first = boundaries
+        .partition_point(|&at| at <= start)
+        .saturating_sub(1)
+        .min(days);
+    let last = boundaries.partition_point(|&at| at < end).min(days);
+    first..if end > start { last.max(first) } else { first }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FocusedIntervalMetadata {
     pub app_class: String,
@@ -3237,6 +3506,10 @@ impl Storage {
         dry_run: bool,
         vacuum: bool,
     ) -> Result<PurgeReport> {
+        if !dry_run {
+            anyhow::ensure!(!self.tracking, "stop omastatd before purging data");
+            self.acquire_exclusive()?;
+        }
         let cutoff_local = cutoff_ts.map(local_timestamp);
         let mut report = PurgeReport {
             dry_run,
@@ -3252,6 +3525,7 @@ impl Storage {
             session_intervals_trimmed: 0,
             system_intervals_trimmed: 0,
             browser_domain_intervals_trimmed: 0,
+            daemon_runs_trimmed: 0,
             vacuumed: false,
         };
 
@@ -3295,6 +3569,11 @@ impl Storage {
                 purge_trim_count(&self.conn, "unobserved_intervals", cutoff_ts)?;
             report.browser_domain_intervals_trimmed =
                 purge_trim_count(&self.conn, "browser_domain_intervals", cutoff_ts)?;
+            if let Some(cutoff) = cutoff_ts {
+                report.daemon_runs_trimmed = self.conn.query_row(
+                    "SELECT COUNT(*) FROM daemon_runs WHERE started_at < ?1 AND (stopped_at IS NULL OR stopped_at > ?1)",
+                    [cutoff], |r| r.get(0))?;
+            }
             return Ok(report);
         }
 
@@ -3325,6 +3604,11 @@ impl Storage {
                     report.daemon_runs_deleted = tx.execute(
                         "DELETE FROM daemon_runs WHERE stopped_at IS NOT NULL AND stopped_at <= ?1",
                         params![cutoff],
+                    )? as i64;
+                    report.daemon_runs_trimmed = tx.execute(
+                        "UPDATE daemon_runs SET started_at = ?1, last_heartbeat_at = MAX(last_heartbeat_at, ?1)
+                         WHERE started_at < ?1 AND (stopped_at IS NULL OR stopped_at > ?1)",
+                        [cutoff],
                     )? as i64;
                     report.intervals_trimmed = trim_table_start(&tx, "intervals", cutoff)?;
                     report.session_intervals_trimmed =
@@ -3639,7 +3923,8 @@ fn next_local_hour_change(cursor: i64, ended_at: i64, key: (u32, u32)) -> i64 {
 mod tests {
     use super::{
         DaemonRecovery, IntervalKind, IntervalMetadata, SessionIntervalKind, Storage,
-        StorageQuickCheck, StorageSchemaStatus, SystemIntervalKind, index_exists,
+        StorageQuickCheck, StorageSchemaStatus, SystemIntervalKind, TimelineInterval, index_exists,
+        overlapping_days,
     };
     use crate::config::{Config, TitleCapture};
     use crate::steam::SteamResolver;
@@ -3720,6 +4005,134 @@ mod tests {
             ",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn database_lock_prevents_takeover_and_purge_through_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut owner = Storage::open_exclusive(Some(&db), &config).unwrap();
+        let run = owner.start_daemon_run(100).unwrap();
+        let id = owner
+            .start_interval(IntervalKind::Focused, "editor", None, None, 110)
+            .unwrap();
+        let alias = dir.path().join("alias.db");
+        std::os::unix::fs::symlink(&db, &alias).unwrap();
+        assert!(Storage::open_exclusive(Some(&alias), &config).is_err());
+        let mut contender = Storage::open(Some(&alias), &config).unwrap();
+        assert!(contender.start_daemon_run(130).is_err());
+        assert!(contender.purge_before(None, false, false).is_err());
+        let reader = Storage::open_read_only(Some(&db), &config).unwrap();
+        assert_eq!(reader.unclosed_intervals().unwrap()[0].id, id);
+        assert!(Storage::open_exclusive(Some(&dir.path().join("other.db")), &config).is_ok());
+        owner.record_daemon_heartbeat(run.run_id, 140).unwrap();
+        owner.close_interval(id, 150).unwrap();
+        drop(owner);
+        let restarted = contender.start_daemon_run(200).unwrap();
+        assert_eq!(
+            restarted.recovery.unwrap().previous_run_id,
+            Some(run.run_id)
+        );
+    }
+
+    #[test]
+    fn cutoff_purge_trims_coverage_and_matches_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let run = storage.start_daemon_run(100).unwrap();
+        let id = storage
+            .start_interval(IntervalKind::Focused, "editor", None, None, 110)
+            .unwrap();
+        storage.close_interval(id, 300).unwrap();
+        storage.finish_daemon_run(run.run_id, 300).unwrap();
+        let preview = storage.purge_before(Some(200), true, false).unwrap();
+        assert_eq!(preview.daemon_runs_trimmed, 1);
+        assert_eq!(
+            storage.observation_windows(100, 300).unwrap(),
+            vec![(100, 300)]
+        );
+        let actual = storage.purge_before(Some(200), false, false).unwrap();
+        assert_eq!(actual.daemon_runs_trimmed, preview.daemon_runs_trimmed);
+        assert_eq!(actual.intervals_trimmed, preview.intervals_trimmed);
+        assert_eq!(actual.daemon_events_deleted, preview.daemon_events_deleted);
+        assert_eq!(
+            storage.observation_windows(100, 300).unwrap(),
+            vec![(200, 300)]
+        );
+        storage.purge_before(None, false, false).unwrap();
+        assert!(storage.observation_windows(0, 400).unwrap().is_empty());
+        let next = storage.start_daemon_run(400).unwrap();
+        assert!(next.recovery.is_none());
+    }
+
+    #[test]
+    fn interrupted_observation_gap_is_closed_without_double_counting() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let config = Config::default();
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+        let run = storage.start_daemon_run(100).unwrap();
+        storage
+            .start_interval(IntervalKind::Focused, "editor", None, None, 100)
+            .unwrap();
+        storage.record_daemon_heartbeat(run.run_id, 150).unwrap();
+        storage.begin_observation_gap(150).unwrap();
+        drop(storage);
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
+        let restarted = storage.start_daemon_run(300).unwrap();
+        assert_eq!(restarted.recovery.unwrap().unobserved_seconds, 150);
+        assert_eq!(
+            storage
+                .session_totals_between(100, 300)
+                .unwrap()
+                .unobserved_seconds,
+            150
+        );
+        assert_eq!(
+            storage.totals_between(100, 300).unwrap()[0].focused_seconds,
+            50
+        );
+        assert_eq!(
+            storage
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM unobserved_intervals WHERE ended_at IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn backwards_timestamps_do_not_break_interval_constraints() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &Config::default()).unwrap();
+        let id = storage
+            .start_interval(IntervalKind::Focused, "editor", None, None, 250)
+            .unwrap();
+        storage.close_interval(id, 200).unwrap();
+        let id = storage
+            .start_session_interval(SessionIntervalKind::Idle, None, 250)
+            .unwrap();
+        storage.close_session_interval(id, 200).unwrap();
+        assert!(
+            storage
+                .totals_between(100, 300)
+                .unwrap()
+                .iter()
+                .all(|row| row.focused_seconds == 0)
+        );
+        assert_eq!(
+            storage
+                .session_totals_between(100, 300)
+                .unwrap()
+                .idle_seconds,
+            0
+        );
     }
 
     #[test]
@@ -3830,6 +4243,9 @@ mod tests {
         );
 
         let first = storage.start_daemon_run(100).unwrap();
+        assert!(storage.start_daemon_run(200).is_err());
+        drop(storage);
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
         let second = storage.start_daemon_run(200).unwrap();
         assert_eq!(second.recovery.unwrap().previous_run_id, Some(first.run_id));
         let active_runs: i64 = storage
@@ -3884,6 +4300,105 @@ mod tests {
                 ("chatgpt.com".to_string(), 150, None)
             ]
         );
+    }
+
+    #[test]
+    fn browser_sweep_matches_overlap_join() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sweep.db");
+        let config = Config::default();
+        let storage = Storage::open(Some(&db), &config).unwrap();
+        // Deterministic random overlaps, gaps, equal starts, multiple browsers,
+        // stale confirmations, legacy NULL confirmations, and open intervals.
+        let mut seed = 7u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as i64
+        };
+        for i in 0..240 {
+            let start = 100 + next() % 1000;
+            let end = start + next() % 200;
+            let app = format!("browser-{}", i % 3);
+            storage.conn.execute(
+                "INSERT INTO intervals(kind,app_class,started_at,ended_at) VALUES('focused',?1,?2,?3)",
+                params![app, start, end],
+            ).unwrap();
+            let start = 100 + next() % 1000;
+            let end = (i % 11 != 0).then(|| start + next() % 300);
+            let confirmed = (i % 4 != 0).then(|| start + next() % 100);
+            storage.conn.execute(
+                "INSERT INTO browser_domain_intervals(source,app_class,domain,started_at,ended_at,last_confirmed_at)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![format!("source-{i}"), app, format!("site-{}", i % 7), start, end, confirmed],
+            ).unwrap();
+        }
+        storage.conn.execute("INSERT INTO intervals(kind,app_class,started_at) VALUES('focused','browser-0',1050)", []).unwrap();
+        // Explicit equal-timestamp attribution tie: the higher id wins.
+        for domain in ["older", "newer"] {
+            storage.conn.execute("INSERT INTO browser_domain_intervals(source,app_class,domain,started_at,ended_at,last_confirmed_at)
+                VALUES(?1,'browser-0',?1,1050,1200,1150)", [domain]).unwrap();
+        }
+        let normalize = |rows: Vec<(String, TimelineInterval)>| {
+            rows.into_iter()
+                .map(|(app, i)| (app, i.app_class, i.started_at, i.ended_at))
+                .collect::<Vec<_>>()
+        };
+        for (start, end) in [
+            (0, 1400),
+            (350, 700),
+            (1050, 1150),
+            (600, 600),
+            (700, 350),
+            (1400, 1500),
+        ] {
+            assert_eq!(
+                normalize(storage.browser_focused_intervals(start, end).unwrap()),
+                normalize(
+                    storage
+                        .browser_focused_intervals_reference(start, end)
+                        .unwrap()
+                ),
+                "range {start}..{end}"
+            );
+        }
+        // An interrupted daemon bounds still-open foreground intervals.
+        storage
+            .conn
+            .execute(
+                "INSERT INTO daemon_runs(started_at,last_heartbeat_at,stopped_at,stop_kind)
+            VALUES(100,1100,1100,'clean')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            normalize(storage.browser_focused_intervals(0, 1400).unwrap()),
+            normalize(
+                storage
+                    .browser_focused_intervals_reference(0, 1400)
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn overlapping_day_search_matches_full_scan() {
+        // Unequal day lengths model both DST transitions.
+        let boundaries = [0, 86400, 169200, 259200, 345600];
+        for start in [-10, 0, 1, 86400, 86401, 169200, 259199, 345600, 400000] {
+            for end in [-10, 0, 1, 86400, 86401, 169200, 259199, 345600, 400000] {
+                let expected = boundaries
+                    .windows(2)
+                    .enumerate()
+                    .filter(|(_, w)| end.min(w[1]) > start.max(w[0]))
+                    .map(|(i, _)| i)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    overlapping_days(&boundaries, start, end).collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+        assert!(overlapping_days(&[], 0, 10).is_empty());
     }
 
     #[test]
@@ -4636,6 +5151,8 @@ mod tests {
             .start_interval(IntervalKind::Focused, "code", None, None, 170)
             .unwrap();
 
+        drop(storage);
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
         let second = storage.start_daemon_run(400).unwrap();
 
         assert_ne!(second.run_id, first.run_id);
@@ -4702,6 +5219,8 @@ mod tests {
             .start_system_interval(SystemIntervalKind::Sleep, Some("logind"), 180)
             .unwrap();
 
+        drop(storage);
+        let mut storage = Storage::open(Some(&db), &config).unwrap();
         let second = storage.start_daemon_run(400).unwrap();
 
         assert_eq!(

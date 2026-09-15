@@ -86,12 +86,21 @@ pub async fn snapshot() -> Result<Snapshot> {
     })
 }
 
+async fn hyprctl_output(query: &str) -> Result<std::process::Output> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        Command::new("hyprctl")
+            .args(["-j", query])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("timed out running hyprctl -j {query}"))?
+    .with_context(|| format!("failed to run hyprctl -j {query}"))
+}
+
 async fn clients() -> Result<Vec<Window>> {
-    let output = Command::new("hyprctl")
-        .args(["-j", "clients"])
-        .output()
-        .await
-        .context("failed to run hyprctl -j clients")?;
+    let output = hyprctl_output("clients").await?;
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -106,11 +115,7 @@ async fn clients() -> Result<Vec<Window>> {
 }
 
 pub async fn active_window_details() -> Result<Option<Window>> {
-    let output = Command::new("hyprctl")
-        .args(["-j", "activewindow"])
-        .output()
-        .await
-        .context("failed to run hyprctl -j activewindow")?;
+    let output = hyprctl_output("activewindow").await?;
 
     if !output.status.success() {
         return Err(anyhow!(

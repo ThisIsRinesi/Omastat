@@ -169,7 +169,7 @@ impl AnalysisContext {
             })
             .collect::<Vec<_>>();
         let domains = if config.privacy.browser_domains {
-            storage.browser_focused_intervals(scan_start, end)?
+            storage.browser_focused_intervals_from_metadata(scan_start, end, &metadata)?
         } else {
             Vec::new()
         };

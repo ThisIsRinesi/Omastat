@@ -48,7 +48,7 @@ Ui.BarWidget {
     activityDetail = null
     detailError = ""
     var cached = detailCache[detailKey()]
-    if (cached && Date.now() - cached.at < fullReportTtlMs) activityDetail = cached.data
+    if (cached) activityDetail = cached.data
     if (selectedActivityKey) refreshDetail(false)
     scheduleInjectPanel()
   }
@@ -57,8 +57,8 @@ Ui.BarWidget {
     if (!selectedActivityKey) return
     var cached = detailCache[detailKey()]
     var ttl = selectedOffset === 0 ? summaryTtlMs : fullReportTtlMs
+    activityDetail = cached ? cached.data : null
     if (force === false && cached && Date.now() - cached.at < ttl) {
-      activityDetail = cached.data
       detailQueued = false
       return
     }
@@ -194,7 +194,7 @@ Ui.BarWidget {
   }
 
   function preloadPanel() {
-    if (!root.opened && !refreshRunning && !detailRunning && !cachedReport(currentKey)) refresh(true)
+    if (!root.opened && !refreshRunning && !detailRunning && !reportIsFresh(currentKey, fullReportTtlMs)) refresh(true)
   }
 
   Timer {
@@ -297,14 +297,14 @@ Ui.BarWidget {
     activityDetail = null
     detailError = ""
     var detail = detailCache[detailKey()]
-    if (detail && Date.now() - detail.at < fullReportTtlMs) activityDetail = detail.data
+    if (detail) activityDetail = detail.data
     refreshDetail(false)
     var key = reportKey(selectedLens, selectedOffset)
-    var livePeriod = selectedOffset === 0
+    var ttl = selectedOffset === 0 ? summaryTtlMs : fullReportTtlMs
     var cached = cachedReport(key)
     if (cached) {
       applyReport(cached, false)
-      if (livePeriod && nowMs() - reportsByKey[key].updatedAt >= summaryTtlMs) refresh(true)
+      if (!reportIsFresh(key, ttl)) refresh(true)
       else { refreshQueued = false; refreshQueuedFull = false }
       return
     }
@@ -510,51 +510,52 @@ Ui.BarWidget {
     })
   }
 
-  function injectPanel() {
+  function injectPanel(force) {
     var target = panelLoader.item
     if (!target) return
     if ("bar" in target) target.bar = root.bar
     if ("settings" in target) target.settings = root.settings
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
-    if ("selectedLens" in target) target.selectedLens = root.selectedLens
-    if ("selectedOffset" in target) target.selectedOffset = root.selectedOffset
-    if ("refreshRunning" in target) target.refreshRunning = root.refreshRunning
-    target.activityAnalytics = root.activityAnalytics
-    target.activityDetail = root.activityDetail
-    target.selectedActivityKind = root.selectedActivityKind
-    target.selectedActivityKey = root.selectedActivityKey
-    target.detailRunning = root.detailRunning
-    target.detailError = root.detailError
-    if ("rows" in target) target.rows = root.rows
-    if ("reportApps" in target) target.reportApps = root.reportApps
-    if ("browserActivity" in target) target.browserActivity = root.browserActivity
-    if ("summaryTopApp" in target) target.summaryTopApp = root.summaryTopApp
-    if ("reportInsights" in target) target.reportInsights = root.reportInsights
-    if ("widgetInsight" in target) target.widgetInsight = root.widgetInsight
-    if ("daily" in target) target.daily = root.daily
-    if ("heatmap" in target) target.heatmap = root.heatmap
-    if ("panelDataLoaded" in target) target.panelDataLoaded = root.panelDataLoaded
-    if ("todayKey" in target) target.todayKey = root.todayKey
-    if ("lensLabel" in target) target.lensLabel = root.lensLabel
-    if ("periodLabel" in target) target.periodLabel = root.periodLabel
-    if ("totalFocused" in target) target.totalFocused = root.totalFocused
-    if ("totalOpen" in target) target.totalOpen = root.totalOpen
-    if ("totalElapsed" in target) target.totalElapsed = root.totalElapsed
-    if ("totalObserved" in target) target.totalObserved = root.totalObserved
-    if ("totalIdle" in target) target.totalIdle = root.totalIdle
-    if ("totalLocked" in target) target.totalLocked = root.totalLocked
-    if ("totalSleep" in target) target.totalSleep = root.totalSleep
-    if ("totalUnobserved" in target) target.totalUnobserved = root.totalUnobserved
-    if ("statusText" in target) target.statusText = root.statusText
-    if ("errorText" in target) target.errorText = root.errorText
-    if ("updatedText" in target) target.updatedText = root.updatedText
+    if (!root.opened && force !== true) return
+    if ("selectedLens" in target && target.selectedLens !== root.selectedLens) target.selectedLens = root.selectedLens
+    if ("selectedOffset" in target && target.selectedOffset !== root.selectedOffset) target.selectedOffset = root.selectedOffset
+    if ("refreshRunning" in target && target.refreshRunning !== root.refreshRunning) target.refreshRunning = root.refreshRunning
+    if (target.activityAnalytics !== root.activityAnalytics) target.activityAnalytics = root.activityAnalytics
+    if (target.activityDetail !== root.activityDetail) target.activityDetail = root.activityDetail
+    if (target.selectedActivityKind !== root.selectedActivityKind) target.selectedActivityKind = root.selectedActivityKind
+    if (target.selectedActivityKey !== root.selectedActivityKey) target.selectedActivityKey = root.selectedActivityKey
+    if (target.detailRunning !== root.detailRunning) target.detailRunning = root.detailRunning
+    if (target.detailError !== root.detailError) target.detailError = root.detailError
+    if ("rows" in target && target.rows !== root.rows) target.rows = root.rows
+    if ("reportApps" in target && target.reportApps !== root.reportApps) target.reportApps = root.reportApps
+    if ("browserActivity" in target && target.browserActivity !== root.browserActivity) target.browserActivity = root.browserActivity
+    if ("summaryTopApp" in target && target.summaryTopApp !== root.summaryTopApp) target.summaryTopApp = root.summaryTopApp
+    if ("reportInsights" in target && target.reportInsights !== root.reportInsights) target.reportInsights = root.reportInsights
+    if ("widgetInsight" in target && target.widgetInsight !== root.widgetInsight) target.widgetInsight = root.widgetInsight
+    if ("daily" in target && target.daily !== root.daily) target.daily = root.daily
+    if ("heatmap" in target && target.heatmap !== root.heatmap) target.heatmap = root.heatmap
+    if ("panelDataLoaded" in target && target.panelDataLoaded !== root.panelDataLoaded) target.panelDataLoaded = root.panelDataLoaded
+    if ("todayKey" in target && target.todayKey !== root.todayKey) target.todayKey = root.todayKey
+    if ("lensLabel" in target && target.lensLabel !== root.lensLabel) target.lensLabel = root.lensLabel
+    if ("periodLabel" in target && target.periodLabel !== root.periodLabel) target.periodLabel = root.periodLabel
+    if ("totalFocused" in target && target.totalFocused !== root.totalFocused) target.totalFocused = root.totalFocused
+    if ("totalOpen" in target && target.totalOpen !== root.totalOpen) target.totalOpen = root.totalOpen
+    if ("totalElapsed" in target && target.totalElapsed !== root.totalElapsed) target.totalElapsed = root.totalElapsed
+    if ("totalObserved" in target && target.totalObserved !== root.totalObserved) target.totalObserved = root.totalObserved
+    if ("totalIdle" in target && target.totalIdle !== root.totalIdle) target.totalIdle = root.totalIdle
+    if ("totalLocked" in target && target.totalLocked !== root.totalLocked) target.totalLocked = root.totalLocked
+    if ("totalSleep" in target && target.totalSleep !== root.totalSleep) target.totalSleep = root.totalSleep
+    if ("totalUnobserved" in target && target.totalUnobserved !== root.totalUnobserved) target.totalUnobserved = root.totalUnobserved
+    if ("statusText" in target && target.statusText !== root.statusText) target.statusText = root.statusText
+    if ("errorText" in target && target.errorText !== root.errorText) target.errorText = root.errorText
+    if ("updatedText" in target && target.updatedText !== root.updatedText) target.updatedText = root.updatedText
   }
 
   function open() {
     if (panelLoader.item) {
-      panelLoader.item.open()
       preparePanel()
+      panelLoader.item.open()
     }
   }
 
@@ -565,16 +566,24 @@ Ui.BarWidget {
   function togglePanel() {
     if (!panelLoader.item) return
     var wasOpen = opened
-    panelLoader.item.toggle()
     if (!wasOpen) preparePanel()
+    panelLoader.item.toggle()
   }
 
   function preparePanel() {
+    if (todayKey && todayKey !== Model.dateKey(new Date())) {
+      beginPeriodLoad(selectedLens, selectedOffset)
+      todayKey = ""
+      activityDetail = null
+      detailError = ""
+    }
+    refreshDetail(false)
     var cached = cachedReport(currentKey)
     if (cached) applyReport(cached, false)
     var ttl = selectedOffset === 0 ? summaryTtlMs : fullReportTtlMs
-    if (!cached || nowMs() - reportsByKey[currentKey].updatedAt >= ttl) refresh(true)
+    if (!reportIsFresh(currentKey, ttl)) refresh(true)
     else { refreshQueued = false; refreshQueuedFull = false }
+    injectPanel(true)
   }
 
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
@@ -738,14 +747,16 @@ Ui.BarWidget {
   function cachedReport(key) {
     var entry = reportsByKey ? reportsByKey[key] : null
     if (!entry || !entry.report || entry.report.todayKey !== Model.dateKey(new Date())) return null
-    if (nowMs() - Number(entry.updatedAt || 0) > fullReportTtlMs) return null
     return entry.report
+  }
+
+  function reportIsFresh(key, ttl) {
+    return !!cachedReport(key) && nowMs() - Number(reportsByKey[key].updatedAt || 0) < ttl
   }
 
   function cachedSummary(key) {
     var entry = summariesByKey ? summariesByKey[key] : null
     if (!entry || !entry.summary || entry.summary.todayKey !== Model.dateKey(new Date())) return null
-    if (nowMs() - Number(entry.updatedAt || 0) > summaryTtlMs) return null
     return entry.summary
   }
 

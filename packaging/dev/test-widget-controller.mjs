@@ -269,3 +269,112 @@ console.log("Cache reuse, preloading, and request deduplication checks passed");
   assert.equal(c.refreshRunning, false);
   assert.equal(c.totalFocused, 600, "background result cannot replace the cached selected tab");
 }
+
+for (const offset of [0, -1]) {
+  const c = controller();
+  c.selectedOffset = offset;
+  c.refresh(true);
+  deliver(c, payload(c));
+  c.reportsByKey[c.currentKey].updatedAt -= 600000;
+  c.setPeriod("week", offset);
+  deliver(c, payload(c, 1200));
+  c.setPeriod("day", offset);
+  assert.equal(c.totalFocused, 600, "expired retained report appears immediately");
+  assert.equal(c.panelDataLoaded, true);
+  assert.equal(c.refreshRunning, true, "expired historical and live reports refresh");
+  deliver(c, "bad JSON");
+  assert.equal(c.totalFocused, 600, "refresh error retains expired content");
+  c.preparePanel();
+  deliver(c, payload(c, 900));
+  c.refresh(true);
+  assert.equal(c.refreshRunning, true, "explicit refresh bypasses a fresh cache");
+}
+{
+  const c = controller();
+  c.setActivity("app", "editor");
+  deliverDetail(c, detailPayload("editor"));
+  c.detailCache[c.detailKey()].at -= 600000;
+  c.setActivity("app", "other");
+  deliverDetail(c, detailPayload("other"));
+  c.setActivity("app", "editor");
+  assert.equal(c.activityDetail.activities[0].key, "editor", "expired detail appears immediately");
+  assert.equal(c.detailRunning, true);
+  deliverDetail(c, "bad JSON", 1);
+  assert.equal(c.activityDetail.activities[0].key, "editor");
+  assert.notEqual(c.detailError, "");
+}
+{
+  const c = controller();
+  for (let n = 0; n < 15; n++) {
+    c.cacheReport("day:" + -n, { todayKey: c.Model.dateKey(new Date()) });
+  }
+  assert.equal(Object.keys(c.reportsByKey).length, 12, "retained cache stays bounded");
+}
+{
+  const c = controller();
+  const target = { hostWidget: null, rows: [], totalFocused: 0, refreshRunning: false };
+  c.panelLoader.item = target;
+  c.refresh(true);
+  deliver(c, payload(c));
+  c.injectPanel();
+  assert.equal(target.hostWidget.refresh, c.refresh, "closed panel still receives its host");
+  assert.equal(target.totalFocused, 0, "hidden report injection is deferred");
+  target.open = () => {
+    assert.equal(target.totalFocused, 600, "data is injected before opening");
+    c.opened = true;
+  };
+  c.open();
+  let rows = target.rows;
+  let writes = 0;
+  Object.defineProperty(target, "rows", { get: () => rows, set: value => { rows = value; writes++; } });
+  c.refreshRunning = true;
+  c.injectPanel();
+  assert.equal(target.refreshRunning, true);
+  assert.equal(writes, 0, "status changes do not reassign the report model");
+}
+for (const exitFirst of [false, true]) {
+  const c = controller();
+  c.refresh(true);
+  c.setPeriod("week", 0);
+  c.setPeriod("month", 0);
+  deliver(c, payload(c), 0, exitFirst);
+  assert.equal(c.loadingLens, "month", "only the latest queued navigation runs");
+  deliver(c, payload(c, 1800), 0, exitFirst);
+  assert.equal(c.totalFocused, 1800);
+  assert.equal(c.refreshRunning, false);
+}
+console.log("Stale retention, bounded caches, hidden injection, and navigation checks passed");
+{
+  const c = controller();
+  c.refresh(true);
+  deliver(c, payload(c));
+  c.todayKey = "2000-01-01";
+  c.reportsByKey[c.currentKey].report.todayKey = c.todayKey;
+  c.activityDetail = { activities: [{ key: "yesterday" }] };
+  c.preparePanel();
+  assert.equal(c.panelDataLoaded, false, "yesterday's relative period is not shown on reopening");
+  assert.equal(c.activityDetail, null);
+  assert.equal(c.refreshRunning, true);
+}
+{
+  const panel = readFileSync(new URL("../omarchy/omastat/Panel.qml", import.meta.url), "utf8");
+  const handlers = panel.match(/  IpcHandler \{[\s\S]*?\n  \}/)[0];
+  const calls = [];
+  const hostWidget = { open: () => calls.push("open"), togglePanel: () => calls.push("toggle"), statusText: "current" };
+  const context = vm.createContext({ root: { hostWidget, statusText: "old" } });
+  for (const name of ["open", "show", "toggle", "status"]) {
+    const source = handlers.match(new RegExp("function " + name + "\\(\\)(?:: string)? \\{[^\\n]+\\}"))[0].replace(": string", "");
+    vm.runInContext(source, context);
+  }
+  context.open(); context.show(); context.toggle();
+  assert.deepEqual(calls, ["open", "open", "toggle"], "IPC uses the controller's prepare-before-open path");
+  assert.equal(context.status(), "current", "hidden panel status comes from the controller");
+}
+{
+  const c = controller();
+  c.selectedActivityKind = "app";
+  c.selectedActivityKey = "editor";
+  c.activityDetail = { activities: [{ key: "yesterday" }] };
+  c.refreshDetail(false);
+  assert.equal(c.activityDetail, null, "detail from another date cannot survive a refresh without a matching cache key");
+}

@@ -29,11 +29,25 @@ async fn main() -> Result<()> {
     }
     config.log_warnings();
 
+    if let Commands::Purge {
+        dry_run: false,
+        confirm: false,
+        ..
+    } = &cli.command
+    {
+        anyhow::bail!("purge is destructive; rerun with --confirm or use --dry-run");
+    }
     let storage_mode = match &cli.command {
-        Commands::RepairTitles { .. } | Commands::Purge { .. } => StorageOpenMode::ReadWriteMigrate,
+        Commands::RepairTitles { .. } | Commands::Purge { dry_run: false, .. } => {
+            StorageOpenMode::ReadWriteMigrate
+        }
         _ => StorageOpenMode::ReadOnly,
     };
-    let mut storage = Storage::open_with_mode(cli.database.as_deref(), &config, storage_mode)?;
+    let mut storage = if matches!(&cli.command, Commands::Purge { dry_run: false, .. }) {
+        Storage::open_exclusive(cli.database.as_deref(), &config)?
+    } else {
+        Storage::open_with_mode(cli.database.as_deref(), &config, storage_mode)?
+    };
     let mut steam = SteamResolver::default();
 
     match cli.command {
