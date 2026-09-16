@@ -159,7 +159,8 @@ const yearBuckets = context.activityCells(
   "year",
 );
 assert.equal(yearBuckets.length, 2);
-assert.equal(yearBuckets[0].label, "Jan 2026");
+assert.equal(yearBuckets[0].weekly, true);
+assert.equal(yearBuckets[0].label, "2026-01-02 - 2026-01-03");
 assert.equal(yearBuckets[0].seconds, 1500);
 
 const lifeBuckets = context.activityCells(
@@ -240,7 +241,7 @@ assert.match(context.trendDefaultText([{seconds: 3600, label: 'Mon'}], 'day'), /
 assert.match(context.trendDefaultText([{seconds: 3600, label: 'Jan'}], 'month'), /Monthly average 1h/);
 assert.match(context.trendDefaultText([{seconds: 3600, label: 'Week 1'}], 'week'), /Weekly average 1h/);
 
-for (const [lens, title] of [["week", "Daily time"], ["month", "Daily time"], ["year", "Monthly time"], ["life", "Weekly time"]]) {
+for (const [lens, title] of [["week", "Daily time"], ["month", "Daily time"], ["year", "Weekly time"], ["life", "Weekly time"]]) {
   assert.equal(context.trendTitle(lens), title);
 }
 assert.equal(context.clockLabel(0), "00:00");

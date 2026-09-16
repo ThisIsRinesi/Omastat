@@ -145,8 +145,8 @@ impl Lens {
     pub fn title(self) -> &'static str {
         match self {
             Self::Day => "Today",
-            Self::Week => "This Week",
-            Self::Month => "This Month",
+            Self::Week => "Last 7 Days",
+            Self::Month => "Last 30 Days",
             Self::Year => "This Year",
             Self::Life => "Lifetime",
         }
@@ -181,8 +181,8 @@ impl Lens {
     pub fn history_days(self) -> u32 {
         match self {
             Self::Day => 7,
-            Self::Week => 14,
-            Self::Month => 31,
+            Self::Week => 7,
+            Self::Month => 30,
             Self::Year | Self::Life => 90,
         }
     }
@@ -737,24 +737,34 @@ fn period_for_lens(lens: Lens, offset: i32) -> Result<PeriodBounds> {
             (start, start + Duration::days(1), label)
         }
         Lens::Week => {
-            let days_from_monday = today.weekday().num_days_from_monday() as i64;
-            let current_start = today - Duration::days(days_from_monday);
-            let start = current_start + Duration::weeks(offset as i64);
-            (
-                start,
-                start + Duration::days(7),
-                format!("Week of {}", start.format("%b %-d, %Y")),
-            )
+            if offset == 0 {
+                let start = today - Duration::days(6);
+                (start, today + Duration::days(1), "Last 7 days".to_string())
+            } else {
+                let days_from_monday = today.weekday().num_days_from_monday() as i64;
+                let current_start = today - Duration::days(days_from_monday);
+                let start = current_start + Duration::weeks(offset as i64);
+                (
+                    start,
+                    start + Duration::days(7),
+                    format!("Week of {}", start.format("%b %-d, %Y")),
+                )
+            }
         }
         Lens::Month => {
-            let current_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-                .context("failed to compute month start")?;
-            let start = add_months(current_start, offset)?;
-            (
-                start,
-                add_months(start, 1)?,
-                start.format("%B %Y").to_string(),
-            )
+            if offset == 0 {
+                let start = today - Duration::days(29);
+                (start, today + Duration::days(1), "Last 30 days".to_string())
+            } else {
+                let current_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+                    .context("failed to compute month start")?;
+                let start = add_months(current_start, offset)?;
+                (
+                    start,
+                    add_months(start, 1)?,
+                    start.format("%B %Y").to_string(),
+                )
+            }
         }
         Lens::Year => {
             let year = today.year() + offset;
@@ -1075,6 +1085,28 @@ mod tests {
         assert!(period.meta.start_date.is_some());
         assert!(period.meta.end_date.is_some());
         assert_ne!(period.meta.label, "This Month");
+    }
+
+    #[test]
+    fn current_week_and_month_are_rolling_windows() {
+        let today = clock::local_now().date_naive();
+        let week = period_for_lens(Lens::Week, 0).unwrap();
+        let month = period_for_lens(Lens::Month, 0).unwrap();
+        let expected_week_start = (today - Duration::days(6)).format("%Y-%m-%d").to_string();
+        let expected_month_start = (today - Duration::days(29)).format("%Y-%m-%d").to_string();
+
+        assert_eq!(week.meta.label, "Last 7 days");
+        assert_eq!(
+            week.meta.start_date.as_deref(),
+            Some(expected_week_start.as_str())
+        );
+        assert_eq!(week.day_count, 7);
+        assert_eq!(month.meta.label, "Last 30 days");
+        assert_eq!(
+            month.meta.start_date.as_deref(),
+            Some(expected_month_start.as_str())
+        );
+        assert_eq!(month.day_count, 30);
     }
 
     #[test]

@@ -636,7 +636,8 @@ Ui.BarWidget {
 
   function reportDaysForLens(lens) {
     var value = normalizedLens(lens)
-    if (value === "week") return 14
+    if (value === "week") return 7
+    if (value === "month") return 30
     if (value === "year" || value === "life") return 90
     return 31
   }
@@ -645,8 +646,8 @@ Ui.BarWidget {
     var value = normalizedLens(lens)
     if (value === "life") return "Lifetime"
     if (Math.floor(Number(offset) || 0) < 0) return "Loading period"
-    if (value === "week") return "This Week"
-    if (value === "month") return "This Month"
+    if (value === "week") return "Last 7 days"
+    if (value === "month") return "Last 30 days"
     if (value === "year") return "This Year"
     return "Today"
   }

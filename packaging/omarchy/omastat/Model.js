@@ -741,7 +741,7 @@ function monthBucketCells(daily) {
 
 function activityCells(daily, lens) {
   var lensValue = String(lens || "day")
-  if (lensValue === "year") return monthBucketCells(daily)
+  if (lensValue === "year") return weekCells(daily)
   if (lensValue === "life") return weekCells(daily).slice(-13)
   if (lensValue === "month") return monthCells(daily, lens)
   return trendDays(daily, "", lensValue)
@@ -1121,7 +1121,7 @@ function chartDateLabel(cell) {
 }
 
 function trendTitle(lens) {
-  return lens === "year" ? "Monthly time" : lens === "life" ? "Weekly time" : "Daily time"
+  return lens === "year" || lens === "life" ? "Weekly time" : "Daily time"
 }
 
 function clockLabel(hour) {
