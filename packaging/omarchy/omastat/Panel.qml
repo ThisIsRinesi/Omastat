@@ -165,6 +165,9 @@ Ui.Panel {
   readonly property var lineDays: selectedLens === "month" ? Model.trendDays(shownDaily, "", "month") : trend
   readonly property var calendarCells: Model.monthCells(shownDaily, "month")
   readonly property var calendarWeeks: Model.monthWeekCells(shownDaily)
+  readonly property bool yearlyRhythm: selectedLens === "year"
+  readonly property var rhythmCells: yearlyRhythm ? Model.monthCells(shownDaily, "year") : calendarCells
+  readonly property var rhythmWeeks: yearlyRhythm ? rhythmCells : calendarWeeks
   readonly property var calendarWeekdays: Model.weekdayFocusCells(shownHeat)
   function formatDuration(seconds) { return Model.fmt(seconds) }
   function sliceColor(index, alpha) {
@@ -683,18 +686,19 @@ Ui.Panel {
                   expanded: true
                   onActivatedCell: function(cell) { root.openCell(cell) }
                 }
-                IntensityLegend { Layout.fillWidth: true; visible: root.selectedLens === "month"; contextLabel: "Per calendar day"; maxSeconds: Model.maxHeatSeconds(root.calendarCells) }
+                IntensityLegend { Layout.fillWidth: true; visible: root.selectedLens === "month" || root.selectedLens === "year"; contextLabel: root.yearlyRhythm ? "Per week" : "Per calendar day"; maxSeconds: Model.maxHeatSeconds(root.rhythmCells) }
                 MonthRhythm {
                   Layout.fillWidth: true
                   Layout.preferredHeight: implicitHeight
-                  visible: root.selectedLens === "month"
-                  title: "Your month at a glance"
+                  visible: root.selectedLens === "month" || root.selectedLens === "year"
+                  title: root.yearlyRhythm ? "Your year by week" : "Your month at a glance"
                   detail: ""
-                  cells: root.calendarCells
-                  weeks: root.calendarWeeks
+                  weeklyCells: root.yearlyRhythm
+                  cells: root.rhythmCells
+                  weeks: root.rhythmWeeks
                   weekdays: root.calendarWeekdays
-                  maxSeconds: root.maximum(root.calendarCells)
-                  weekMaxSeconds: root.maximum(root.calendarWeeks)
+                  maxSeconds: root.maximum(root.rhythmCells)
+                  weekMaxSeconds: root.maximum(root.rhythmWeeks)
                   weekdayMaxSeconds: root.maximum(root.calendarWeekdays)
                   onActivatedCell: function(cell) { root.openCell(cell) }
                 }
@@ -1664,6 +1668,7 @@ Ui.Panel {
     property var cells: []
     property var weeks: []
     property var weekdays: []
+    property bool weeklyCells: false
     property real maxSeconds: 0
     property real weekMaxSeconds: 0
     property real weekdayMaxSeconds: 0
@@ -1676,7 +1681,7 @@ Ui.Panel {
       ? Model.monthCellDetailText(cells[selectedIndex])
       : ""
     readonly property string readoutText: hoveredText.length > 0 ? hoveredText : selectedText
-    readonly property string defaultText: Model.monthDefaultText(cells, false)
+    readonly property string defaultText: Model.monthDefaultText(cells, weeklyCells)
     readonly property bool compact: width > 0 && width < Style.space(540)
     readonly property real gap: Style.space(4)
     readonly property int rowCount: Math.ceil(cells.length / 7)
@@ -1777,9 +1782,11 @@ Ui.Panel {
         Layout.alignment: Qt.AlignTop
         spacing: Style.space(4)
 
-        Label { text: "Calendar days"; color: root.dim; font.pixelSize: Style.font.caption; font.bold: true }
+        Label { text: monthRhythmRoot.weeklyCells ? "Weeks" : "Calendar days"; color: root.dim; font.pixelSize: Style.font.caption; font.bold: true }
         Row {
           width: monthRhythmRoot.calendarWidth
+          height: monthRhythmRoot.weeklyCells ? 0 : implicitHeight
+          visible: !monthRhythmRoot.weeklyCells
           spacing: monthRhythmRoot.gap
 
           Repeater {
@@ -1819,7 +1826,7 @@ Ui.Panel {
               Keys.onReturnPressed: if (canOpen) monthRhythmRoot.activatedCell(modelData)
               Keys.onSpacePressed: if (canOpen) monthRhythmRoot.activatedCell(modelData)
               Accessible.role: Accessible.Button
-              Accessible.name: Model.monthCellDetailText(modelData) + (canOpen ? ". Open day view" : "")
+              Accessible.name: Model.monthCellDetailText(modelData) + (canOpen ? (monthRhythmRoot.weeklyCells ? ". Open week view" : ". Open day view") : "")
               width: monthRhythmRoot.cellSize
               height: width
               radius: Style.space(4)
