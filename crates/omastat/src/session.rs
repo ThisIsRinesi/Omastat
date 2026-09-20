@@ -25,7 +25,15 @@ pub struct SessionStatus {
     pub locked: bool,
     pub stay_awake: bool,
     pub audio_playing: bool,
+    pub audio_sources: Vec<AudioSource>,
     pub source: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioSource {
+    pub app_class: String,
+    pub pid: Option<i64>,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +66,7 @@ impl Default for SessionStatus {
             locked: false,
             stay_awake: false,
             audio_playing: false,
+            audio_sources: Vec::new(),
             source: "default",
         }
     }
@@ -336,14 +345,15 @@ async fn omarchy_status() -> Result<SessionStatus> {
             false
         }
     };
-    let audio_playing = audio_playing_with_fallback().await;
+    let audio_sources = audio_sources_with_fallback().await;
 
     Ok(SessionStatus {
         idle: idle.idle || idle.in_idle_cycle || idle.screensaver_started,
         idle_since_unix: None,
         locked,
         stay_awake: idle.stay_awake,
-        audio_playing,
+        audio_playing: !audio_sources.is_empty(),
+        audio_sources,
         source: "omarchy-shell",
     })
 }
@@ -371,23 +381,59 @@ async fn loginctl_status() -> Result<SessionStatus> {
     .await?;
     let mut status = parse_loginctl_status(&output);
     status.stay_awake = stay_awake_state_path().is_file();
-    status.audio_playing = audio_playing_with_fallback().await;
+    status.audio_sources = audio_sources_with_fallback().await;
+    status.audio_playing = !status.audio_sources.is_empty();
     Ok(status)
 }
 
-async fn audio_playing_with_fallback() -> bool {
-    match audio_playing().await {
-        Ok(audio_playing) => audio_playing,
+async fn audio_sources_with_fallback() -> Vec<AudioSource> {
+    match command_output("pactl", &["-f", "json", "list", "sink-inputs"])
+        .await
+        .and_then(|output| parse_audio_sources(&output))
+    {
+        Ok(sources) => sources,
         Err(error) => {
             tracing::debug!("audio playback status unavailable; assuming silent: {error:#}");
-            false
+            Vec::new()
         }
     }
 }
 
-async fn audio_playing() -> Result<bool> {
-    let output = command_output("pactl", &["list", "sink-inputs"]).await?;
-    Ok(parse_pactl_sink_inputs_playing(&output))
+fn parse_audio_sources(output: &str) -> Result<Vec<AudioSource>> {
+    let inputs: Vec<serde_json::Value> = serde_json::from_str(output)?;
+    let mut sources = Vec::new();
+    for input in inputs {
+        if input["corked"].as_bool() != Some(false) || input["mute"].as_bool() != Some(false) {
+            continue;
+        }
+        if let Some(volume) = input["volume"].as_object()
+            && !volume.is_empty()
+            && volume.values().all(|v| v["value"].as_u64() == Some(0))
+        {
+            continue;
+        }
+        let properties = &input["properties"];
+        let binary = properties["application.process.binary"]
+            .as_str()
+            .or_else(|| properties["application.name"].as_str())
+            .unwrap_or("unknown");
+        let source = AudioSource {
+            app_class: crate::identity::canonical_app_class(
+                binary.strip_suffix("-bin").unwrap_or(binary),
+            ),
+            pid: properties["application.process.id"]
+                .as_str()
+                .and_then(|v| v.parse().ok()),
+            title: properties["media.name"]
+                .as_str()
+                .filter(|s| !matches!(*s, "AudioStream" | "Playback" | "audio stream"))
+                .map(str::to_owned),
+        };
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    Ok(sources)
 }
 
 async fn command_output(program: &str, args: &[&str]) -> Result<String> {
@@ -447,15 +493,6 @@ fn parse_omarchy_idle_status(output: &str) -> Result<OmarchyIdleStatus> {
     serde_json::from_str(output).context("failed to parse omarchy-shell idle status JSON")
 }
 
-fn parse_pactl_sink_inputs_playing(output: &str) -> bool {
-    output.lines().any(|line| {
-        let Some((key, value)) = line.trim().split_once(':') else {
-            return false;
-        };
-        key.trim().eq_ignore_ascii_case("State") && value.trim().eq_ignore_ascii_case("RUNNING")
-    })
-}
-
 fn stay_awake_state_path() -> PathBuf {
     dirs::state_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
@@ -480,8 +517,8 @@ struct OmarchyIdleStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionStatus, SleepEvent, parse_loginctl_status, parse_omarchy_idle_status,
-        parse_pactl_sink_inputs_playing,
+        SessionStatus, SleepEvent, parse_audio_sources, parse_loginctl_status,
+        parse_omarchy_idle_status,
     };
 
     #[test]
@@ -494,6 +531,7 @@ mod tests {
                 locked: false,
                 stay_awake: false,
                 audio_playing: false,
+                audio_sources: Vec::new(),
                 source: "loginctl",
             }
         );
@@ -524,6 +562,7 @@ mod tests {
             locked: false,
             stay_awake: false,
             audio_playing: false,
+            audio_sources: Vec::new(),
             source: "test",
         };
         assert!(status.should_pause(true, true));
@@ -538,6 +577,7 @@ mod tests {
             locked: false,
             stay_awake: false,
             audio_playing: true,
+            audio_sources: Vec::new(),
             source: "test",
         };
         assert!(!status.should_pause(true, true));
@@ -547,13 +587,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_running_pactl_sink_inputs_as_audio_playback() {
-        assert!(parse_pactl_sink_inputs_playing(
-            "Sink Input #42\n\tState: RUNNING\n\tMute: no\n"
-        ));
-        assert!(!parse_pactl_sink_inputs_playing(
-            "Sink Input #42\n\tState: CORKED\n"
-        ));
+    fn audio_sources_exclude_corked_muted_and_zero_volume() {
+        let sources = parse_audio_sources(r#"[
+            {"corked":false,"mute":false,"properties":{"application.process.binary":"zen-bin","application.process.id":"42","media.name":"Video - YouTube"}},
+            {"corked":true,"mute":false},
+            {"corked":false,"mute":true},
+            {"corked":false,"mute":false,"volume":{"left":{"value":0}}},
+            {"properties":{}}
+        ]"#).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].app_class, "zen");
+        assert_eq!(sources[0].pid, Some(42));
     }
 
     #[test]

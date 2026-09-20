@@ -16,3 +16,5 @@ pub mod steam;
 pub mod storage;
 pub mod terminal;
 pub mod tracker;
+
+pub mod multitasking;

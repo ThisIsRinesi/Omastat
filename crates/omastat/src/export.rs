@@ -43,6 +43,7 @@ pub struct DataExport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AggregateExport {
+    pub multitasking: crate::multitasking::MultitaskingReport,
     pub app_totals: Vec<AppTotals>,
     pub app_breakdown: Vec<report::AppBreakdown>,
     pub daily_totals: Vec<DayTotals>,
@@ -65,6 +66,7 @@ pub fn build_data_export(
         DataExportScope::All | DataExportScope::Aggregate
     )
     .then(|| AggregateExport {
+        multitasking: report.multitasking.clone(),
         app_totals: report.rows.clone(),
         app_breakdown: report.apps.clone(),
         daily_totals: report.daily.clone(),
@@ -91,6 +93,14 @@ pub fn write_data_export_csv(export: &DataExport, output_dir: &Path) -> Result<(
     )?;
 
     if let Some(aggregate) = &export.aggregate {
+        write_csv(
+            output_dir.join("multitasking_daily.csv"),
+            &aggregate.multitasking.daily,
+        )?;
+        write_csv(
+            output_dir.join("multitasking_sources.csv"),
+            &aggregate.multitasking.sources,
+        )?;
         write_csv(output_dir.join("app_totals.csv"), &aggregate.app_totals)?;
         write_csv(
             output_dir.join("app_breakdown.csv"),
@@ -106,6 +116,10 @@ pub fn write_data_export_csv(export: &DataExport, output_dir: &Path) -> Result<(
     }
 
     if let Some(raw) = &export.raw {
+        write_csv(
+            output_dir.join("raw_media_intervals.csv"),
+            &raw.media_intervals,
+        )?;
         write_csv(
             output_dir.join("raw_browser_domain_intervals.csv"),
             &raw.browser_domain_intervals,

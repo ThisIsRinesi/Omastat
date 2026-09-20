@@ -308,3 +308,44 @@ recording. Lifetime elapsed time starts at retained recording history. A
 stale daemon's unfinished focus ends at its last confirmed heartbeat rather
 than growing until the next restart. Raw interval exports retain stored
 start/end values; aggregate reports apply the liveness boundary.
+
+
+### Multitasking and background audio
+
+“Hours multitasked” measures focused app use accompanied by audio from a different
+app. One hour playing Deadlock with Zen playing YouTube records one focused hour
+and one multitasked hour. These metrics overlap; they must not be added together.
+Multiple simultaneous audio sources count each elapsed second once. Audio from
+the focused app alone does not count; different tabs in the same focused browser
+are not currently treated as separate apps.
+
+The dashboard includes an hourly overlay, a daily/weekly trend overlay, and the
+background audio sources. Hover or keyboard-select graph points for exact times.
+Selected-activity charts continue to show that activity's focused time.
+The report JSON includes `multitasking` (total seconds, daily totals, hourly
+heatmap, and sources); the compact summary includes `total_multitasked_seconds`.
+JSON/CSV exports and purge include the new media data.
+
+The daemon reuses its session poll to read `pactl -f json list sink-inputs`,
+excluding corked, muted and zero-volume streams. Audio streams are matched to
+window process IDs when available, with executable identity as fallback.
+Playback is a stream-state estimate, not an audio waveform or attention detector.
+Transitions have the existing session polling resolution (at least 15 seconds).
+Focus switches take effect at their existing event timestamps. Lock, suspend,
+shutdown and observation outages stop tracking. Unconfirmed audio expires after
+three session polls. Existing historical focus data is not reclassified.
+
+The 0.3.0 extension reports audible, unmuted tab domains even when the browser is
+unfocused, on audio/tab changes and its existing 30-second heartbeat. It excludes
+private tabs and transmits domains only, without URL paths or titles. Browser
+attribution expires after 90 seconds without confirmation. Fresh audible-domain
+reports enrich matching system audio; they do not count as extra focused time.
+`privacy.browser_domains = false` disables domain reporting and attribution.
+Media titles are used as a fallback only when `title_capture = "all"`; otherwise
+unattributed streams retain the app label. A selected browser tab's domain is
+never assumed to be the audio source.
+
+The bundled signed extension is 0.3.0. Run the browser integration installer
+and restart Zen/Firefox to load the update. Older extensions remain compatible
+with app-level audio tracking and optional media-title fallback, but do not
+report audible domains.

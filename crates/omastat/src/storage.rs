@@ -245,6 +245,7 @@ pub struct RawBrowserDomainInterval {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RawExportRows {
+    pub media_intervals: Vec<crate::multitasking::MediaInterval>,
     pub intervals: Vec<RawInterval>,
     pub session_intervals: Vec<RawSessionInterval>,
     pub system_intervals: Vec<RawSystemInterval>,
@@ -260,12 +261,14 @@ pub struct PurgeReport {
     pub session_intervals_deleted: i64,
     pub system_intervals_deleted: i64,
     pub browser_domain_intervals_deleted: i64,
+    pub media_intervals_deleted: i64,
     pub daemon_events_deleted: i64,
     pub daemon_runs_deleted: i64,
     pub intervals_trimmed: i64,
     pub session_intervals_trimmed: i64,
     pub system_intervals_trimmed: i64,
     pub browser_domain_intervals_trimmed: i64,
+    pub media_intervals_trimmed: i64,
     pub daemon_runs_trimmed: i64,
     pub vacuumed: bool,
 }
@@ -332,7 +335,7 @@ pub(crate) struct SessionTransition<'a> {
 }
 
 pub struct Storage {
-    conn: Connection,
+    pub(crate) conn: Connection,
     path: PathBuf,
     exclusive_lock: Option<fs::File>,
     tracking: bool,
@@ -422,6 +425,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 10,
         description: "expire browser attribution without confirmation",
         up: migrate_0010_browser_confirmation,
+    },
+    Migration {
+        version: 11,
+        description: "record background audio and audible browser domains",
+        up: crate::multitasking::migrate,
     },
 ];
 
@@ -2680,6 +2688,8 @@ fn validate_required_schema(conn: &Connection) -> rusqlite::Result<()> {
         "SELECT id, run_id, kind, occurred_at, detail FROM daemon_events LIMIT 0",
         "SELECT id, kind, source, started_at, ended_at FROM unobserved_intervals LIMIT 0",
         "SELECT id, source, app_class, domain, started_at, ended_at FROM browser_domain_intervals LIMIT 0",
+        "SELECT source,app_class,label,started_at,ended_at,last_confirmed_at,ttl FROM media_intervals LIMIT 0",
+        "SELECT source,updated_at FROM media_state LIMIT 0",
     ] {
         conn.prepare(statement)?;
     }
@@ -3493,6 +3503,7 @@ impl Storage {
 
     pub fn raw_export_between(&self, start: i64, end: i64) -> Result<RawExportRows> {
         Ok(RawExportRows {
+            media_intervals: self.media_intervals_between(start, end)?,
             intervals: self.raw_intervals_between(start, end)?,
             session_intervals: self.raw_session_intervals_between(start, end)?,
             system_intervals: self.raw_system_intervals_between(start, end)?,
@@ -3519,17 +3530,28 @@ impl Storage {
             session_intervals_deleted: 0,
             system_intervals_deleted: 0,
             browser_domain_intervals_deleted: 0,
+            media_intervals_deleted: 0,
             daemon_events_deleted: 0,
             daemon_runs_deleted: 0,
             intervals_trimmed: 0,
             session_intervals_trimmed: 0,
             system_intervals_trimmed: 0,
             browser_domain_intervals_trimmed: 0,
+            media_intervals_trimmed: 0,
             daemon_runs_trimmed: 0,
             vacuumed: false,
         };
 
         if dry_run {
+            report.media_intervals_deleted = purge_delete_count(
+                &self.conn,
+                "media_intervals",
+                cutoff_ts,
+                "COALESCE(ended_at,last_confirmed_at+ttl) <= ?1",
+            )?;
+            if let Some(cutoff) = cutoff_ts {
+                report.media_intervals_trimmed = self.conn.query_row("SELECT COUNT(*) FROM media_intervals WHERE started_at < ?1 AND COALESCE(ended_at,last_confirmed_at+ttl)>?1", [cutoff], |r| r.get(0))?;
+            }
             report.intervals_deleted = purge_delete_count(
                 &self.conn,
                 "intervals",
@@ -3581,6 +3603,8 @@ impl Storage {
             let tx = self.conn.transaction()?;
             match cutoff_ts {
                 Some(cutoff) => {
+                    report.media_intervals_deleted = tx.execute("DELETE FROM media_intervals WHERE COALESCE(ended_at,last_confirmed_at+ttl)<=?1", [cutoff])? as i64;
+                    report.media_intervals_trimmed = tx.execute("UPDATE media_intervals SET started_at=?1,last_confirmed_at=MAX(last_confirmed_at,?1) WHERE started_at<?1",[cutoff])? as i64;
                     report.intervals_deleted = tx.execute(
                         "DELETE FROM intervals WHERE ended_at IS NOT NULL AND ended_at <= ?1",
                         params![cutoff],
@@ -3619,6 +3643,9 @@ impl Storage {
                         trim_table_start(&tx, "browser_domain_intervals", cutoff)?;
                 }
                 None => {
+                    report.media_intervals_deleted =
+                        tx.execute("DELETE FROM media_intervals", [])? as i64;
+                    tx.execute("DELETE FROM media_state", [])?;
                     tx.execute("DELETE FROM browser_activity_state", [])?;
                     report.intervals_deleted = tx.execute("DELETE FROM intervals", [])? as i64;
                     report.session_intervals_deleted =
@@ -4169,7 +4196,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
@@ -4450,7 +4477,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
         let interval_columns = table_columns(&storage.conn, "intervals");
         assert!(interval_columns.iter().any(|column| column == "workspace"));
@@ -4481,7 +4508,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
     }
 
@@ -4535,7 +4562,7 @@ mod tests {
 
         assert_eq!(
             migration_versions(&storage.conn),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
         let sleep = storage
             .start_system_interval(SystemIntervalKind::Sleep, Some("test"), 200)
@@ -5055,7 +5082,7 @@ mod tests {
         assert_eq!(
             diagnostic.schema_status,
             StorageSchemaStatus::Current {
-                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                applied_migrations: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
             }
         );
     }

@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import QtQuick.Layouts
 import QtQuick.Window
 import QtQuick.Controls as Controls
@@ -13,6 +14,28 @@ Ui.Panel {
   manageIpc: false
   property var anchorItem: null
   property var hostWidget: null
+  property Item islandContainer: null
+  readonly property bool canEmbedIsland: dynamicIslandStyle && bar && typeof bar.presentIslandPanel === "function"
+  function syncIsland() {
+    if (!panel) return
+    if (opened && canEmbedIsland) {
+      islandReturnTimer.stop()
+      islandContainer = bar.presentIslandPanel(root, panel.contentWidth, panel.contentHeight,
+        anchorItem && anchorItem.QsWindow.window && anchorItem.QsWindow.window.screen
+          ? anchorItem.QsWindow.window.screen.name : "", motionDuration === 0)
+      Qt.callLater(function() { if (root.opened) keyCatcher.forceActiveFocus() })
+    } else {
+      if (bar && typeof bar.dismissIslandPanel === "function") bar.dismissIslandPanel(root)
+      if (islandContainer) islandReturnTimer.restart()
+    }
+  }
+  Timer {
+    id: islandReturnTimer
+    interval: root.motionDuration === 0 ? 0 : 240
+    onTriggered: root.islandContainer = null
+  }
+  onCanEmbedIslandChanged: syncIsland()
+  Component.onDestruction: if (bar && typeof bar.dismissIslandPanel === "function") bar.dismissIslandPanel(root)
   property string selectedLens: "day"
   property int selectedOffset: 0
   property bool refreshRunning: false
@@ -28,6 +51,8 @@ Ui.Panel {
   property string todayKey: ""
   property string lensLabel: "DAY"
   property string periodLabel: "Today"
+  property var multitasking: ({})
+  property real totalMultitasked: 0
   property real totalFocused: 0
   property real totalOpen: 0
   property real totalElapsed: 0
@@ -53,7 +78,11 @@ Ui.Panel {
   property bool dataExpanded: false
   property string chartReadout: ""
   property int legendHoverIndex: -1
-  readonly property int motionDuration: root.setting("reduceMotion", false) ? 0 : 150
+  readonly property bool dynamicIslandStyle: {
+    var value = root.setting("dynamicIslandStyle", false)
+    return value === true || value === "true"
+  }
+  readonly property int motionDuration: root.setting("reduceMotion", false) ? 0 : (dynamicIslandStyle ? 220 : 150)
   onCompositionChanged: legendHoverIndex = -1
   property bool refreshBusyVisible: false
   property bool detailBusyVisible: false
@@ -68,8 +97,11 @@ Ui.Panel {
   onViewKeyChanged: scheduleViewReveal()
   onViewReadyChanged: scheduleViewReveal()
   onOpenedChanged: {
+    syncIsland()
     updateBusyFeedback()
-    if (opened) scheduleViewReveal()
+    if (opened) {
+      scheduleViewReveal()
+    }
     else {
       revealedViewKey = ""
       dataReveal.stop()
@@ -119,11 +151,11 @@ Ui.Panel {
       viewRevealed()
     })
   }
-  readonly property color foreground: bar ? bar.barForeground : Color.foreground
+  readonly property color foreground: dynamicIslandStyle ? "#f5f5f7" : (bar ? bar.barForeground : Color.foreground)
   readonly property color accent: Color.accent
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.75)
-  readonly property color line: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.18)
-  readonly property color fill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.06)
+  readonly property color line: Qt.rgba(foreground.r, foreground.g, foreground.b, dynamicIslandStyle ? 0.12 : 0.18)
+  readonly property color fill: Qt.rgba(foreground.r, foreground.g, foreground.b, dynamicIslandStyle ? 0.07 : 0.06)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool wide: panel.contentWidth >= Style.space(900)
   readonly property bool selected: selectedActivityKey.length > 0
@@ -132,9 +164,9 @@ Ui.Panel {
   readonly property var stats: selected && detail.activities && detail.activities.length ? detail.activities[0] : null
   readonly property string activityLabel: stats ? String(stats.label) : (selected ? selectedActivityKey : "All activity")
   readonly property real shownSeconds: selected ? (stats ? Number(stats.focused_seconds) : 0) : totalFocused
-  readonly property var shownDaily: selected ? (detail.daily || []) : daily
+  readonly property var shownDaily: selected ? (detail.daily || []) : Model.withMultitaskingDays(daily, multitasking.daily)
   readonly property var shownHeat: selected ? (detail.heatmap || []) : heatmap
-  readonly property var hours: Model.hourlyCells(shownHeat)
+  readonly property var hours: Model.withMultitaskingHours(Model.hourlyCells(shownHeat), selected ? [] : multitasking.heatmap)
   readonly property var trend: Model.activityCells(shownDaily, selectedLens)
   readonly property var heatCells: Model.heatmapCells(shownHeat)
   readonly property var insights: Model.widgetInsights(selected ? (detail.insights || []) : reportInsights)
@@ -258,6 +290,11 @@ Ui.Panel {
     function hide() { root.close() }
     function toggle() { if (root.hostWidget) root.hostWidget.togglePanel(); else root.toggle() }
     function refresh() { root.refresh() }
+    function presentation(): string {
+      return JSON.stringify({ opened: root.opened, embedded: !!root.islandContainer,
+        width: keyCatcher.width, height: keyCatcher.height,
+        sharedSurface: !!root.islandContainer && keyCatcher.parent === root.islandContainer })
+    }
     function status(): string { return (root.hostWidget ? root.hostWidget.statusText : root.statusText) || "idle" }
     function period(lens: string, offset: string): void { root.setLensOffset(lens, offset) }
     function day() { root.setLens("day") }
@@ -268,21 +305,25 @@ Ui.Panel {
     function activity(kind: string, key: string): void { root.selectActivity(kind, key) }
   }
 
-  Ui.KeyboardPanel {
+  DashboardWindow {
     id: panel
     anchorItem: root.anchorItem
     owner: root.hostWidget || root
     bar: root.bar
-    open: root.opened
+    open: root.opened && !root.islandContainer
+    islandStyle: root.dynamicIslandStyle
+    reduceMotion: root.motionDuration === 0
+    padding: root.dynamicIslandStyle ? Style.space(32) : Style.spacing.popupPadding
     centerOnBar: true
     margin: Math.max(Style.gapsOut, Style.space(12))
-    gap: Math.max(Style.gapsOut, Style.space(8))
+    gap: root.dynamicIslandStyle ? 0 : Math.max(Style.gapsOut, Style.space(8))
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(Math.max(380, Math.min(1600, Number(root.setting("panelWidth", 1160)) || 1160))))
     contentHeight: panel.fittedContentHeight(Style.space(920), Style.space(920))
 
     Item {
       id: keyCatcher
+      parent: root.islandContainer || panel.contentContainer
       anchors.fill: parent
       focus: true
       Keys.onPressed: function(event) {
@@ -295,6 +336,7 @@ Ui.Panel {
         else if (event.key === Qt.Key_R) { root.refresh(); event.accepted = true }
       }
       ColumnLayout {
+        z: 1
         anchors.fill: parent
         spacing: Style.space(14)
         RowLayout {
@@ -410,11 +452,12 @@ Ui.Panel {
             }
             GridLayout {
               Layout.fillWidth: true
-              columns: root.selected && root.wide ? 4 : 2
+              columns: root.wide ? (root.selected ? 4 : 3) : 2
               rowSpacing: Style.space(8)
               columnSpacing: Style.space(24)
               Metric { label: "Time spent"; value: root.selected ? root.activityMetrics.time : Model.fmt(root.shownSeconds) }
               Metric { label: root.selected ? "Days used" : "Apps used"; value: root.selected ? root.activityMetrics.days : String((root.activityAnalytics.activities || []).filter(function(a) { return a.kind === "app" }).length) }
+              Metric { visible: !root.selected; label: "Hours multitasked"; value: root.panelDataLoaded ? (root.totalMultitasked / 3600).toFixed(1) + " h" : "—" }
               Metric { visible: root.selected; label: "Visits"; value: root.activityMetrics.visits }
               Metric { visible: root.selected; label: "Typical visit"; value: root.activityMetrics.typical }
             }
@@ -686,6 +729,23 @@ Ui.Panel {
                   expanded: true
                   onActivatedCell: function(cell) { root.openCell(cell) }
                 }
+                Label {
+                  Layout.fillWidth: true
+                  visible: !root.selected
+                  text: "Multitasked time overlaps focused time · light bars / line show background audio"
+                  color: root.dim
+                  font.pixelSize: Style.font.caption
+                }
+                Repeater {
+                  model: root.selected ? [] : (root.multitasking.sources || []).slice(0, 5)
+                  Label {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    text: modelData.label + " · " + Model.fmt(modelData.seconds) + " alongside other apps"
+                    color: root.dim
+                    font.pixelSize: Style.font.caption
+                  }
+                }
                 IntensityLegend { Layout.fillWidth: true; visible: root.selectedLens === "month" || root.selectedLens === "year"; contextLabel: root.yearlyRhythm ? "Per week" : "Per calendar day"; maxSeconds: Model.maxHeatSeconds(root.rhythmCells) }
                 MonthRhythm {
                   Layout.fillWidth: true
@@ -817,10 +877,10 @@ Ui.Panel {
     property string title: ""
     default property alias contents: sectionBody.data
     implicitHeight: sectionBody.implicitHeight + Style.space(20)
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.025)
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, root.dynamicIslandStyle ? 0.045 : 0.025)
     border.width: 1
     border.color: root.line
-    radius: Style.space(6)
+    radius: Style.space(root.dynamicIslandStyle ? 12 : 6)
     ColumnLayout {
       id: sectionBody
       x: Style.space(10)
@@ -900,11 +960,17 @@ Ui.Panel {
         onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
         readonly property real seconds: Number(modelData.seconds || modelData.focused_seconds || 0)
         readonly property string name: chart.hourly ? String(index).padStart(2, "0") + ":00" : String(modelData.label || modelData.date || "")
-        Accessible.name: name + ", " + Model.fmt(seconds)
-        onClicked: { chart.inspected = index; root.chartReadout = name + " · " + Model.fmt(seconds) }
+        Accessible.name: name + ", " + Model.fmt(seconds) + (Number(modelData.multitasked_seconds || 0) > 0 ? ", multitasked " + Model.fmt(modelData.multitasked_seconds) : "")
+        onClicked: { chart.inspected = index; root.chartReadout = Accessible.name }
         background: Rectangle { color: "transparent"; border.width: barButton.activeFocus ? 1 : 0; border.color: root.accent }
         contentItem: Item {
           Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top; anchors.bottomMargin: Style.space(6); height: Math.max(barButton.seconds > 0 ? Style.space(2) : 0, (parent.height - Style.space(28)) * barButton.seconds / chart.maxSeconds); radius: Style.space(2); color: root.accent; opacity: barButton.hovered || barButton.activeFocus || chart.inspected === barButton.index || barButton.seconds === chart.maxSeconds ? 1 : 0.65 }
+          Rectangle {
+            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top
+            anchors.bottomMargin: Style.space(6)
+            height: Math.max(0, (parent.height - Style.space(28)) * Number(barButton.modelData.multitasked_seconds || 0) / chart.maxSeconds)
+            color: root.foreground; opacity: 0.8; radius: Style.space(2)
+          }
           Label { id: barLabel; anchors.bottom: parent.bottom; width: chart.hourly ? Style.space(44) : parent.width; x: chart.hourly && barButton.index === 0 ? 0 : (parent.width - width) / 2; text: chart.hourly ? (barButton.index % 6 === 0 ? Model.clockLabel(barButton.index) : "") : (chart.cells.length <= 12 || barButton.index % Math.ceil(chart.cells.length / 6) === 0 ? barButton.name : ""); font.pixelSize: Style.font.caption; color: root.dim; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; wrapMode: Text.NoWrap }
         }
         Controls.ToolTip.visible: hovered || activeFocus
@@ -1539,6 +1605,18 @@ Ui.Panel {
           ctx.lineJoin = "round"
           ctx.lineCap = "round"
           ctx.stroke()
+
+          if (list.some(function(d) { return Number(d.multitasked_seconds || 0) > 0 })) {
+            ctx.beginPath()
+            for (var m = 0; m < list.length; m++) {
+              var mx = lineRoot.pointX(m)
+              var my = lineRoot.pointY(Number(list[m].multitasked_seconds || 0))
+              if (m === 0) ctx.moveTo(mx, my); else ctx.lineTo(mx, my)
+            }
+            ctx.strokeStyle = root.canvasColor(root.foreground, 0.85)
+            ctx.lineWidth = Style.space(2)
+            ctx.stroke()
+          }
 
           var count = list.length
           var dotStride = count <= 14 ? 1 : (count <= 31 ? 3 : Math.ceil(count / 12))

@@ -73,6 +73,20 @@ omastat today
 omastat export-data --lens month --offset -1 --format csv --output ~/omastat-august
 ```
 
+## Optional Dynamic Island appearance
+
+Enable **Dynamic Island appearance** in the Omastat widget settings. The black
+dashboard expands inside the central notch when the optional Notchbar integration
+is installed; other bars use a separate black panel. The full dashboard is
+retained in both presentations. Disable the toggle to restore the standard appearance. The
+`reduceMotion` widget setting disables the expansion animation.
+
+The integration patch is `packaging/omarchy/notchbar-integration.patch`. It adds
+a shared-content host to the user-owned `gustavo.notchbar` plugin's `Bar.qml`
+and `CenterIsland.qml`; it is not applied by the standard installer.
+Notchbar updates may require reapplying or adapting the patch. The appearance
+falls back to the standalone panel if the shared-content API is unavailable.
+
 ## Privacy
 
 Omastat counts foreground app use. Idle, locked, sleep, and unrecorded time are

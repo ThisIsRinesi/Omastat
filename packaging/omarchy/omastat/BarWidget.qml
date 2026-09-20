@@ -131,6 +131,8 @@ Ui.BarWidget {
   property string todayKey: ""
   property string lensLabel: "DAY"
   property string periodLabel: "Today"
+  property var multitasking: ({})
+  property real totalMultitasked: 0
   property real totalFocused: 0
   property real totalOpen: 0
   property real totalElapsed: 0
@@ -149,6 +151,10 @@ Ui.BarWidget {
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property real openPanelIndicatorWidth: button.labelWidth
   readonly property string glyph: "󰔟"
+  readonly property bool dynamicIslandStyle: {
+    var value = root.setting("dynamicIslandStyle", false)
+    return value === true || value === "true"
+  }
   readonly property bool iconOnly: {
     var value = root.setting("iconOnly", false)
     return value === true || value === "true"
@@ -240,12 +246,22 @@ Ui.BarWidget {
     }
   }
 
+  Rectangle {
+    anchors.fill: parent
+    anchors.topMargin: Style.space(2)
+    anchors.bottomMargin: Style.space(2)
+    visible: root.dynamicIslandStyle
+    color: "#000000"
+    radius: height / 2
+  }
+
   Ui.WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: root.vertical || root.iconOnly ? root.glyph : root.displayText
     fontSize: 12
+    foreground: root.dynamicIslandStyle ? "#f5f5f7" : (root.bar ? root.bar.barForeground : Color.foreground)
     horizontalMargin: 8
     tooltipText: root.tooltip
     active: root.refreshRunning || root.errorText !== ""
@@ -389,6 +405,8 @@ Ui.BarWidget {
   }
 
   function applyReport(report, markUpdated) {
+    multitasking = report.multitasking || {}
+    totalMultitasked = Number(multitasking.total_seconds || 0)
     activityAnalytics = report.activityAnalytics || {}
     if (selectedActivityKey && root.opened) refreshDetail(false)
     rows = report.rows
@@ -432,6 +450,7 @@ Ui.BarWidget {
     todayKey = summary.todayKey
     lensLabel = summary.lensLabel
     periodLabel = summary.periodLabel
+    totalMultitasked = summary.totalMultitasked || 0
     totalFocused = summary.totalFocused
     totalOpen = summary.totalOpen
     totalElapsed = summary.totalElapsed
@@ -462,6 +481,8 @@ Ui.BarWidget {
     todayKey = offset === 0 ? todayKey : ""
     lensLabel = String(lens || "day").toUpperCase()
     periodLabel = provisionalPeriodLabel(lens, offset)
+    multitasking = {}
+    totalMultitasked = 0
     totalFocused = 0
     totalOpen = 0
     totalElapsed = 0
@@ -539,6 +560,8 @@ Ui.BarWidget {
     if ("todayKey" in target && target.todayKey !== root.todayKey) target.todayKey = root.todayKey
     if ("lensLabel" in target && target.lensLabel !== root.lensLabel) target.lensLabel = root.lensLabel
     if ("periodLabel" in target && target.periodLabel !== root.periodLabel) target.periodLabel = root.periodLabel
+    if ("multitasking" in target) target.multitasking = root.multitasking
+    if ("totalMultitasked" in target) target.totalMultitasked = root.totalMultitasked
     if ("totalFocused" in target && target.totalFocused !== root.totalFocused) target.totalFocused = root.totalFocused
     if ("totalOpen" in target && target.totalOpen !== root.totalOpen) target.totalOpen = root.totalOpen
     if ("totalElapsed" in target && target.totalElapsed !== root.totalElapsed) target.totalElapsed = root.totalElapsed
@@ -693,6 +716,8 @@ Ui.BarWidget {
       todayKey: String(object.today_key || ""),
       lensLabel: String(object.lens_label || object.lens || "DAY").toUpperCase(),
       periodLabel: object.period && typeof object.period === "object" ? String(object.period.label || "Today") : "Today",
+      multitasking: object.multitasking || {},
+      totalMultitasked: numericField(object, "total_multitasked_seconds", 0),
       totalFocused: numericField(object, "total_focused_seconds", sumSeconds(rows, "focused_seconds")),
       totalOpen: numericField(object, "total_open_seconds", sumSeconds(rows, "open_seconds")),
       totalElapsed: elapsed,
@@ -712,6 +737,8 @@ Ui.BarWidget {
       todayKey: String(object.today_key || ""),
       lensLabel: String(object.lens_label || object.lens || "DAY").toUpperCase(),
       periodLabel: object.period && typeof object.period === "object" ? String(object.period.label || "Today") : "Today",
+      multitasking: object.multitasking || {},
+      totalMultitasked: numericField(object, "total_multitasked_seconds", 0),
       totalFocused: numericField(object, "total_focused_seconds", 0),
       totalOpen: numericField(object, "total_open_seconds", 0),
       totalElapsed: elapsed,

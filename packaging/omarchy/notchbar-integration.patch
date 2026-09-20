@@ -1,0 +1,103 @@
+*** Begin Patch
+*** Update File: Bar.qml
+@@
+   property var centerIslandRef: null
++  // Optional shared-surface API for external dashboards (Omastat).
++  property var islandPanelHosts: []
++  property var islandPanelRequest: null
++  function registerIslandPanelHost(host) {
++    islandPanelHosts = islandPanelHosts.concat([host])
++  }
++  function unregisterIslandPanelHost(host) {
++    islandPanelHosts = islandPanelHosts.filter(function(item) { return item !== host })
++    if (islandPanelRequest && islandPanelRequest.host === host) {
++      var owner = islandPanelRequest.owner
++      islandPanelRequest = null
++      if (owner) owner.close()
++    }
++  }
++  function presentIslandPanel(owner, width, height, screenName, reduceMotion) {
++    var host = null
++    for (var i = 0; i < islandPanelHosts.length; i++) {
++      var candidate = islandPanelHosts[i]
++      if (candidate.barWindow && candidate.barWindow.screen && candidate.barWindow.screen.name === screenName) host = candidate
++    }
++    if (!host) return null
++    if (islandPanelRequest && islandPanelRequest.owner !== owner) islandPanelRequest.owner.close()
++    islandPanelRequest = { owner: owner, host: host, width: width, height: height, reduceMotion: reduceMotion }
++    requestPopout(owner.hostWidget || owner)
++    return host.externalPanelContainer
++  }
++  function dismissIslandPanel(owner) {
++    if (!islandPanelRequest || islandPanelRequest.owner !== owner) return
++    islandPanelRequest = null
++    releasePopout(owner.hostWidget || owner)
++  }
++  Connections {
++    target: root
++    function onIsMenuOpenChanged() { if (root.isMenuOpen && root.islandPanelRequest) root.islandPanelRequest.owner.close() }
++    function onIsSearchOpenChanged() { if (root.isSearchOpen && root.islandPanelRequest) root.islandPanelRequest.owner.close() }
++    function onIsHistoryOpenChanged() { if (root.isHistoryOpen && root.islandPanelRequest) root.islandPanelRequest.owner.close() }
++  }
+@@
+-    readonly property bool isExpanded: isSearchOpen || isMenuOpen || isHistoryOpen
++    readonly property bool isExpanded: isSearchOpen || isMenuOpen || isHistoryOpen || centerIslandItem.externalPanelActive
+@@
+       onClicked: {
++        if (centerIslandItem.externalPanelActive) {
++          centerWindow.barPluginRoot.islandPanelRequest.owner.close()
++          return
++        }
+*** Update File: CenterIsland.qml
+@@
+   property Item centerModulesItem: null
++  readonly property var externalPanelRequest: root ? root.islandPanelRequest : null
++  readonly property bool externalPanelActive: !!externalPanelRequest && externalPanelRequest.host === centerIsland
++  readonly property alias externalPanelContainer: externalPanelView
++  property bool externalReducedMotion: false
++  onExternalPanelRequestChanged: {
++    if (externalPanelRequest && externalPanelRequest.host === centerIsland) externalReducedMotion = externalPanelRequest.reduceMotion
++  }
++  Component.onDestruction: if (root) root.unregisterIslandPanelHost(centerIsland)
+@@
+   Component.onCompleted: {
++    if (root) root.registerIslandPanelHost(centerIsland)
+     brightnessQueryProc.running = true
+@@
+   readonly property string currentMode: {
++    if (externalPanelActive) return "external-panel"
+@@
+   readonly property real targetContentWidth: {
+     switch (currentMode) {
++      case "external-panel": return Math.min(externalPanelRequest ? externalPanelRequest.width : 380, Math.max(120, barWindow.width - 32))
+@@
+   readonly property real targetContentHeight: {
+     switch (currentMode) {
++      case "external-panel": return Math.min(externalPanelRequest ? externalPanelRequest.height : 300, Math.max(120, barWindow.screen.height - 16))
+@@
+-    color: Color.bar.background
++    color: centerIsland.externalPanelActive ? "#000000" : Color.bar.background
+@@
+     Behavior on contentWidth {
+-      NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
++      NumberAnimation { duration: centerIsland.externalReducedMotion ? 0 : 240; easing.type: Easing.OutCubic }
+@@
+     Behavior on contentHeight {
+-      NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
++      NumberAnimation { duration: centerIsland.externalReducedMotion ? 0 : 240; easing.type: Easing.OutCubic }
+@@
+       id: contentArea
++      Item {
++        id: externalPanelView
++        anchors.fill: parent
++        anchors.margins: 24
++        clip: true
++        visible: opacity > 0
++        enabled: centerIsland.externalPanelActive
++        opacity: centerIsland.externalPanelActive ? 1 : 0
++        Behavior on opacity {
++          NumberAnimation { duration: centerIsland.externalReducedMotion ? 0 : 180; easing.type: Easing.OutCubic }
++        }
++        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
++      }
+*** End Patch

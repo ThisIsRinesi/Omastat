@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Omastat Domain Tracker",
-  "version": "0.2.0",
-  "description": "Reports only the active tab domain to local Omastat.",
+  "version": "0.3.0",
+  "description": "Reports focused and audible tab domains to local Omastat.",
   "permissions": [
     "tabs",
     "nativeMessaging"

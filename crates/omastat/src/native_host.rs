@@ -17,6 +17,7 @@ struct BrowserDomainMessage {
     app_class: Option<String>,
     domain: Option<String>,
     timestamp: Option<i64>,
+    audible_domains: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +81,15 @@ fn handle_message(
         },
         timestamp,
     )?;
+    if let Some(domains) = &message.audible_domains {
+        let items = domains
+            .iter()
+            .take(128)
+            .filter_map(|domain| browser::normalize_domain(domain))
+            .map(|domain| (app_class.clone(), domain))
+            .collect::<Vec<_>>();
+        storage.record_media_snapshot(&format!("browser:{app_class}"), &items, timestamp, 90)?;
+    }
     Ok("recorded")
 }
 
@@ -201,6 +211,37 @@ mod tests {
                 Some("custom-source")
             ),
             ("zen".into(), "custom-source".into())
+        );
+    }
+
+    #[test]
+    fn audible_domains_are_recorded_on_focus_loss_and_cleared_on_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("media.db");
+        let config = crate::config::Config::default();
+        let now = crate::clock::unix_now();
+        let message = serde_json::from_value(serde_json::json!({
+            "type":"clear-domain", "app_class":"firefox", "timestamp":now,
+            "audible_domains":["www.youtube.com", "file:///private"]
+        }))
+        .unwrap();
+        super::handle_message(&config, Some(&db), &message, Some("zen")).unwrap();
+        let storage = crate::storage::Storage::open(Some(&db), &config).unwrap();
+        let rows = storage.media_intervals_between(now, now + 30).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].app_class, "zen");
+        assert_eq!(rows[0].label, "youtube.com");
+        let message = serde_json::from_value(serde_json::json!({
+            "type":"clear-domain", "app_class":"firefox", "timestamp":now,
+            "audible_domains":[]
+        }))
+        .unwrap();
+        super::handle_message(&config, Some(&db), &message, Some("zen")).unwrap();
+        assert!(
+            storage
+                .media_intervals_between(now, now + 30)
+                .unwrap()
+                .is_empty()
         );
     }
 

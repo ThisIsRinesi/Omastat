@@ -41,17 +41,25 @@
 
   var generation = 0
 
-  function sendDomain(domain, reason) {
+  var delivery = Promise.resolve()
+
+  function sendDomain(domain, reason, audibleDomains) {
+    audibleDomains = audibleDomains || []
     var now = Math.floor(Date.now() / 1000)
-    var key = appClass + "\n" + domain
+    var key = appClass + "\n" + domain + "\n" + audibleDomains.join("\n")
     if (key === lastKey && now - lastSentAt < 10) return
-    sendNativeMessage({
+    var message = {
       type: domain ? "active-domain" : "clear-domain",
       source: source,
       app_class: appClass,
       domain: domain || "",
+      audible_domains: audibleDomains,
       timestamp: now,
       reason: reason
+    }
+    // Serialize deliveries: a slow earlier native host must not overwrite a pause.
+    delivery = delivery.catch(function() {}).then(function() {
+      return sendNativeMessage(message)
     }).then(function(response) {
       if (response && response.ok) { lastKey = key; lastSentAt = now }
     }).catch(function() { lastKey = "" })
@@ -59,19 +67,25 @@
 
   function reportActive(reason) {
     var request = ++generation
-    Promise.resolve(api.windows.getLastFocused()).then(function(window) {
+    Promise.all([api.windows.getLastFocused(), queryTabs({ audible: true })]).then(function(results) {
       if (request !== generation) return
-      if (!window || !window.focused) { sendDomain("", reason); return }
+      var window = results[0]
+      // Audible includes muted tabs in WebExtensions; explicitly exclude them.
+      var domains = Array.from(new Set(results[1].filter(function(tab) {
+        return tab.audible && !(tab.mutedInfo && tab.mutedInfo.muted) && !tab.incognito
+      }).map(function(tab) { return domainFromUrl(tab.url) }).filter(Boolean))).sort()
+      if (!window || !window.focused) { sendDomain("", reason, domains); return }
       return queryTabs({ active: true, windowId: window.id }).then(function(tabs) {
         if (request !== generation) return
-        sendDomain(tabs && tabs.length ? domainFromUrl(tabs[0].url) : "", reason)
+        var tab = tabs && tabs[0]
+        sendDomain(tab && !tab.incognito ? domainFromUrl(tab.url) : "", reason, domains)
       })
-    }).catch(function() { if (request === generation) sendDomain("", reason) })
+    }).catch(function() { if (request === generation) sendDomain("", reason, []) })
   }
 
   api.tabs.onActivated.addListener(function() { reportActive("tab-activated") })
   api.tabs.onUpdated.addListener(function(_tabId, changeInfo) {
-    if (changeInfo.url || changeInfo.status === "complete") reportActive("tab-updated")
+    if (changeInfo.url || changeInfo.status === "complete" || "audible" in changeInfo || "mutedInfo" in changeInfo) reportActive("tab-updated")
   })
   api.tabs.onRemoved.addListener(function() { reportActive("tab-removed") })
   api.windows.onFocusChanged.addListener(function() { reportActive("window-focused") })

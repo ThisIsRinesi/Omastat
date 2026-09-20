@@ -43,6 +43,7 @@ pub struct Period {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageReport {
+    pub multitasking: crate::multitasking::MultitaskingReport,
     pub activity_analytics: crate::activity::ActivityAnalytics,
     pub generated_at: i64,
     pub query_start_ts: i64,
@@ -107,6 +108,7 @@ pub struct WidgetInsight {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WidgetSummaryReport {
+    pub total_multitasked_seconds: i64,
     pub schema_version: u32,
     pub generated_at: i64,
     pub query_start_ts: i64,
@@ -324,6 +326,9 @@ pub fn widget_summary_for_period(
     };
 
     Ok(WidgetSummaryReport {
+        total_multitasked_seconds: storage
+            .multitasking_between(period.start_ts, period.query_end_ts, config)?
+            .total_seconds,
         schema_version: 1,
         generated_at: clock::unix_now(),
         query_start_ts: period.start_ts,
@@ -458,6 +463,12 @@ fn usage_report_with_rollups_for_period_with_days(
     let widget_insight = widget_insight_for(&insights, generated_at);
 
     let report = UsageReport {
+        multitasking: storage.multitasking_from_metadata(
+            period.start_ts,
+            period.query_end_ts,
+            &context.metadata,
+            config,
+        )?,
         activity_analytics,
         generated_at,
         query_start_ts: period.start_ts,
@@ -1234,6 +1245,7 @@ mod tests {
                 end_date: Some("2026-08-23".to_string()),
                 offset: 0,
             },
+            multitasking: Default::default(),
             total_focused_seconds: 3600,
             total_open_seconds: 5400,
             total_elapsed_seconds: 1000,

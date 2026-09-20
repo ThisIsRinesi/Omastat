@@ -6,10 +6,12 @@ let now = 1000000;
 let focused = true;
 let url = 'https://www.example.com/private/path';
 let fail = false;
+let audible = [];
+const domains = () => sent.at(-1).audible_domains;
 let tick;
 const sent = [];
 const browser = {
-  tabs: { onActivated: event(), onUpdated: event(), onRemoved: event(), query: async () => [{url}] },
+  tabs: { onActivated: event(), onUpdated: event(), onRemoved: event(), query: async (query) => query.audible ? audible : [{url}] },
   windows: { onFocusChanged: event(), onRemoved: event(), getLastFocused: async () => ({id: 1, focused}) },
   runtime: { onStartup: event(), onInstalled: event(), sendNativeMessage: async (_host, data) => {
     if (fail) throw new Error('disconnected');
@@ -35,3 +37,15 @@ assert.equal(sent.at(-1).domain,'other.example','failed delivery is retried with
 url='file:///tmp/private';now+=30000;tick();await flush();
 assert.equal(sent.at(-1).type,'clear-domain');
 console.log('Browser attribution event checks passed');
+
+focused=false;
+audible=[{url:'https://www.youtube.com/watch?v=private',audible:true,mutedInfo:{muted:false}},
+{url:'https://muted.example',audible:true,mutedInfo:{muted:true}},
+{url:'https://private.example',audible:true,incognito:true}];
+now+=30000;tick();await flush();
+assert.deepEqual(Array.from(domains()),['youtube.com']);
+assert.equal(sent.at(-1).type,'clear-domain');
+assert.ok(!JSON.stringify(sent).includes('watch?v='));
+audible=[];browser.tabs.onUpdated.listeners[0](1,{audible:false});await flush();
+assert.equal(domains().length,0,'pause clears background domains without waiting for heartbeat');
+console.log('Background audio domain checks passed');

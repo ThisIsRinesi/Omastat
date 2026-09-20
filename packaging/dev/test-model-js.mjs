@@ -335,3 +335,15 @@ assert.equal(context.routineWindows({ supporting: { routine: { start_minute: 480
 assert.equal(context.routineWindows({ supporting: { routine: {} } }).length, 0);
 assert.equal(context.routineWindows({ supporting: { routine: { start_minute: 60, end_minute: 60 } } }).length, 0);
 assert.equal(context.routineWindows({}).length, 0);
+
+const concurrent = context.withMultitaskingDays([
+  {date:'2026-09-14', focused_seconds:3600},
+  {date:'2026-09-15', focused_seconds:1800}
+], [{date:'2026-09-14',seconds:1200},{date:'2026-09-15',seconds:2400}]);
+assert.equal(concurrent[0].focused_seconds,3600);
+assert.equal(concurrent[1].multitasked_seconds,1800);
+assert.equal(context.weekCells(concurrent)[0].multitasked_seconds,3000);
+assert.equal(context.trendDays(concurrent,'','week')[0].multitasked_seconds,1200);
+assert.match(context.trendDetailText(context.trendDays(concurrent,'','week')[0]),/20m multitasked/);
+assert.equal(context.withMultitaskingHours([{seconds:3600}], [{hour:0,focused_seconds:900}])[0].multitasked_seconds,900);
+console.log('Multitasking chart overlays and weekly aggregation checks passed');

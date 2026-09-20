@@ -276,6 +276,7 @@ impl Tracker {
             return Ok(());
         }
         let boundary = self.last_observed_at.unwrap_or(now).min(now);
+        self.storage.close_media_system(boundary)?;
         let id = self.storage.begin_observation_gap(boundary)?;
         self.state = TrackerState::default();
         self.outage_interval_id = Some(id);
@@ -612,6 +613,44 @@ impl Tracker {
     }
 
     fn apply_session_status(&mut self, status: session::SessionStatus, now: i64) -> Result<()> {
+        let sources = if status.locked {
+            Vec::new()
+        } else {
+            status
+                .audio_sources
+                .iter()
+                .map(|source| {
+                    let window = self
+                        .state
+                        .windows
+                        .values()
+                        .find(|w| source.pid.is_some() && w.pid == source.pid);
+                    let app = window
+                        .map(|w| identity::canonical_app_class(&w.class))
+                        .unwrap_or_else(|| source.app_class.clone());
+                    // Stream titles describe the playing media; an unrelated selected tab does not.
+                    let title = if self.config.capture_titles() {
+                        source
+                            .title
+                            .clone()
+                            .filter(|title| self.config.title_allowed(&app, title))
+                    } else {
+                        None
+                    };
+                    (app, title.unwrap_or_default())
+                })
+                .collect()
+        };
+        self.storage.record_media_snapshot(
+            "system",
+            &sources,
+            now,
+            self.config
+                .tracking
+                .session_poll_seconds
+                .max(15)
+                .saturating_mul(3) as i64,
+        )?;
         if status.audio_playing {
             self.last_audio_at = Some(now);
         }
@@ -747,6 +786,7 @@ impl Tracker {
         }
 
         self.end_outage(now)?;
+        self.storage.close_media_system(now)?;
         self.storage.close_observed_intervals(now)?;
         self.observing = false;
         self.last_observed_at = Some(now);
@@ -905,6 +945,7 @@ impl Tracker {
 
     fn shutdown(&mut self) -> Result<()> {
         let now = clock::unix_now();
+        self.storage.close_media_system(now)?;
         if let Some(previous) = self.state.focused.take() {
             debug!("closing focused interval for {}", previous.app_class);
             self.storage.close_interval(previous.interval_id, now)?;
@@ -1525,6 +1566,7 @@ mod tests {
             locked: false,
             stay_awake: false,
             audio_playing: false,
+            audio_sources: Vec::new(),
             source: "loginctl",
         };
         assert!(tracker.wayland_idle_pause_is_authoritative(&status));
@@ -1586,6 +1628,7 @@ mod tests {
             locked: false,
             stay_awake: false,
             audio_playing: true,
+            audio_sources: Vec::new(),
             source: "test",
         };
 

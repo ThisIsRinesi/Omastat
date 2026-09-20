@@ -335,6 +335,7 @@ function trendDays(daily, todayKey, lens) {
       key: String(list[i].date || ""),
       seconds: focused,
       focused_seconds: focused,
+      multitasked_seconds: Number(list[i].multitasked_seconds || 0),
       open_seconds: open,
       elapsed_seconds: dayElapsedSeconds(list[i]),
       excluded_seconds: excluded,
@@ -593,6 +594,7 @@ function monthCells(daily, lens) {
       day: date ? date.getDate() : i + 1,
       label: String(list[i].label || list[i].date || ""),
       seconds: dayFocusedSeconds(list[i]),
+      multitasked_seconds: Number(list[i].multitasked_seconds || 0),
       open_seconds: dayOpenSeconds(list[i]),
       excluded_seconds: dayExcludedSeconds(list[i]),
       elapsed_seconds: dayElapsedSeconds(list[i]),
@@ -676,12 +678,13 @@ function weekCells(daily) {
     var key = dateKey(date)
     if (!buckets[key]) buckets[key] = {
       blank: false, weekly: true, date: key, label: "",
-      first: list[i], last: list[i], seconds: 0, open_seconds: 0,
+      first: list[i], last: list[i], seconds: 0, open_seconds: 0, multitasked_seconds: 0,
       excluded_seconds: 0, elapsed_seconds: 0, observed_seconds: 0
     }
     var bucket = buckets[key]
     bucket.last = list[i]
     bucket.seconds += dayFocusedSeconds(list[i])
+    bucket.multitasked_seconds += Number(list[i].multitasked_seconds || 0)
     bucket.open_seconds += dayOpenSeconds(list[i])
     bucket.excluded_seconds += dayExcludedSeconds(list[i])
     bucket.elapsed_seconds += dayElapsedSeconds(list[i])
@@ -886,6 +889,7 @@ function trendDetailText(day) {
   var parts = []
   var label = chartDateLabel(day) || "Day"
   parts.push(label + ": " + fmt(Number(day.seconds || 0)) + (day.cumulative === true ? " cumulative focus" : " focused"))
+  if (Number(day.multitasked_seconds || 0) > 0) parts.push(fmt(day.multitasked_seconds) + " multitasked")
   if (Number(day.excluded_seconds || 0) > 0) parts.push(fmt(day.excluded_seconds) + " not counted")
   return parts.join("  ")
 }
@@ -894,6 +898,7 @@ function monthCellDetailText(cell) {
   if (!cell || cell.blank) return ""
   var parts = []
   parts.push(String(cell.label || cell.date || "Day") + ": " + fmt(Number(cell.seconds || 0)) + " focused")
+  if (Number(cell.multitasked_seconds || 0) > 0) parts.push(fmt(cell.multitasked_seconds) + " multitasked")
   if (Number(cell.excluded_seconds || 0) > 0) parts.push(fmt(cell.excluded_seconds) + " not counted")
   return parts.join("  ")
 }
@@ -1143,4 +1148,16 @@ function fittingInsightCount(heights, available, spacing) {
     count++
   }
   return count
+}
+
+// Merge once per report change, rather than scanning attribution for each chart cell.
+function withMultitaskingDays(daily, media) {
+  var totals = {}
+  ;(media || []).forEach(function(d) { totals[d.date] = Number(d.seconds || 0) })
+  return (daily || []).map(function(d) { return Object.assign({}, d, {multitasked_seconds: Math.min(dayFocusedSeconds(d), totals[d.date] || 0)}) })
+}
+function withMultitaskingHours(hours, media) {
+  var totals = {}
+  ;(media || []).forEach(function(d) { totals[d.hour] = (totals[d.hour] || 0) + Number(d.focused_seconds || 0) })
+  return (hours || []).map(function(d, i) { return Object.assign({}, d, {multitasked_seconds: Math.min(Number(d.seconds || 0), totals[i] || 0)}) })
 }

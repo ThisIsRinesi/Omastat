@@ -28,6 +28,7 @@
     "defaults": {
       "refreshIntervalSec": 60,
       "iconOnly": false,
+      "dynamicIslandStyle": false,
       "panelWidth": 1160
     },
     "schema": [
@@ -44,6 +45,12 @@
         "key": "iconOnly",
         "type": "boolean",
         "label": "Icon-only mode",
+        "defaultValue": false
+      },
+      {
+        "key": "dynamicIslandStyle",
+        "type": "boolean",
+        "label": "Dynamic Island appearance",
         "defaultValue": false
       },
       {
