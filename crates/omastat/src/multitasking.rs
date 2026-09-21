@@ -193,7 +193,8 @@ impl Storage {
                 let mut keys = BTreeSet::<(String, String, String)>::new();
                 for &i in &active_media {
                     let m: &MediaInterval = &media[i];
-                    if m.source != "system" || m.app_class.eq_ignore_ascii_case(foreground) {
+                    let app = identity::canonical_app_class(&m.app_class);
+                    if m.source != "system" || app.eq_ignore_ascii_case(foreground) {
                         continue;
                     }
                     let domains: BTreeSet<_> = if config.privacy.browser_domains {
@@ -201,8 +202,10 @@ impl Storage {
                             .iter()
                             .filter_map(|&j| {
                                 let d = &media[j];
-                                (d.source.starts_with("browser:") && d.app_class == m.app_class)
-                                    .then_some(d.label.clone())
+                                (d.source.starts_with("browser:")
+                                    && identity::canonical_app_class(&d.app_class)
+                                        .eq_ignore_ascii_case(&app))
+                                .then_some(d.label.clone())
                             })
                             .collect()
                     } else {
@@ -210,21 +213,12 @@ impl Storage {
                     };
                     if !domains.is_empty() {
                         for domain in domains {
-                            keys.insert((m.app_class.clone(), domain, "domain".into()));
+                            keys.insert((app.clone(), domain, "domain".into()));
                         }
                     } else {
-                        let title = config
-                            .capture_titles()
-                            .then_some(m.label.as_str())
-                            .filter(|s| !s.is_empty());
-                        let label = title
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| identity::display_name(&m.app_class));
-                        keys.insert((
-                            m.app_class.clone(),
-                            label,
-                            if title.is_some() { "title" } else { "app" }.into(),
-                        ));
+                        // Media titles identify streams, not their owners (e.g. playStream).
+                        // Resolve historical rows too, and union simultaneous streams per app.
+                        keys.insert((app.clone(), identity::display_name(&app), "app".into()));
                     }
                 }
                 if !keys.is_empty() {
@@ -397,7 +391,7 @@ impl Storage {
             .collect();
         let audio_apps: Vec<_> = audio
             .iter()
-            .map(|(app, _, _)| intern(app.clone()))
+            .map(|(app, _, _)| intern(identity::canonical_app_class(app)))
             .collect();
         let mut events = Vec::with_capacity((focus.len() + audio.len()) * 2);
         for (i, f) in focus.iter().enumerate() {
@@ -547,6 +541,78 @@ mod tests {
                 .timeline
                 .is_none()
         );
+    }
+
+    #[test]
+    fn historical_stream_titles_group_by_owner_without_double_counting() {
+        let (_dir, mut storage, config) = setup();
+        focus(&mut storage, "editor", 100, 300);
+        storage
+            .record_media_snapshot(
+                "system",
+                &[
+                    ("Discord".into(), "playStream".into()),
+                    ("Discord".into(), "another stream".into()),
+                    ("Deadlock".into(), "audio stream #2".into()),
+                ],
+                100,
+                300,
+            )
+            .unwrap();
+        storage
+            .record_media_snapshot(
+                "system",
+                &[
+                    ("Discord".into(), "new stream title".into()),
+                    ("Deadlock".into(), "audio stream #3".into()),
+                ],
+                200,
+                300,
+            )
+            .unwrap();
+        let metadata = storage.focused_interval_metadata_between(100, 300).unwrap();
+        let report = storage
+            .multitasking_from_metadata(100, 300, &metadata, &config, true)
+            .unwrap();
+        assert_eq!(report.total_seconds, 200);
+        assert_eq!(report.sources.len(), 2);
+        for source in &report.sources {
+            assert!(matches!(source.label.as_str(), "Discord" | "Deadlock"));
+            assert_eq!(source.attribution, "app");
+            assert_eq!(source.seconds, 200);
+        }
+        let segments = report.timeline.unwrap().segments;
+        assert_eq!(
+            segments.len(),
+            1,
+            "renaming streams does not fragment the timeline"
+        );
+        assert!(
+            segments[0]
+                .audio
+                .iter()
+                .all(|source| source.attribution == "app")
+        );
+    }
+
+    #[test]
+    fn steam_helper_belongs_to_steam_in_full_and_fast_reports() {
+        let (_dir, mut storage, config) = setup();
+        focus(&mut storage, "steam", 100, 200);
+        focus(&mut storage, "editor", 200, 300);
+        storage
+            .record_media_snapshot(
+                "system",
+                &[("steamwebhelper".into(), "Playback".into())],
+                100,
+                300,
+            )
+            .unwrap();
+        let report = storage.multitasking_between(100, 300, &config).unwrap();
+        assert_eq!(report.total_seconds, 100);
+        assert_eq!(storage.multitasked_seconds_between(100, 300).unwrap(), 100);
+        assert_eq!(report.sources[0].app_class, "steam");
+        assert_eq!(report.sources[0].label, "Steam");
     }
 
     #[test]

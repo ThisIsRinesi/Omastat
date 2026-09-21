@@ -79,6 +79,7 @@ fn known_alias(lower: &str) -> Option<&'static str> {
         "brave-browser" => Some("brave"),
         "chrome" => Some("google-chrome"),
         "edge" => Some("microsoft-edge"),
+        "steamwebhelper" => Some("steam"),
         _ => None,
     }
 }

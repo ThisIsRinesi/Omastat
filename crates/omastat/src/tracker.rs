@@ -628,16 +628,9 @@ impl Tracker {
                     let app = window
                         .map(|w| identity::canonical_app_class(&w.class))
                         .unwrap_or_else(|| source.app_class.clone());
-                    // Stream titles describe the playing media; an unrelated selected tab does not.
-                    let title = if self.config.capture_titles() {
-                        source
-                            .title
-                            .clone()
-                            .filter(|title| self.config.title_allowed(&app, title))
-                    } else {
-                        None
-                    };
-                    (app, title.unwrap_or_default())
+                    // Attribution comes from the owning app or the browser extension's
+                    // audible domain. Stream names are neither app nor website identities.
+                    (app, String::new())
                 })
                 .collect()
         };
@@ -1570,6 +1563,40 @@ mod tests {
             source: "loginctl",
         };
         assert!(tracker.wayland_idle_pause_is_authoritative(&status));
+    }
+
+    #[test]
+    fn background_audio_uses_owning_game_without_storing_stream_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let storage = Storage::open(Some(&dir.path().join("test.db")), &config).unwrap();
+        let mut tracker = Tracker::new(storage, config);
+        tracker
+            .state
+            .windows
+            .insert("0x1".into(), window("0x1", "Deadlock"));
+        tracker
+            .apply_session_status(
+                SessionStatus {
+                    idle: false,
+                    idle_since_unix: None,
+                    locked: false,
+                    stay_awake: false,
+                    audio_playing: true,
+                    audio_sources: vec![crate::session::AudioSource {
+                        app_class: "wine64-preloader".into(),
+                        pid: Some(1),
+                        title: Some("audio stream #2".into()),
+                    }],
+                    source: "test",
+                },
+                100,
+            )
+            .unwrap();
+        let media = tracker.storage.media_intervals_between(100, 110).unwrap();
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].app_class, "Deadlock");
+        assert!(media[0].label.is_empty());
     }
 
     #[test]
