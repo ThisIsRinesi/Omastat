@@ -185,6 +185,8 @@ Ui.Panel {
   readonly property int requestedWidth: Math.max(380, Math.min(2000, Number(root.setting("panelWidth", 1160)) || 1160))
   readonly property bool expansive: panel.contentWidth >= Style.space(1500)
   readonly property bool wide: panel.contentWidth >= Style.space(900)
+  readonly property bool calendarLens: selectedLens === "month" || selectedLens === "year"
+  readonly property bool supportRailVisible: expansive && (hasInsightContent || calendarLens)
   readonly property bool selected: selectedActivityKey.length > 0
   readonly property var detail: selected ? (activityDetail || {}) : activityAnalytics
   readonly property var activityMetrics: Model.activityMetricValues(activityDetail, detailRunning, detailError)
@@ -227,7 +229,7 @@ Ui.Panel {
   readonly property var calendarWeeks: Model.monthWeekCells(shownDaily)
   readonly property bool yearlyRhythm: selectedLens === "year"
   readonly property var rhythmCells: yearlyRhythm ? Model.monthCells(shownDaily, "year") : calendarCells
-  readonly property var rhythmWeeks: yearlyRhythm ? rhythmCells : calendarWeeks
+  readonly property var rhythmWeeks: yearlyRhythm ? Model.monthBucketCells(shownDaily) : calendarWeeks
   readonly property var calendarWeekdays: Model.weekdayFocusCells(shownHeat)
   function formatDuration(seconds) { return Model.fmt(seconds) }
   function sliceColor(index, alpha) {
@@ -591,18 +593,44 @@ Ui.Panel {
               color: root.dim
             }
             GridLayout {
+              id: contentGrid
               Layout.fillWidth: true
-              columns: root.expansive ? (root.hasInsightContent ? 3 : 2) : root.wide ? 2 : 1
+              columns: root.supportRailVisible ? 3 : root.wide ? 2 : 1
               columnSpacing: Style.space(12)
               rowSpacing: Style.space(12)
+              // Each rail sizes its own sections, independently of the chart height.
+              GridLayout {
+                id: activityRail
+                visible: root.wide
+                columns: 1
+                Layout.row: 0
+                Layout.column: 0
+                Layout.fillWidth: true
+                Layout.preferredWidth: body.width * (root.expansive ? 0.27 : 0.36)
+                Layout.minimumWidth: Style.space(290)
+                Layout.alignment: Qt.AlignTop
+                rowSpacing: Style.space(12)
+              }
+              GridLayout {
+                id: supportRail
+                visible: root.supportRailVisible
+                columns: 1
+                Layout.row: 0
+                Layout.column: 2
+                Layout.fillWidth: true
+                Layout.preferredWidth: body.width * 0.23
+                Layout.alignment: Qt.AlignTop
+                rowSpacing: Style.space(16)
+              }
               ColumnLayout {
                 id: insightsSection
+                parent: root.expansive ? supportRail : root.wide ? activityRail : contentGrid
                 visible: root.hasInsightContent
-                Layout.row: root.wide ? 0 : 2
-                Layout.column: root.expansive ? 2 : root.wide ? 1 : 0
-                Layout.rowSpan: root.expansive ? 2 : root.wide ? 3 : 1
+                Layout.row: root.expansive ? 0 : 2
+                Layout.column: 0
+                Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.expansive ? body.width * 0.26 : root.wide ? body.width * 0.4 : body.width
+                Layout.preferredWidth: root.expansive ? supportRail.width : root.wide ? activityRail.width : body.width
                 Layout.alignment: Qt.AlignTop
                 spacing: Style.space(14)
                 Label { Layout.fillWidth: true; text: "Patterns & insights"; font.pixelSize: Style.font.subtitle; font.bold: true }
@@ -741,23 +769,24 @@ Ui.Panel {
 
               }
               Section {
+                parent: root.wide ? activityRail : contentGrid
                 title: root.activityType === "app" ? "Time by app" : "Time by website"
                 Layout.row: 0
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.expansive ? body.width * 0.28 : root.wide ? body.width * (root.hasInsightContent ? 0.6 : 0.38) : body.width
+                Layout.preferredWidth: root.wide ? activityRail.width : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
-                  columns: width >= Style.space(440) ? 2 : 1
+                  columns: width >= Style.space(360) ? 2 : 1
                   columnSpacing: Style.space(16)
                   AppDonut {
                     id: compositionDonut
                     objectName: "compositionChart"
                     Layout.fillWidth: true
-                    Layout.preferredWidth: Style.space(170)
-                    Layout.maximumWidth: Style.space(170)
+                    Layout.preferredWidth: Style.space(parent.width < Style.space(440) && parent.columns === 2 ? 120 : 170)
+                    Layout.maximumWidth: Layout.preferredWidth
                     Layout.alignment: Qt.AlignHCenter
                     apps: root.composition
                     colors: root.compositionColors
@@ -800,12 +829,13 @@ Ui.Panel {
                 Label { Layout.fillWidth: true; text: "Overall period · Select an activity to update its charts"; color: root.dim; font.pixelSize: Style.font.caption }
               }
               Section {
+                id: rhythmSection
                 title: "Your rhythm"
-                Layout.row: root.expansive || (root.wide && !root.hasInsightContent) ? 0 : 1
-                Layout.column: root.expansive || (root.wide && !root.hasInsightContent) ? 1 : 0
-                Layout.rowSpan: root.expansive || (root.wide && !root.hasInsightContent) ? 2 : 1
+                Layout.row: root.wide ? 0 : 1
+                Layout.column: root.wide ? 1 : 0
+                Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.expansive ? body.width * (root.hasInsightContent ? 0.46 : 0.72) : root.wide ? body.width * (root.hasInsightContent ? 0.6 : 0.62) : body.width
+                Layout.preferredWidth: root.expansive ? body.width * (root.supportRailVisible ? 0.50 : 0.73) : root.wide ? body.width * 0.64 : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
@@ -815,8 +845,8 @@ Ui.Panel {
                   rowSpacing: Style.space(8)
                   FocusRing {
                     Layout.fillWidth: true
-                    Layout.preferredWidth: Style.space(280)
-                    Layout.maximumWidth: parent.columns === 2 ? Style.space(280) : Infinity
+                    Layout.preferredWidth: Style.space(350)
+                    Layout.maximumWidth: parent.columns === 2 ? Style.space(350) : Infinity
                     Layout.preferredHeight: implicitHeight
                     title: "Busiest hours"
                     detail: "Local time"
@@ -834,7 +864,7 @@ Ui.Panel {
                     BarChart {
                       Layout.fillWidth: true
                       Layout.minimumHeight: Style.space(200)
-                      Layout.preferredHeight: Style.space(200)
+                      Layout.preferredHeight: root.expansive ? Style.space(280) : Style.space(220)
                       cells: root.hours
                       hourly: true
                     }
@@ -887,7 +917,12 @@ Ui.Panel {
                 }
                 Label { Layout.fillWidth: true; Layout.minimumHeight: Style.space(32); visible: root.selectedLens === "day" || root.chartReadout.length > 0; text: root.chartReadout || "Point to an hour to inspect focused and multitasked time."; color: root.dim; font.pixelSize: Style.font.caption }
                 ColumnLayout {
+                  // The wide view pairs the calendar with hourly patterns in its own rail.
+                  parent: root.expansive && root.calendarLens ? supportRail : rhythmSection.contentLayout
+                  Layout.row: root.expansive && root.calendarLens ? 1 : -1
+                  Layout.column: 0
                   Layout.fillWidth: true
+                  Layout.alignment: Qt.AlignTop
                   visible: root.selectedLens !== "day"
                   spacing: Style.space(8)
                   Label { text: "Time spent by day and hour"; font.bold: true }
@@ -897,12 +932,13 @@ Ui.Panel {
 
               }
               Section {
+                parent: root.wide ? activityRail : contentGrid
                 title: "Explore activity"
-                Layout.row: root.expansive ? 1 : root.wide ? (root.hasInsightContent ? 2 : 1) : 3
+                Layout.row: root.wide ? 1 : 3
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.expansive ? body.width * 0.28 : root.wide ? body.width * (root.hasInsightContent ? 0.6 : 0.38) : body.width
+                Layout.preferredWidth: root.wide ? activityRail.width : body.width
                 Layout.alignment: Qt.AlignTop
                 RowLayout {
                   Layout.fillWidth: true
@@ -999,6 +1035,7 @@ Ui.Panel {
     id: section
     property string title: ""
     default property alias contents: sectionBody.data
+    readonly property alias contentLayout: sectionBody
     readonly property int inset: Style.space(root.richGraphs ? 16 : 10)
     implicitHeight: sectionBody.implicitHeight + inset * 2
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, root.dynamicIslandStyle ? 0.045 : 0.025)
@@ -1195,6 +1232,13 @@ Ui.Panel {
     Label { text: parent.contextLabel; color: root.dim; font.pixelSize: Style.font.caption }
   }
   component Heatmap: ColumnLayout {
+    id: heatmapRoot
+    property string selectedText: ""
+    Connections { target: root; function onViewKeyChanged() { heatmapRoot.selectedText = "" } }
+    function focusCell(day, hour) {
+      var row = heatRows.itemAt(Math.max(0, Math.min(6, day)))
+      if (row) row.buttons.itemAt(Math.max(0, Math.min(23, hour))).forceActiveFocus()
+    }
     spacing: Style.space(4)
     RowLayout {
       Layout.fillWidth: true
@@ -1202,15 +1246,18 @@ Ui.Panel {
       Repeater { model: ["00:00", "06:00", "12:00", "18:00"]; Label { required property string modelData; Layout.fillWidth: true; text: modelData; color: root.dim; font.pixelSize: Style.font.caption } }
     }
     Repeater {
+      id: heatRows
       model: 7
       RowLayout {
         id: heatRow
         required property int index
         property int weekday: index
+        readonly property var buttons: heatButtons
         Layout.fillWidth: true
         spacing: Style.space(3)
         Label { text: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][parent.weekday]; Layout.preferredWidth: Style.space(32); font.pixelSize: Style.font.caption; color: root.dim }
         Repeater {
+          id: heatButtons
           model: 24
           Controls.AbstractButton {
             id: cell
@@ -1222,15 +1269,32 @@ Ui.Panel {
             Layout.preferredWidth: 1
             implicitHeight: Style.space(22)
             activeFocusOnTab: true
-            onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
+            onActiveFocusChanged: if (activeFocus) { heatmapRoot.selectedText = Accessible.name; Qt.callLater(function() { root.revealControl(this) }.bind(this)) }
+            Keys.onLeftPressed: heatmapRoot.focusCell(weekday, index - 1)
+            Keys.onRightPressed: heatmapRoot.focusCell(weekday, index + 1)
+            Keys.onUpPressed: heatmapRoot.focusCell(weekday - 1, index)
+            Keys.onDownPressed: heatmapRoot.focusCell(weekday + 1, index)
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
+                heatmapRoot.focusCell(weekday, event.key === Qt.Key_Home ? 0 : 23)
+                event.accepted = true
+              }
+            }
             Accessible.name: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][weekday] + " " + index + ":00 · " + Model.fmtPrecise(seconds)
-            onClicked: root.chartReadout = Accessible.name
+            onClicked: heatmapRoot.selectedText = Accessible.name
             background: Rectangle { radius: Style.space(2); color: cell.seconds > 0 ? root.accent : root.fill; opacity: cell.seconds > 0 ? 0.2 + 0.8 * cell.seconds / root.maximum(root.heatCells) : 1; border.width: cell.activeFocus || cell.hovered ? 2 : 0; border.color: root.foreground }
             Controls.ToolTip.visible: hovered || activeFocus
             Controls.ToolTip.text: Accessible.name
           }
         }
       }
+    }
+    Label {
+      Layout.fillWidth: true
+      Layout.minimumHeight: Style.space(26)
+      text: heatmapRoot.selectedText || "Select an hour to inspect · Arrow keys move through the week"
+      color: root.dim
+      font.pixelSize: Style.font.caption
     }
   }
   component AppDonut: Item {
@@ -1412,7 +1476,7 @@ Ui.Panel {
     property int hoveredIndex: -1
     property string hoveredText: ""
     property bool expanded: false
-    readonly property int chartSize: expanded ? Style.space(146) : Style.space(132)
+    readonly property int chartSize: expanded ? Math.max(Style.space(146), Math.min(Style.space(210), width - Style.space(128))) : Style.space(132)
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < hours.length
       ? hourlyDetailText(hours[selectedIndex])
       : ""
@@ -1439,7 +1503,7 @@ Ui.Panel {
       return Math.max(0, Math.min(23, Math.floor(degrees / 15)))
     }
 
-    implicitHeight: Style.space(264)
+    implicitHeight: chartSize + Style.space(118)
     radius: 0
     color: root.noFill
     border.width: 0
@@ -1619,7 +1683,8 @@ Ui.Panel {
       ? Model.trendDetailText(days[selectedIndex])
       : ""
     readonly property string readoutText: inspectedDay ? Model.trendDetailText(inspectedDay) + (isCurrentDay(inspectedDay) ? " so far" : "") : ""
-    readonly property string defaultText: Model.trendDefaultText(days, root.selectedLens === "year" ? "month" : root.selectedLens === "life" ? "week" : "day")
+    readonly property bool hasActivity: days.some(function(day) { return Number(day.seconds || 0) > 0 })
+    readonly property string defaultText: Model.trendDefaultText(days, root.selectedLens === "year" || root.selectedLens === "life" ? "week" : "day")
     readonly property int inspectedIndex: hoveredIndex >= 0 ? hoveredIndex : selectedIndex
     readonly property var inspectedDay: inspectedIndex >= 0 && inspectedIndex < days.length ? days[inspectedIndex] : null
     function isCurrentDay(cell) { return cell && !cell.monthly && !cell.weekly && String(cell.date || cell.key || "") === root.todayKey }
@@ -1667,7 +1732,7 @@ Ui.Panel {
       if (lineCanvas) lineCanvas.requestPaint()
     }
 
-    implicitHeight: Style.space(216)
+    implicitHeight: Math.max(Style.space(216), Math.min(Style.space(root.calendarLens ? 250 : 320), width * 0.34))
     radius: 0
     color: root.noFill
 
@@ -1745,6 +1810,7 @@ Ui.Panel {
           required property real modelData
           x: -Style.space(50)
           y: lineRoot.pointY(lineRoot.maxSeconds * modelData) - height / 2
+          visible: lineRoot.hasActivity || modelData === 0
           width: Style.space(44)
           text: Model.fmt(lineRoot.maxSeconds * modelData)
           horizontalAlignment: Text.AlignRight
@@ -1754,7 +1820,7 @@ Ui.Panel {
       }
       Label {
         anchors.right: parent.right
-        visible: lineRoot.inspectedIndex < 0
+        visible: lineRoot.hasActivity && lineRoot.inspectedIndex < 0
         y: Math.max(0, lineRoot.pointY(lineRoot.averageSeconds) - height)
         z: 1
         text: "Average " + Model.fmt(lineRoot.averageSeconds)
@@ -1912,29 +1978,21 @@ Ui.Panel {
         }
       }
 
-      Text {
-        anchors.left: parent.left
-        anchors.top: parent.bottom
-        anchors.topMargin: Style.space(5)
-        width: parent.width * 0.46
-        text: days.length > 0 ? Model.chartDateLabel(days[0]) : ""
-        color: root.faint
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
-      }
-
-      Text {
-        width: parent.width * 0.42
-        anchors.right: parent.right
-        anchors.top: parent.bottom
-        anchors.topMargin: Style.space(5)
-        text: days.length > 0 ? Model.chartDateLabel(days[days.length - 1]) + (lineRoot.isCurrentDay(days[days.length - 1]) ? " · so far" : "") : ""
-        color: root.faint
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignRight
-        elide: Text.ElideRight
+      Repeater {
+        model: Model.trendAxisTicks(lineRoot.days, linePlot.width / Style.space(1))
+        Label {
+          required property var modelData
+          readonly property real tickWidth: Math.min(Style.space(180), linePlot.width / Math.max(1, modelData.count))
+          width: tickWidth
+          x: Math.max(0, Math.min(linePlot.width - width, lineRoot.pointX(modelData.index) - width / 2))
+          y: linePlot.height + Style.space(5)
+          text: Model.chartDateLabel(lineRoot.days[modelData.index]) + (lineRoot.isCurrentDay(lineRoot.days[modelData.index]) ? " · so far" : "")
+          horizontalAlignment: modelData.index === 0 ? Text.AlignLeft : modelData.index === lineRoot.days.length - 1 ? Text.AlignRight : Text.AlignHCenter
+          color: root.faint
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.NoWrap
+          elide: Text.ElideRight
+        }
       }
 
       MouseArea {
@@ -2001,7 +2059,7 @@ Ui.Panel {
     readonly property bool compact: width > 0 && width < Style.space(540)
     readonly property real gap: Style.space(4)
     readonly property int rowCount: Math.ceil(cells.length / 7)
-    readonly property real cellSize: Math.max(Style.space(22), Math.min(Style.space(32), (width - Style.space(compact ? 28 : 304)) / 7))
+    readonly property real cellSize: Math.max(Style.space(22), Math.min(Style.space(weeklyCells ? 38 : 44), (width - Style.space(compact ? 24 : 284) - 6 * gap) / 7))
     readonly property real calendarWidth: 7 * cellSize + 6 * gap
     readonly property real calendarHeight: Style.space(40) + Style.space(4) + rowCount * cellSize + Math.max(0, rowCount - 1) * gap
     readonly property real weeklyPaceHeight: Style.space(18) + Style.space(5) + weeks.length * Style.space(22) + Math.max(0, weeks.length - 1) * Style.space(5)
@@ -2205,7 +2263,7 @@ Ui.Panel {
 
           Text {
             width: parent.width
-            text: "Weekly totals"
+            text: monthRhythmRoot.weeklyCells ? "Monthly totals" : "Weekly totals"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2216,9 +2274,23 @@ Ui.Panel {
           Repeater {
             model: weeks
 
-            Item {
+            Controls.AbstractButton {
+              id: periodTotal
               required property var modelData
-
+              readonly property bool canOpen: Model.cellDestination(modelData, Model.dateKey(new Date())) !== null
+              activeFocusOnTab: canOpen
+              enabled: canOpen
+              Accessible.name: Model.chartDateLabel(modelData) + ": " + Model.fmtPrecise(modelData.seconds) + ". " + Model.cellActionText(modelData)
+              onActiveFocusChanged: if (activeFocus) root.revealControl(periodTotal)
+              onClicked: monthRhythmRoot.activatedCell(modelData)
+              Controls.ToolTip.visible: hovered || activeFocus
+              Controls.ToolTip.text: Accessible.name
+              background: Rectangle {
+                radius: Style.space(4)
+                color: periodTotal.hovered || periodTotal.activeFocus ? root.fill : "transparent"
+                border.width: periodTotal.activeFocus ? 1 : 0
+                border.color: root.accent
+              }
               width: parent.width
               height: Style.space(22)
 
@@ -2239,7 +2311,7 @@ Ui.Panel {
                 anchors.right: parent.right
                 anchors.top: parent.top
                 width: Style.space(72)
-                text: String(modelData.valueText || "")
+                text: String(modelData.valueText || Model.fmt(modelData.seconds || 0))
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -2318,7 +2390,7 @@ Ui.Panel {
                   anchors.left: parent.left
                   anchors.bottom: parent.bottom
                   width: parent.width
-                  height: Math.max(Style.space(3), parent.height * root.clamp01(Number(modelData.seconds || 0) / monthRhythmRoot.weekdayMaxSeconds) * monthRhythmRoot.revealProgress)
+                  height: Number(modelData.seconds || 0) > 0 ? Math.max(Style.space(3), parent.height * root.clamp01(Number(modelData.seconds) / Math.max(1, monthRhythmRoot.weekdayMaxSeconds)) * monthRhythmRoot.revealProgress) : 0
                   radius: parent.radius
                   color: root.withAlpha(root.accent, 0.82)
                 }

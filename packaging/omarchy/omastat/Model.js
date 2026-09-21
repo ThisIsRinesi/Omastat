@@ -1223,3 +1223,15 @@ function fmtPrecise(seconds) {
   if (rest || !parts.length) parts.push(rest + "s")
   return parts.join(" ")
 }
+
+// Sample real buckets so axis labels stay aligned with plotted observations.
+function trendAxisTicks(days, width) {
+  var length = (days || []).length
+  if (!length) return []
+  var count = Math.min(length, Math.max(2, Math.min(5, Math.floor(Math.max(0, Number(width) || 0) / 190))))
+  var out = []
+  for (var i = 0; i < count; i++) {
+    out.push({ index: count === 1 ? 0 : Math.round(i * (length - 1) / (count - 1)), count: count })
+  }
+  return out
+}

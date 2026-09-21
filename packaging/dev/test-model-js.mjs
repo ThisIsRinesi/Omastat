@@ -383,3 +383,29 @@ for (const [seconds, expected] of [[0,"0s"],[65,"1m 5s"],[3600,"1h"],[3661,"1h 1
 }
 assert.match(context.trendDetailText({date:"2026-09-14",seconds:3661,multitasked_seconds:65}), /1h 1m 1s focused.*1m 5s multitasked/);
 console.log("Precise chart readout checks passed");
+
+// Responsive axes preserve endpoints and never repeat or invent observations.
+assert.equal(context.trendAxisTicks([], 1000).length, 0);
+assert.deepEqual(Array.from(context.trendAxisTicks([{}], 1000), tick => tick.index), [0]);
+for (const length of [2, 7, 30, 53]) {
+  for (const width of [0, 180, 380, 760, 1200]) {
+    const ticks = Array.from(context.trendAxisTicks(Array(length).fill({}), width));
+    const indices = ticks.map(tick => tick.index);
+    assert.equal(indices[0], 0);
+    assert.equal(indices.at(-1), length - 1);
+    assert.equal(new Set(indices).size, indices.length);
+    assert.ok(indices.length <= 5);
+    assert.ok(ticks.every(tick => tick.count === ticks.length));
+  }
+}
+// Monthly comparisons preserve totals and drill into their actual month.
+const comparisonMonths = context.monthBucketCells([
+  { date: '2025-12-31', focused_seconds: 60 },
+  { date: '2026-01-01', focused_seconds: 120 },
+  { date: '2026-01-31', focused_seconds: 180 },
+]);
+assert.deepEqual(Array.from(comparisonMonths, cell => cell.seconds), [60, 300]);
+assert.equal(context.cellDestination(comparisonMonths[0], '2026-02-01').lens, 'month');
+assert.equal(context.cellDestination(comparisonMonths[0], '2026-02-01').offset, -2);
+assert.equal(context.cellDestination(comparisonMonths[1], '2026-02-01').offset, -1);
+console.log('Responsive date axes and monthly comparison drilldown checks passed');
