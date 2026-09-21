@@ -615,15 +615,21 @@ Ui.BarWidget {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
 
-  function toggleIconOnly() {
-    var next = !root.iconOnly
+  function setAppearanceSetting(name, value) {
+    if (["iconOnly", "richGraphs", "reduceMotion", "dynamicIslandStyle", "panelWidth"].indexOf(name) < 0) return
     var entry = { id: root.moduleName }
     var current = root.settings || {}
     for (var key in current) if (key !== "id" && key !== "overviewCommand") entry[key] = current[key]
-    entry.iconOnly = next
+    if (name === "panelWidth" && [760, 1160, 2000].indexOf(value) < 0) return
+    entry[name] = name === "panelWidth" ? value : value === true
     root.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
+    scheduleInjectPanel()
+  }
+
+  function toggleIconOnly() {
+    setAppearanceSetting("iconOnly", !root.iconOnly)
   }
 
   function summaryCommand(lens, offset) {

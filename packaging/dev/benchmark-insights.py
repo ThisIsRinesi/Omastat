@@ -52,6 +52,17 @@ def synthetic(source, destination, count):
                 "INSERT INTO browser_domain_intervals(source,app_class,domain,started_at,ended_at,last_confirmed_at) VALUES(?,'chromium',?,?,?,?)",
                 (source, f"site-{i % 17}.test", a+delay, b, b),
             )
+    # Exercise multitasking as well as foreground attribution on current schemas.
+    if target.execute("SELECT 1 FROM sqlite_master WHERE name='media_intervals'").fetchone():
+        for i in range(0, count, 3):
+            a, b = start+i*step, min(start+(i+3)*step, end)
+            if a >= end:
+                break
+            for source, label in [("system", ""), ("browser:chromium", f"site-{i % 17}.test")]:
+                target.execute(
+                    "INSERT INTO media_intervals(source,app_class,label,started_at,ended_at,last_confirmed_at,ttl) VALUES(?,'chromium',?,?,?,?,90)",
+                    (source, label, a, b, b),
+                )
     for (sql,) in original.execute(
         "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
     ):

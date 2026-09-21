@@ -888,25 +888,25 @@ function trendDetailText(day) {
   if (!day) return ""
   var parts = []
   var label = chartDateLabel(day) || "Day"
-  parts.push(label + ": " + fmt(Number(day.seconds || 0)) + (day.cumulative === true ? " cumulative focus" : " focused"))
-  if (Number(day.multitasked_seconds || 0) > 0) parts.push(fmt(day.multitasked_seconds) + " multitasked")
-  if (Number(day.excluded_seconds || 0) > 0) parts.push(fmt(day.excluded_seconds) + " not counted")
+  parts.push(label + ": " + fmtPrecise(Number(day.seconds || 0)) + (day.cumulative === true ? " cumulative focus" : " focused"))
+  if (Number(day.multitasked_seconds || 0) > 0) parts.push(fmtPrecise(day.multitasked_seconds) + " multitasked")
+  if (Number(day.excluded_seconds || 0) > 0) parts.push(fmtPrecise(day.excluded_seconds) + " not counted")
   return parts.join("  ")
 }
 
 function monthCellDetailText(cell) {
   if (!cell || cell.blank) return ""
   var parts = []
-  parts.push(String(cell.label || cell.date || "Day") + ": " + fmt(Number(cell.seconds || 0)) + " focused")
-  if (Number(cell.multitasked_seconds || 0) > 0) parts.push(fmt(cell.multitasked_seconds) + " multitasked")
-  if (Number(cell.excluded_seconds || 0) > 0) parts.push(fmt(cell.excluded_seconds) + " not counted")
+  parts.push(String(cell.label || cell.date || "Day") + ": " + fmtPrecise(Number(cell.seconds || 0)) + " focused")
+  if (Number(cell.multitasked_seconds || 0) > 0) parts.push(fmtPrecise(cell.multitasked_seconds) + " multitasked")
+  if (Number(cell.excluded_seconds || 0) > 0) parts.push(fmtPrecise(cell.excluded_seconds) + " not counted")
   return parts.join("  ")
 }
 
 function heatCellDetailText(cell) {
   if (!cell) return ""
   var weekday = WEEKDAY_LABELS[Math.max(0, Math.min(6, Number(cell.weekday || 0)))] || "Day"
-  return weekday + " " + hourLabel(cell.hour) + ": " + fmt(Number(cell.seconds || 0)) + " focused"
+  return weekday + " " + hourLabel(cell.hour) + ": " + fmtPrecise(Number(cell.seconds || 0)) + " focused"
 }
 
 // Insights are supplied by the Rust analysis engine; this module only formats charts.
@@ -1160,4 +1160,66 @@ function withMultitaskingHours(hours, media) {
   var totals = {}
   ;(media || []).forEach(function(d) { totals[d.hour] = (totals[d.hour] || 0) + Number(d.focused_seconds || 0) })
   return (hours || []).map(function(d, i) { return Object.assign({}, d, {multitasked_seconds: Math.min(Number(d.seconds || 0), totals[i] || 0)}) })
+}
+
+// Monotone cubic interpolation for equally spaced chart samples. Control points
+// stay within each pair of values, so smoothing cannot invent peaks or negatives.
+function smoothChartSegments(cells, field, ceiling) {
+  var values = (cells || []).map(function(cell) {
+    var value = Number(cell[field] || 0)
+    return isFinite(value) ? Math.max(0, value) : 0
+  })
+  if (values.length < 2) return []
+  var delta = [], tangent = []
+  for (var i = 0; i < values.length - 1; i++) delta.push(values[i + 1] - values[i])
+  tangent[0] = delta[0]
+  tangent[values.length - 1] = delta[delta.length - 1]
+  for (var j = 1; j < values.length - 1; j++) {
+    var left = delta[j - 1], right = delta[j]
+    tangent[j] = left * right <= 0 ? 0 : 2 * left * right / (left + right)
+  }
+  var result = []
+  for (var k = 0; k < delta.length; k++) {
+    var low = Math.min(values[k], values[k + 1]), high = Math.max(values[k], values[k + 1])
+    result.push({
+      from: values[k], to: values[k + 1],
+      c1: Math.max(low, Math.min(high, values[k] + tangent[k] / 3)),
+      c2: Math.max(low, Math.min(high, values[k + 1] - tangent[k + 1] / 3))
+    })
+    if (ceiling && ceiling[k]) {
+      // A subset series (multitasking) must remain below the foreground curve.
+      for (var key in result[k]) result[k][key] = Math.min(result[k][key], ceiling[k][key])
+    }
+  }
+  return result
+}
+
+// Half-open intervals keep boundary selection consistent with the tracker.
+// Binary search makes scrubbing independent of the number of earlier switches.
+function timelineIndexAt(segments, timestamp) {
+  var lo = 0, hi = segments.length
+  while (lo < hi) {
+    var mid = (lo + hi) >>> 1
+    if (Number(segments[mid].start) <= timestamp) lo = mid + 1
+    else hi = mid
+  }
+  var index = lo - 1
+  return index >= 0 && timestamp < Number(segments[index].end) ? index : -1
+}
+
+function timelineAudioLabel(segment) {
+  if (!segment || !segment.audio || !segment.audio.length) return "No background audio detected"
+  return segment.audio.map(function(source) { return source.label }).join(" · ")
+}
+
+// Detailed chart readouts retain seconds; compact headline values still use fmt.
+function fmtPrecise(seconds) {
+  var total = Math.max(0, Math.floor(Number(seconds) || 0))
+  if (!isFinite(total)) return "0s"
+  var hours = Math.floor(total / 3600), minutes = Math.floor(total % 3600 / 60), rest = total % 60
+  var parts = []
+  if (hours) parts.push(hours + "h")
+  if (minutes) parts.push(minutes + "m")
+  if (rest || !parts.length) parts.push(rest + "s")
+  return parts.join(" ")
 }

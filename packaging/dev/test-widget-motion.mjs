@@ -89,3 +89,26 @@ for (const kind of ["refresh", "detail"]) {
   assert.doesNotMatch(source, /on(?:Cells|MaxSeconds)Changed: restartReveal/);
 }
 console.log("Delayed feedback, navigation-only reveals, and reduced-motion checks passed");
+
+{
+  const c=vm.createContext({graphProgress:0.3,graphEntry:{stopped:false,stop(){this.stopped=true;}}});
+  vm.runInContext(panel.match(/^  function settleGraphMotion\([^\n]*\) \{[\s\S]*?^  \}/m)[0],c);
+  c.settleGraphMotion();
+  assert.equal(c.graphProgress,1);
+  assert.equal(c.graphEntry.stopped,true);
+  assert.doesNotMatch(panel,/onGraphProgressChanged[^\n]*requestPaint/,'entry animation must not rerasterize charts each frame');
+}
+console.log('Graph motion settles immediately without per-frame Canvas repaint');
+
+{
+  const source = panel.match(/  onViewRevealed: \{([\s\S]*?)\n  \}/)[1];
+  const c = vm.createContext({richGraphs:true, motionDuration:240, graphEntry:{running:true,starts:0,start(){this.starts++;}},settleGraphMotion(){throw Error("Unexpected settle");}});
+  vm.runInContext(source,c);
+  assert.equal(c.graphEntry.starts,0,"interrupting navigation preserves the in-flight reveal");
+  c.graphEntry.running=false;
+  vm.runInContext(source,c);
+  assert.equal(c.graphEntry.starts,1);
+  const trend=panel.slice(panel.indexOf('  component FocusTrendLine:'),panel.indexOf('  component MonthRhythm:'));
+  assert.doesNotMatch(trend,/on(?:HoveredIndex|SelectedIndex)Changed: requestPaint/,'trend cursor movement must reuse its cached Canvas');
+}
+console.log('Interrupted reveals and cached trend selection checks passed');

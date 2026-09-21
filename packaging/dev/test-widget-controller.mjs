@@ -378,3 +378,31 @@ console.log("Stale retention, bounded caches, hidden injection, and navigation c
   c.refreshDetail(false);
   assert.equal(c.activityDetail, null, "detail from another date cannot survive a refresh without a matching cache key");
 }
+
+{
+  const c=controller();
+  c.moduleName='local.omastat';
+  c.settings={refreshIntervalSec:90,panelWidth:1200,dynamicIslandStyle:true};
+  const writes=[];
+  c.bar={shell:{updateEntryInline(id,entry) { writes.push({id,entry}); }}};
+  c.setAppearanceSetting('richGraphs',false);
+  assert.equal(c.settings.richGraphs,false);
+  assert.equal(c.settings.refreshIntervalSec,90);
+  assert.equal(c.settings.dynamicIslandStyle,true);
+  assert.equal(writes[0].id,'local.omastat');
+  c.setAppearanceSetting('reduceMotion',true);
+  assert.equal(c.settings.reduceMotion,true);
+  c.setAppearanceSetting('unrecognized',true);
+  assert.equal(writes.length,2,'only supported appearance settings are persisted');
+  for (const width of [760,1160,2000]) {
+    c.setAppearanceSetting('panelWidth',width);
+    assert.equal(c.settings.panelWidth,width,'width is persisted as a number');
+    assert.equal(c.settings.refreshIntervalSec,90);
+    assert.equal(c.settings.reduceMotion,true);
+  }
+  c.setAppearanceSetting('panelWidth',true);
+  c.setAppearanceSetting('panelWidth',99999);
+  assert.equal(c.settings.panelWidth,2000);
+  assert.equal(writes.length,5,'invalid widths are not persisted');
+}
+console.log('Appearance persistence preserves unrelated widget settings');

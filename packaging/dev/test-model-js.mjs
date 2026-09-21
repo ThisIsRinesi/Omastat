@@ -347,3 +347,39 @@ assert.equal(context.trendDays(concurrent,'','week')[0].multitasked_seconds,1200
 assert.match(context.trendDetailText(context.trendDays(concurrent,'','week')[0]),/20m multitasked/);
 assert.equal(context.withMultitaskingHours([{seconds:3600}], [{hour:0,focused_seconds:900}])[0].multitasked_seconds,900);
 console.log('Multitasking chart overlays and weekly aggregation checks passed');
+
+function cubic(s, t) {
+  const u = 1 - t;
+  return u*u*u*s.from + 3*u*u*t*s.c1 + 3*u*t*t*s.c2 + t*t*t*s.to;
+}
+for (const values of [[], [50], [0,0,0], [0,100,0,200,10], [100,101,10000,0], [50,40,30,20]]) {
+  const curves = context.smoothChartSegments(values.map(seconds => ({seconds})), 'seconds');
+  assert.equal(curves.length, Math.max(0,values.length-1));
+  curves.forEach((s,i) => {
+    assert.equal(s.from,values[i]); assert.equal(s.to,values[i+1]);
+    for(let t=0;t<=1;t+=0.01) {
+      const y=cubic(s,t);
+      assert.ok(y>=Math.min(s.from,s.to)-1e-9 && y<=Math.max(s.from,s.to)+1e-9,'curve must not invent peaks or negative usage');
+    }
+  });
+}
+const layered=[{seconds:100,multitasked_seconds:90},{seconds:10,multitasked_seconds:10},{seconds:100,multitasked_seconds:0}];
+const upper=context.smoothChartSegments(layered,'seconds');
+const lower=context.smoothChartSegments(layered,'multitasked_seconds',upper);
+lower.forEach((s,i) => { for(let t=0;t<=1;t+=0.01) assert.ok(cubic(s,t)<=cubic(upper[i],t)+1e-9); });
+console.log('Smooth chart bounds, exact samples, and multitasking containment checks passed');
+
+const timelineSegments = [{start:10,end:20,audio:[]},{start:20,end:30,audio:[{label:"youtube.com"}]},{start:40,end:50,audio:[]}];
+assert.equal(context.timelineIndexAt([], 10), -1);
+for (const [at, expected] of [[9,-1],[10,0],[19.9,0],[20,1],[30,-1],[39,-1],[40,2],[50,-1]]) {
+  assert.equal(context.timelineIndexAt(timelineSegments, at), expected);
+}
+assert.equal(context.timelineAudioLabel(timelineSegments[1]), "youtube.com");
+assert.equal(context.timelineAudioLabel(null), "No background audio detected");
+console.log("Timeline boundaries, gaps, and audio readout checks passed");
+
+for (const [seconds, expected] of [[0,"0s"],[65,"1m 5s"],[3600,"1h"],[3661,"1h 1m 1s"],[-1,"0s"],[NaN,"0s"],[Infinity,"0s"]]) {
+  assert.equal(context.fmtPrecise(seconds), expected);
+}
+assert.match(context.trendDetailText({date:"2026-09-14",seconds:3661,multitasked_seconds:65}), /1h 1m 1s focused.*1m 5s multitasked/);
+console.log("Precise chart readout checks passed");

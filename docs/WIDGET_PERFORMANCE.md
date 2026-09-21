@@ -88,3 +88,64 @@ offscreen preview checked wide and narrow layouts, slow-refresh feedback, and
 reduced motion using the real panel content with a test window wrapper. Daemon lifecycle tests
 need permission to create local Unix sockets. The desktop plugin was not deployed
 or restarted as part of this optimization.
+
+## Multitasking report optimization (September 20)
+
+The compact bar summary now calculates multitasked seconds with a totals-only
+interval sweep. It loads system audio only, interns app identities once, and
+uses integer counters to distinguish foreground audio from background audio.
+The foreground query is restricted to the audio date range and omits workspace
+metadata; periods with no audio return without reading foreground history.
+It skips browser-domain attribution, per-source aggregation, and calendar
+rollups. The full dashboard still supplies all of these details.
+
+The full report also accumulates each source's seconds directly from disjoint
+sweep segments, instead of allocating interval lists and sorting/merging them
+again. Foreground identity normalization is cached within the query, only for
+focus intervals actually visited in the selected period.
+
+The benchmark's synthetic fixture now includes system audio and audible browser
+domains when the database schema supports them. A deterministic differential
+test compares compact and full totals over overlapping focus/audio intervals,
+case variants, open and expired observations, and empty/reversed query ranges.
+
+Seven alternating release-binary runs on a private database snapshot gave these
+median compact-summary timings (milliseconds):
+
+| Period | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Day | 13.03 | 12.53 | 3.8% |
+| Week | 23.88 | 19.00 | 20.4% |
+| Month | 70.54 | 45.51 | 35.5% |
+| Year | 95.05 | 58.59 | 38.4% |
+| Life | 97.73 | 60.27 | 38.3% |
+
+Full dashboard medians varied by −2.3% to +1.8% improvement on this snapshot;
+there is no demonstrated full-dashboard latency improvement here. Compared
+current-period data and historical reports matched. The full Rust suite passed
+173 tests. These changes do not modify recording behavior, schemas, or the
+signed browser extension.
+
+On a generated 56-day history with 120,000 app intervals and 40,000 media
+intervals (`--synthetic-intervals 60000 --runs 7 --commands widget-summary summary`),
+compact summaries improved 7–21%, with lifetime median 237 → 188 ms. Full
+reports remained approximately unchanged (−0.4% to +2.0%). All benchmark data
+comparisons passed; synthetic results describe scaling rather than this user's
+current workload. The benchmark snapshot never modifies the live database.
+
+### Daily foreground/audio timeline
+
+Day reports reuse the existing focus/media event sweep to emit privacy-filtered,
+non-overlapping timeline segments. Adjacent segments with identical foreground
+and audio attribution merge. Other lenses and compact widget summaries omit
+these intervals. No additional sampling, polling, or database query is needed.
+
+The detailed timeline is currently retained in the report API only; the dashboard
+continues to use its existing charts and solid navigation styling.
+
+### Chart interaction polish
+
+Trend hover/keyboard selection uses separate cursor and point items, retaining
+the cached Canvas while inspecting values. Entrance animations keep their current
+progress during interrupted navigation and are not replayed on refresh. Hourly
+bar heights guard against empty ranges; detailed readouts retain seconds.

@@ -44,10 +44,12 @@ PanelWindow {
   // Plugin-owned variant of Omarchy's keyboard panel; preserves focus and dismissal.
   property bool islandStyle: false
   property bool reduceMotion: false
+  property bool richGraphs: true
+  onReduceMotionChanged: if (reduceMotion) { expansionMotion.complete(); cardOpacityMotion.complete() }
   readonly property bool topIsland: islandStyle && barPos === "top"
   property real expansion: open ? 1 : 0
   Behavior on expansion {
-    NumberAnimation { duration: root.reduceMotion ? 0 : 240; easing.type: Easing.OutCubic }
+    SmoothedAnimation { id: expansionMotion; velocity: -1; duration: root.reduceMotion ? 0 : (root.open ? 320 : 220); maximumEasingTime: 100 }
   }
 
   required property Item anchorItem
@@ -399,12 +401,14 @@ PanelWindow {
     color: root.islandStyle ? "transparent" : Color.popups.background
     borderSpec: root.islandStyle ? Border.none() : root.borderSpec
     padding: root.padding
-    radius: Style.cornerRadius
+    radius: root.richGraphs ? Style.space(20) : Style.cornerRadius
+    transformOrigin: Item.Top
+    scale: root.richGraphs && !root.islandStyle ? 0.985 + root.expansion * 0.015 : 1
     opacity: root.islandStyle ? 1 : (root.open || root.popoutSwitching ? 1.0 : 0)
 
     Behavior on opacity {
       enabled: !root.islandStyle && !root.reduceMotion && !root.popoutSwitching && !root.popoutSwitchClosing
-      NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+      NumberAnimation { id: cardOpacityMotion; duration: root.richGraphs ? (root.open ? 220 : 160) : 140; easing.type: Easing.OutQuint }
     }
 
     clip: root.islandStyle
@@ -412,7 +416,9 @@ PanelWindow {
       anchors.fill: parent
       visible: root.islandStyle
       id: islandShape
-      layer.enabled: true
+      // Native curve antialiasing avoids resizing a multisampled texture during expansion.
+      preferredRendererType: Shape.CurveRenderer
+      layer.enabled: rendererType === Shape.GeometryRenderer
       layer.samples: 4
       property real r: Math.min(Style.space(22), width / 4, height / 2)
       ShapePath {

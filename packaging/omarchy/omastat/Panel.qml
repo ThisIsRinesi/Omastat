@@ -82,7 +82,29 @@ Ui.Panel {
     var value = root.setting("dynamicIslandStyle", false)
     return value === true || value === "true"
   }
-  readonly property int motionDuration: root.setting("reduceMotion", false) ? 0 : (dynamicIslandStyle ? 220 : 150)
+  property bool appearanceOpen: false
+  readonly property bool richGraphs: root.setting("richGraphs", true) !== false && root.setting("richGraphs", true) !== "false"
+  readonly property bool reducedMotion: root.setting("reduceMotion", false) === true || root.setting("reduceMotion", false) === "true"
+  readonly property int motionDuration: reducedMotion ? 0 : (richGraphs ? 240 : 150)
+  property real graphProgress: 1
+  function setAppearance(name, value) {
+    if (hostWidget && typeof hostWidget.setAppearanceSetting === "function") hostWidget.setAppearanceSetting(name, value)
+  }
+  function settleGraphMotion() {
+    graphEntry.stop()
+    graphProgress = 1
+  }
+  onViewRevealed: {
+    if (richGraphs && motionDuration > 0) {
+      if (!graphEntry.running) graphEntry.start()
+    } else settleGraphMotion()
+  }
+  NumberAnimation {
+    id: graphEntry
+    target: root; property: "graphProgress"; from: 0; to: 1
+    duration: root.motionDuration === 0 ? 0 : 360
+    easing.type: Easing.OutQuint
+  }
   onCompositionChanged: legendHoverIndex = -1
   property bool refreshBusyVisible: false
   property bool detailBusyVisible: false
@@ -104,11 +126,14 @@ Ui.Panel {
     }
     else {
       revealedViewKey = ""
+      appearanceOpen = false
+      settleGraphMotion()
       dataReveal.stop()
       body.opacity = 1
     }
   }
   onMotionDurationChanged: if (motionDuration === 0) {
+    settleGraphMotion()
     dataReveal.stop()
     body.opacity = 1
   }
@@ -157,6 +182,8 @@ Ui.Panel {
   readonly property color line: Qt.rgba(foreground.r, foreground.g, foreground.b, dynamicIslandStyle ? 0.12 : 0.18)
   readonly property color fill: Qt.rgba(foreground.r, foreground.g, foreground.b, dynamicIslandStyle ? 0.07 : 0.06)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property int requestedWidth: Math.max(380, Math.min(2000, Number(root.setting("panelWidth", 1160)) || 1160))
+  readonly property bool expansive: panel.contentWidth >= Style.space(1500)
   readonly property bool wide: panel.contentWidth >= Style.space(900)
   readonly property bool selected: selectedActivityKey.length > 0
   readonly property var detail: selected ? (activityDetail || {}) : activityAnalytics
@@ -177,6 +204,7 @@ Ui.Panel {
       return item.kind === root.activityType && (!query || String(item.label).toLowerCase().indexOf(query) >= 0 || String(item.key).toLowerCase().indexOf(query) >= 0)
     })
   }
+  readonly property bool hasInsightContent: insights.length > 0 || inspectedInsight !== null
   readonly property string baselineText: detail.baseline_start
     ? Model.insightDateRange(detail.baseline_start, detail.baseline_end) : "Up to eight weeks of history"
   onSelectedLensChanged: resetView()
@@ -312,13 +340,16 @@ Ui.Panel {
     bar: root.bar
     open: root.opened && !root.islandContainer
     islandStyle: root.dynamicIslandStyle
+    richGraphs: root.richGraphs
     reduceMotion: root.motionDuration === 0
     padding: root.dynamicIslandStyle ? Style.space(32) : Style.spacing.popupPadding
     centerOnBar: true
     margin: Math.max(Style.gapsOut, Style.space(12))
     gap: root.dynamicIslandStyle ? 0 : Math.max(Style.gapsOut, Style.space(8))
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(Math.max(380, Math.min(1600, Number(root.setting("panelWidth", 1160)) || 1160))))
+    contentWidth: panel.fittedContentWidth(Style.space(root.requestedWidth))
+    onContentWidthChanged: Qt.callLater(root.syncIsland)
+    onContentHeightChanged: Qt.callLater(root.syncIsland)
     contentHeight: panel.fittedContentHeight(Style.space(920), Style.space(920))
 
     Item {
@@ -328,7 +359,8 @@ Ui.Panel {
       focus: true
       Keys.onPressed: function(event) {
         if (event.key === Qt.Key_Escape) {
-          if (root.inspectedInsight) root.closeInsight()
+          if (root.appearanceOpen) { root.appearanceOpen = false; appearanceButton.forceActiveFocus() }
+          else if (root.inspectedInsight) root.closeInsight()
           else if (root.selected) root.selectActivity("", "")
           else root.close()
           event.accepted = true
@@ -339,41 +371,130 @@ Ui.Panel {
         z: 1
         anchors.fill: parent
         spacing: Style.space(14)
-        RowLayout {
+        GridLayout {
           Layout.fillWidth: true
+          columns: width >= Style.space(600) ? 2 : 1
           ColumnLayout {
             Layout.fillWidth: true
             spacing: Style.space(3)
             Label { Layout.fillWidth: true; text: root.periodLabel + (root.selectedOffset === 0 && root.selectedLens !== "day" && root.selectedLens !== "life" ? " to date" : ""); font.pixelSize: Style.font.title * 1.2; font.bold: true }
           }
-          Action {
-            visible: root.selectedOffset < 0 && root.selectedLens !== "life"
-            text: root.selectedLens === "day" ? "Today" : "This " + root.selectedLens
-            Accessible.name: "Return to " + text.toLowerCase()
-            onClicked: root.currentPeriod()
+          RowLayout {
+            Layout.alignment: Qt.AlignRight
+            spacing: Style.space(4)
+            Action {
+              visible: root.selectedOffset < 0 && root.selectedLens !== "life"
+              text: root.selectedLens === "day" ? "Today" : "This " + root.selectedLens
+              Accessible.name: "Return to " + text.toLowerCase()
+              onClicked: root.currentPeriod()
+            }
+            Action { text: "‹"; Accessible.name: "Previous period"; enabled: root.selectedLens !== "life"; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset - 1) }
+            Action { text: "›"; Accessible.name: "Next period"; enabled: root.selectedLens !== "life" && root.selectedOffset < 0; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset + 1) }
+            Action {
+              id: appearanceButton
+              objectName: "appearanceSettingsButton"
+              text: "Settings"
+              checked: root.appearanceOpen
+              Accessible.name: "Dashboard appearance settings"
+              onClicked: {
+                root.appearanceOpen = !root.appearanceOpen
+                if (root.appearanceOpen) Qt.callLater(function() { richGraphsToggle.forceActiveFocus() })
+              }
+            }
+            Action {
+              id: refreshAction
+              text: root.refreshBusyVisible ? "Refreshing…" : "Refresh"
+              implicitWidth: Math.max(Style.space(36), refreshTextMetrics.width + Style.space(22))
+              Layout.minimumWidth: implicitWidth
+              enabled: !root.refreshRunning
+              // Fast requests remain visually quiet while still blocking duplicate clicks.
+              opacity: root.refreshBusyVisible ? 0.6 : 1
+              Accessible.description: root.refreshRunning ? "Refreshing activity" : ""
+              onClicked: root.refresh()
+              TextMetrics { id: refreshTextMetrics; font: refreshAction.contentItem.font; text: "Refreshing…" }
+            }
           }
-          Action { text: "‹"; Accessible.name: "Previous period"; enabled: root.selectedLens !== "life"; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset - 1) }
-          Action { text: "›"; Accessible.name: "Next period"; enabled: root.selectedLens !== "life" && root.selectedOffset < 0; onClicked: root.setLensOffset(root.selectedLens, root.selectedOffset + 1) }
-          Action {
-            id: refreshAction
-            text: root.refreshBusyVisible ? "Refreshing…" : "Refresh"
-            implicitWidth: Math.max(Style.space(36), refreshTextMetrics.width + Style.space(22))
-            Layout.minimumWidth: implicitWidth
-            enabled: !root.refreshRunning
-            // Fast requests remain visually quiet while still blocking duplicate clicks.
-            opacity: root.refreshBusyVisible ? 0.6 : 1
-            Accessible.description: root.refreshRunning ? "Refreshing activity" : ""
-            onClicked: root.refresh()
-            TextMetrics { id: refreshTextMetrics; font: refreshAction.contentItem.font; text: "Refreshing…" }
+        }
+        Rectangle {
+          objectName: "appearanceSettings"
+          Layout.fillWidth: true
+          implicitHeight: appearanceBody.implicitHeight + Style.space(24)
+          visible: root.appearanceOpen
+          color: root.fill
+          radius: Style.space(16)
+          border.width: 1; border.color: root.line
+          ColumnLayout {
+            id: appearanceBody
+            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+            anchors.margins: Style.space(12)
+            spacing: Style.space(4)
+            RowLayout {
+              Layout.fillWidth: true
+              Label { text: "Appearance"; font.bold: true; Layout.fillWidth: true }
+              Action { text: "Done"; onClicked: { root.appearanceOpen = false; appearanceButton.forceActiveFocus() } }
+            }
+            Label { text: "Dashboard width"; font.bold: true }
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(4)
+              Repeater {
+                model: [{ label: "Narrow", size: 760 }, { label: "Normal", size: 1160 }, { label: "Wide (4K)", size: 2000 }]
+                Action {
+                  required property var modelData
+                  Layout.fillWidth: true
+                  text: modelData.label
+                  checked: modelData.size === 760 ? root.requestedWidth < 900
+                    : modelData.size === 1160 ? root.requestedWidth >= 900 && root.requestedWidth < 1500
+                    : root.requestedWidth >= 1500
+                  Accessible.name: modelData.label + " dashboard width"
+                  onClicked: root.setAppearance("panelWidth", modelData.size)
+                }
+              }
+            }
+            Label {
+              Layout.fillWidth: true
+              text: "Wide adds a dedicated chart column. Width always fits the available screen."
+              color: root.dim
+              font.pixelSize: Style.font.caption
+            }
+            SettingToggle {
+              id: richGraphsToggle
+              objectName: "richGraphsToggle"
+              label: "Rich graphs"; detail: "Soft gradients and curved trends"
+              value: root.richGraphs
+              onRequested: function(nextValue) { root.setAppearance("richGraphs", nextValue) }
+            }
+            SettingToggle {
+              label: "Reduce motion"; detail: "Show updates without animated transitions"
+              value: root.reducedMotion
+              onRequested: function(nextValue) { root.setAppearance("reduceMotion", nextValue) }
+            }
+            SettingToggle {
+              label: "Dynamic Island"; detail: "Use the black island presentation"
+              value: root.dynamicIslandStyle
+              onRequested: function(nextValue) { root.setAppearance("dynamicIslandStyle", nextValue) }
+            }
           }
         }
         Rectangle {
           Layout.fillWidth: true
+          id: periodSelector
           implicitHeight: Style.space(44)
-          radius: Style.space(6)
+          radius: Style.space(root.richGraphs ? 12 : 6)
           color: root.fill
           border.width: 1
           border.color: root.line
+          Rectangle {
+            visible: root.richGraphs
+            x: Style.space(4) + Math.max(0, ["day", "week", "month", "year", "life"].indexOf(root.selectedLens)) * (width + Style.space(4))
+            y: Style.space(4)
+            width: (parent.width - Style.space(24)) / 5
+            height: parent.height - Style.space(8)
+            radius: Style.space(9)
+            color: root.withAlpha(root.foreground, 0.10)
+            border.width: 1; border.color: root.withAlpha(root.foreground, 0.10)
+            Behavior on x { enabled: root.opened && root.motionDuration > 0; SmoothedAnimation { velocity: -1; duration: root.motionDuration; maximumEasingTime: 100 } }
+          }
           RowLayout {
             anchors.fill: parent
             anchors.margins: Style.space(4)
@@ -407,12 +528,12 @@ Ui.Panel {
                 }
                 background: Rectangle {
                   radius: Style.space(4)
-                  color: lensButton.checked ? root.withAlpha(root.accent, 0.16) : root.withAlpha(root.foreground, lensButton.hovered ? 0.12 : 0.04)
+                  color: root.richGraphs ? (lensButton.hovered ? root.fill : "transparent") : (lensButton.checked ? root.withAlpha(root.accent, 0.16) : root.withAlpha(root.foreground, lensButton.hovered ? 0.12 : 0.04))
                   Behavior on color { ColorAnimation { duration: root.motionDuration } }
-                  border.width: 1
+                  border.width: root.richGraphs ? (lensButton.activeFocus ? 1 : 0) : 1
                   border.color: lensButton.checked || lensButton.activeFocus ? root.accent : root.line
                   Rectangle {
-                    visible: lensButton.checked
+                    visible: lensButton.checked && !root.richGraphs
                     anchors.bottom: parent.bottom
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: parent.width * 0.45
@@ -441,23 +562,24 @@ Ui.Panel {
           Controls.ScrollBar.vertical: Controls.ScrollBar { }
           ColumnLayout {
             id: body
-            NumberAnimation { id: dataReveal; target: body; property: "opacity"; from: 0.88; to: 1; duration: root.motionDuration; easing.type: Easing.OutCubic }
+            NumberAnimation { id: dataReveal; target: body; property: "opacity"; from: root.richGraphs ? 0.96 : 0.88; to: 1; duration: root.motionDuration; easing.type: Easing.OutCubic }
             width: scroll.width - Style.space(12)
             spacing: Style.space(10)
             RowLayout {
               Layout.fillWidth: true
               Action { text: "All activity"; visible: root.selected; onClicked: root.selectActivity("", "") }
-              Label { Layout.fillWidth: true; text: root.activityLabel; font.pixelSize: Style.font.title; font.bold: true }
+              Label { Layout.fillWidth: true; text: root.activityLabel; font.pixelSize: Style.font.subtitle; font.bold: true }
               Label { text: root.detailBusyVisible ? "Updating activity…" : ""; color: root.dim }
             }
             GridLayout {
               Layout.fillWidth: true
               columns: root.wide ? (root.selected ? 4 : 3) : 2
-              rowSpacing: Style.space(8)
+              rowSpacing: Style.space(16)
               columnSpacing: Style.space(24)
-              Metric { label: "Time spent"; value: root.selected ? root.activityMetrics.time : Model.fmt(root.shownSeconds) }
+              Layout.bottomMargin: Style.space(8)
+              Metric { primary: true; Layout.columnSpan: root.wide ? 1 : 2; label: "Time spent"; value: root.selected ? root.activityMetrics.time : Model.fmt(root.shownSeconds) }
               Metric { label: root.selected ? "Days used" : "Apps used"; value: root.selected ? root.activityMetrics.days : String((root.activityAnalytics.activities || []).filter(function(a) { return a.kind === "app" }).length) }
-              Metric { visible: !root.selected; label: "Hours multitasked"; value: root.panelDataLoaded ? (root.totalMultitasked / 3600).toFixed(1) + " h" : "—" }
+              Metric { visible: !root.selected; label: "Multitasked"; value: root.panelDataLoaded ? Model.fmt(root.totalMultitasked) : "—"; detail: root.totalFocused > 0 ? Math.round(root.totalMultitasked / root.totalFocused * 100) + "% of focused time" : "Included in time spent" }
               Metric { visible: root.selected; label: "Visits"; value: root.activityMetrics.visits }
               Metric { visible: root.selected; label: "Typical visit"; value: root.activityMetrics.typical }
             }
@@ -470,16 +592,17 @@ Ui.Panel {
             }
             GridLayout {
               Layout.fillWidth: true
-              columns: root.wide ? 2 : 1
+              columns: root.expansive ? (root.hasInsightContent ? 3 : 2) : root.wide ? 2 : 1
               columnSpacing: Style.space(12)
               rowSpacing: Style.space(12)
               ColumnLayout {
                 id: insightsSection
+                visible: root.hasInsightContent
                 Layout.row: root.wide ? 0 : 2
-                Layout.column: root.wide ? 1 : 0
-                Layout.rowSpan: root.wide ? 3 : 1
+                Layout.column: root.expansive ? 2 : root.wide ? 1 : 0
+                Layout.rowSpan: root.expansive ? 2 : root.wide ? 3 : 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * 0.4 : body.width
+                Layout.preferredWidth: root.expansive ? body.width * 0.26 : root.wide ? body.width * 0.4 : body.width
                 Layout.alignment: Qt.AlignTop
                 spacing: Style.space(14)
                 Label { Layout.fillWidth: true; text: "Patterns & insights"; font.pixelSize: Style.font.subtitle; font.bold: true }
@@ -496,7 +619,7 @@ Ui.Panel {
                   columns: 1
                   columnSpacing: Style.space(24)
                   rowSpacing: Style.space(20)
-                  readonly property int fittedCount: root.wide ? 4 : 2
+                  readonly property int fittedCount: root.expansive ? 6 : root.wide ? 4 : 2
                   Repeater {
                     id: insightItems
                     model: root.insights
@@ -623,7 +746,7 @@ Ui.Panel {
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
+                Layout.preferredWidth: root.expansive ? body.width * 0.28 : root.wide ? body.width * (root.hasInsightContent ? 0.6 : 0.38) : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
@@ -678,11 +801,11 @@ Ui.Panel {
               }
               Section {
                 title: "Your rhythm"
-                Layout.row: 1
-                Layout.column: 0
-                Layout.rowSpan: 1
+                Layout.row: root.expansive || (root.wide && !root.hasInsightContent) ? 0 : 1
+                Layout.column: root.expansive || (root.wide && !root.hasInsightContent) ? 1 : 0
+                Layout.rowSpan: root.expansive || (root.wide && !root.hasInsightContent) ? 2 : 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
+                Layout.preferredWidth: root.expansive ? body.width * (root.hasInsightContent ? 0.46 : 0.72) : root.wide ? body.width * (root.hasInsightContent ? 0.6 : 0.62) : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
                   Layout.fillWidth: true
@@ -762,7 +885,7 @@ Ui.Panel {
                   weekdayMaxSeconds: root.maximum(root.calendarWeekdays)
                   onActivatedCell: function(cell) { root.openCell(cell) }
                 }
-                Label { Layout.fillWidth: true; visible: root.chartReadout.length > 0; text: root.chartReadout; color: root.dim; font.pixelSize: Style.font.caption }
+                Label { Layout.fillWidth: true; Layout.minimumHeight: Style.space(32); visible: root.selectedLens === "day" || root.chartReadout.length > 0; text: root.chartReadout || "Point to an hour to inspect focused and multitasked time."; color: root.dim; font.pixelSize: Style.font.caption }
                 ColumnLayout {
                   Layout.fillWidth: true
                   visible: root.selectedLens !== "day"
@@ -775,11 +898,11 @@ Ui.Panel {
               }
               Section {
                 title: "Explore activity"
-                Layout.row: root.wide ? 2 : 3
+                Layout.row: root.expansive ? 1 : root.wide ? (root.hasInsightContent ? 2 : 1) : 3
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? body.width * 0.6 : body.width
+                Layout.preferredWidth: root.expansive ? body.width * 0.28 : root.wide ? body.width * (root.hasInsightContent ? 0.6 : 0.38) : body.width
                 Layout.alignment: Qt.AlignTop
                 RowLayout {
                   Layout.fillWidth: true
@@ -876,16 +999,23 @@ Ui.Panel {
     id: section
     property string title: ""
     default property alias contents: sectionBody.data
-    implicitHeight: sectionBody.implicitHeight + Style.space(20)
+    readonly property int inset: Style.space(root.richGraphs ? 16 : 10)
+    implicitHeight: sectionBody.implicitHeight + inset * 2
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, root.dynamicIslandStyle ? 0.045 : 0.025)
-    border.width: 1
+    border.width: root.richGraphs ? 0 : 1
     border.color: root.line
-    radius: Style.space(root.dynamicIslandStyle ? 12 : 6)
+    radius: Style.space(root.richGraphs ? 18 : (root.dynamicIslandStyle ? 12 : 6))
+    gradient: root.richGraphs ? sectionGradient : null
+    Gradient {
+      id: sectionGradient
+      GradientStop { position: 0; color: root.withAlpha(root.foreground, 0.065) }
+      GradientStop { position: 1; color: root.withAlpha(root.foreground, 0.025) }
+    }
     ColumnLayout {
       id: sectionBody
-      x: Style.space(10)
-      y: Style.space(10)
-      width: parent.width - Style.space(20)
+      x: section.inset
+      y: section.inset
+      width: parent.width - section.inset * 2
       spacing: Style.space(8)
       Label { Layout.fillWidth: true; text: section.title; font.pixelSize: Style.font.subtitle; font.bold: true }
     }
@@ -911,20 +1041,64 @@ Ui.Panel {
     contentItem: Label { text: action.text; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: action.checked }
     background: Rectangle { radius: Style.space(4); color: action.checked || action.hovered ? root.fill : "transparent"; Behavior on color { ColorAnimation { duration: root.motionDuration } } border.width: action.checked || action.activeFocus ? 1 : 0; border.color: action.activeFocus ? root.accent : root.line }
   }
+  component SettingToggle: Controls.AbstractButton {
+    id: preference
+    property string label: ""
+    property string detail: ""
+    property bool value: false
+    signal requested(bool nextValue)
+    Layout.fillWidth: true
+    implicitHeight: Math.max(Style.space(50), preferenceContent.implicitHeight + Style.space(12))
+    activeFocusOnTab: true
+    Accessible.role: Accessible.CheckBox
+    Accessible.name: label
+    Accessible.description: detail
+    Accessible.checked: value
+    onClicked: requested(!value)
+    background: Rectangle {
+      radius: Style.space(10)
+      color: preference.hovered ? root.fill : "transparent"
+      border.width: preference.activeFocus ? 1 : 0; border.color: root.accent
+    }
+    contentItem: RowLayout {
+      id: preferenceContent
+      spacing: Style.space(12)
+      ColumnLayout {
+        Layout.fillWidth: true; spacing: Style.space(2)
+        Label { Layout.fillWidth: true; text: preference.label; font.bold: true }
+        Label { Layout.fillWidth: true; text: preference.detail; color: root.dim; font.pixelSize: Style.font.caption }
+      }
+      Rectangle {
+        Layout.preferredWidth: Style.space(42); Layout.preferredHeight: Style.space(24)
+        radius: height / 2
+        color: preference.value ? root.accent : root.withAlpha(root.foreground, 0.18)
+        Behavior on color { ColorAnimation { duration: root.motionDuration } }
+        Rectangle {
+          x: preference.value ? parent.width - width - Style.space(2) : Style.space(2)
+          y: Style.space(2); width: Style.space(20); height: width; radius: width / 2
+          color: "#ffffff"
+          Behavior on x { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutQuint } }
+        }
+      }
+    }
+  }
   component Metric: ColumnLayout {
     property string label: ""
     property string value: ""
     property string detail: ""
+    property bool primary: false
     Layout.fillWidth: true
-    Layout.preferredWidth: 1
+    Layout.preferredWidth: primary ? 1.6 : 1
+    Layout.alignment: Qt.AlignTop
     spacing: Style.space(4)
     Label { Layout.fillWidth: true; text: parent.label; color: root.dim; font.pixelSize: Style.font.caption }
-    Label { Layout.fillWidth: true; text: parent.value; font.pixelSize: Style.font.title * 1.15; font.bold: true }
+    Label { Layout.fillWidth: true; text: parent.value; font.pixelSize: Style.font.title * (parent.primary ? (root.richGraphs ? 1.85 : 1.5) : 1.05); font.bold: parent.primary; color: parent.primary ? root.foreground : root.dim }
     Label { visible: parent.detail.length > 0; Layout.fillWidth: true; text: parent.detail; color: root.dim; font.pixelSize: Style.font.caption }
   }
   component BarChart: RowLayout {
     id: chart
-    onCellsChanged: inspected = -1
+    onCellsChanged: inspected = Math.min(inspected, cells.length - 1)
+    Connections { target: root; function onViewKeyChanged() { chart.inspected = -1 } }
     property var cells: []
     property bool hourly: false
     property int inspected: -1
@@ -948,6 +1122,7 @@ Ui.Panel {
       }
     }
     Repeater {
+      id: hourButtons
       model: chart.cells
       Controls.AbstractButton {
         id: barButton
@@ -957,19 +1132,40 @@ Ui.Panel {
         Layout.fillHeight: true
         Layout.preferredWidth: 1
         activeFocusOnTab: true
-        onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
+        onActiveFocusChanged: if (activeFocus) { chart.inspected = index; root.chartReadout = Accessible.name; Qt.callLater(function() { root.revealControl(this) }.bind(this)) }
+        onHoveredChanged: if (hovered) { chart.inspected = index; root.chartReadout = Accessible.name }
         readonly property real seconds: Number(modelData.seconds || modelData.focused_seconds || 0)
         readonly property string name: chart.hourly ? String(index).padStart(2, "0") + ":00" : String(modelData.label || modelData.date || "")
-        Accessible.name: name + ", " + Model.fmt(seconds) + (Number(modelData.multitasked_seconds || 0) > 0 ? ", multitasked " + Model.fmt(modelData.multitasked_seconds) : "")
+        Accessible.name: name + ", " + Model.fmtPrecise(seconds) + " focused" + (Number(modelData.multitasked_seconds || 0) > 0 ? ", " + Model.fmtPrecise(modelData.multitasked_seconds) + " multitasked" : "")
+        Keys.onLeftPressed: if (index > 0) hourButtons.itemAt(index - 1).forceActiveFocus()
+        Keys.onRightPressed: if (index + 1 < chart.cells.length) hourButtons.itemAt(index + 1).forceActiveFocus()
         onClicked: { chart.inspected = index; root.chartReadout = Accessible.name }
-        background: Rectangle { color: "transparent"; border.width: barButton.activeFocus ? 1 : 0; border.color: root.accent }
+        background: Rectangle { radius: Style.space(4); color: chart.inspected === barButton.index ? root.fill : "transparent"; border.width: barButton.activeFocus ? 1 : 0; border.color: root.accent }
         contentItem: Item {
-          Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top; anchors.bottomMargin: Style.space(6); height: Math.max(barButton.seconds > 0 ? Style.space(2) : 0, (parent.height - Style.space(28)) * barButton.seconds / chart.maxSeconds); radius: Style.space(2); color: root.accent; opacity: barButton.hovered || barButton.activeFocus || chart.inspected === barButton.index || barButton.seconds === chart.maxSeconds ? 1 : 0.65 }
+          Rectangle {
+            id: hourBar
+            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top
+            anchors.bottomMargin: Style.space(6)
+            height: Math.max(barButton.seconds > 0 ? Style.space(2) : 0, (parent.height - Style.space(28)) * barButton.seconds / Math.max(1, chart.maxSeconds))
+            radius: Style.space(root.richGraphs ? 4 : 2)
+            color: root.accent
+            gradient: root.richGraphs ? hourGradient : null
+            Gradient {
+              id: hourGradient
+              GradientStop { position: 0; color: Qt.lighter(root.accent, 1.18) }
+              GradientStop { position: 1; color: root.withAlpha(root.accent, 0.65) }
+            }
+            opacity: barButton.hovered || barButton.activeFocus || chart.inspected === barButton.index || barButton.seconds === chart.maxSeconds ? 1 : 0.72
+            Behavior on opacity { NumberAnimation { duration: root.motionDuration } }
+            transform: Scale { origin.y: hourBar.height; yScale: root.richGraphs ? 0.92 + 0.08 * root.graphProgress : 1 }
+          }
           Rectangle {
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top
             anchors.bottomMargin: Style.space(6)
-            height: Math.max(0, (parent.height - Style.space(28)) * Number(barButton.modelData.multitasked_seconds || 0) / chart.maxSeconds)
-            color: root.foreground; opacity: 0.8; radius: Style.space(2)
+            height: Math.max(0, (parent.height - Style.space(28)) * Number(barButton.modelData.multitasked_seconds || 0) / Math.max(1, chart.maxSeconds))
+            id: mediaBar
+            color: root.foreground; opacity: 0.8; radius: Style.space(root.richGraphs ? 4 : 2)
+            transform: Scale { origin.y: mediaBar.height; yScale: root.richGraphs ? 0.92 + 0.08 * root.graphProgress : 1 }
           }
           Label { id: barLabel; anchors.bottom: parent.bottom; width: chart.hourly ? Style.space(44) : parent.width; x: chart.hourly && barButton.index === 0 ? 0 : (parent.width - width) / 2; text: chart.hourly ? (barButton.index % 6 === 0 ? Model.clockLabel(barButton.index) : "") : (chart.cells.length <= 12 || barButton.index % Math.ceil(chart.cells.length / 6) === 0 ? barButton.name : ""); font.pixelSize: Style.font.caption; color: root.dim; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; wrapMode: Text.NoWrap }
         }
@@ -1027,9 +1223,9 @@ Ui.Panel {
             implicitHeight: Style.space(22)
             activeFocusOnTab: true
             onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(this) }.bind(this))
-            Accessible.name: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][weekday] + " " + index + ":00 · " + Model.fmt(seconds)
+            Accessible.name: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][weekday] + " " + index + ":00 · " + Model.fmtPrecise(seconds)
             onClicked: root.chartReadout = Accessible.name
-            background: Rectangle { radius: Style.space(2); color: cell.seconds > 0 ? root.accent : root.fill; opacity: cell.seconds > 0 ? 0.2 + 0.8 * cell.seconds / root.maximum(root.heatCells) : 1; border.width: cell.activeFocus ? 2 : 0; border.color: root.foreground }
+            background: Rectangle { radius: Style.space(2); color: cell.seconds > 0 ? root.accent : root.fill; opacity: cell.seconds > 0 ? 0.2 + 0.8 * cell.seconds / root.maximum(root.heatCells) : 1; border.width: cell.activeFocus || cell.hovered ? 2 : 0; border.color: root.foreground }
             Controls.ToolTip.visible: hovered || activeFocus
             Controls.ToolTip.text: Accessible.name
           }
@@ -1054,7 +1250,7 @@ Ui.Panel {
     readonly property string centerLabel: hasActiveApp ? root.formatDuration(Number((apps[activeIndex] || {}).seconds || 0)) + " · " + Math.round(Number((apps[activeIndex] || {}).seconds || 0) / Math.max(1, totalSeconds) * 100) + "%" : root.formatDuration(totalSeconds)
     readonly property string centerDetail: hasActiveApp ? String((apps[activeIndex] || {}).app || "App") : "Time spent"
     Controls.ToolTip.visible: hoveredIndex >= 0
-    Controls.ToolTip.text: centerDetail + " · " + centerLabel
+    Controls.ToolTip.text: centerDetail + " · " + Model.fmtPrecise(hasActiveApp ? apps[activeIndex].seconds : totalSeconds)
     readonly property int chartSize: Math.min(Style.space(150), width - Style.space(8))
 
     Layout.minimumHeight: Style.space(158)
@@ -1088,12 +1284,19 @@ Ui.Panel {
             target: root
             function onAccentChanged() { donutCanvas.requestPaint() }
             function onForegroundChanged() { donutCanvas.requestPaint() }
+          function onRichGraphsChanged() { donutCanvas.requestPaint() }
           }
 
           anchors.centerIn: parent
           width: donutRoot.chartSize
           height: donutRoot.chartSize
           antialiasing: true
+        opacity: root.richGraphs ? 0.72 + 0.28 * root.graphProgress : 1
+        transform: Scale {
+          origin.x: donutCanvas.width / 2; origin.y: donutCanvas.height
+          xScale: 1
+          yScale: root.richGraphs ? 0.96 + 0.04 * root.graphProgress : 1
+        }
 
           onPaint: {
             var ctx = getContext("2d")
@@ -1119,7 +1322,12 @@ Ui.Panel {
               var color = root.colorFromHex(String(donutRoot.colors[i] || Color.accent), active || donutRoot.activeIndex < 0 ? 0.94 : 0.46)
               ctx.beginPath()
               ctx.arc(cx, cy, radius, start, end, false)
-              ctx.strokeStyle = root.canvasColor(color, color.a)
+              if (root.richGraphs) {
+                var sheen = ctx.createLinearGradient(0, 0, width, height)
+                sheen.addColorStop(0, root.canvasColor(Qt.lighter(color, 1.15), color.a))
+                sheen.addColorStop(1, root.canvasColor(color, color.a * 0.78))
+                ctx.strokeStyle = sheen
+              } else ctx.strokeStyle = root.canvasColor(color, color.a)
               ctx.lineWidth = active ? lineWidth + Style.space(3) : lineWidth
               ctx.stroke()
             }
@@ -1214,7 +1422,7 @@ Ui.Panel {
 
     function hourlyDetailText(cell) {
       if (!cell) return ""
-      return String(cell.fullLabel || cell.label || "Hour") + ": " + root.formatDuration(Number(cell.seconds || 0)) + " spent"
+      return String(cell.fullLabel || cell.label || "Hour") + ": " + Model.fmtPrecise(Number(cell.seconds || 0)) + " focused" + (Number(cell.multitasked_seconds || 0) > 0 ? " · " + Model.fmtPrecise(cell.multitasked_seconds) + " multitasked" : "")
     }
 
     function segmentIndexAt(px, py) {
@@ -1300,6 +1508,7 @@ Ui.Panel {
           target: root
           function onAccentChanged() { ringCanvas.requestPaint() }
           function onForegroundChanged() { ringCanvas.requestPaint() }
+          function onRichGraphsChanged() { ringCanvas.requestPaint() }
         }
 
         width: ringRoot.chartSize
@@ -1307,6 +1516,12 @@ Ui.Panel {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.verticalCenter: parent.verticalCenter
         antialiasing: true
+        opacity: root.richGraphs ? 0.72 + 0.28 * root.graphProgress : 1
+        transform: Scale {
+          origin.x: ringCanvas.width / 2; origin.y: ringCanvas.height
+          xScale: 1
+          yScale: root.richGraphs ? 0.96 + 0.04 * root.graphProgress : 1
+        }
 
         onPaint: {
           var ctx = getContext("2d")
@@ -1337,7 +1552,7 @@ Ui.Panel {
             var endAngle = (-90 + (h + 1) * 15 - 1.7) * Math.PI / 180
             ctx.beginPath()
             ctx.arc(cx, cy, radius, startAngle, endAngle, false)
-            ctx.strokeStyle = root.canvasColor(root.sliceColor(0, 1.0), active ? 1.0 : 0.36 + intensity * 0.54)
+            ctx.strokeStyle = root.canvasColor(root.accent, active ? 1.0 : 0.36 + intensity * 0.54)
             ctx.lineWidth = active ? activeWidth + Style.space(3) : activeWidth
             ctx.stroke()
           }
@@ -1417,6 +1632,19 @@ Ui.Panel {
     }
 
     readonly property real plotInset: Style.space(6)
+    readonly property var focusCurve: Model.smoothChartSegments(days, "seconds")
+    readonly property var mediaCurve: Model.smoothChartSegments(days, "multitasked_seconds", focusCurve)
+    function traceCurve(ctx, field, connect) {
+      if (!days.length) return
+      var firstY = pointY(Number(days[0][field] || 0))
+      if (connect) ctx.lineTo(pointX(0), firstY); else ctx.moveTo(pointX(0), firstY)
+      var curve = field === "seconds" ? focusCurve : mediaCurve
+      for (var i = 0; i < days.length - 1; i++) {
+        var x = pointX(i), nextX = pointX(i + 1), dx = (nextX - x) / 3
+        if (root.richGraphs) ctx.bezierCurveTo(x + dx, pointY(curve[i].c1), nextX - dx, pointY(curve[i].c2), nextX, pointY(curve[i].to))
+        else ctx.lineTo(nextX, pointY(Number(days[i + 1][field] || 0)))
+      }
+    }
     function pointX(index) {
       var count = Math.max(1, days.length)
       if (count === 1) return linePlot.width / 2
@@ -1439,7 +1667,7 @@ Ui.Panel {
       if (lineCanvas) lineCanvas.requestPaint()
     }
 
-    implicitHeight: expanded ? Style.space(178) : Style.space(178)
+    implicitHeight: Style.space(216)
     radius: 0
     color: root.noFill
 
@@ -1454,10 +1682,9 @@ Ui.Panel {
     Keys.onSpacePressed: if (selectedIndex >= 0 && selectedIndex < days.length) activatedCell(days[selectedIndex])
     border.width: activeFocus ? 1 : 0
     border.color: root.accent
-    onDaysChanged: { selectedIndex = -1; hoveredIndex = -1; hoveredText = ""; requestPaint() }
+    onDaysChanged: { selectedIndex = Math.min(selectedIndex, days.length - 1); hoveredIndex = Math.min(hoveredIndex, days.length - 1); requestPaint() }
+    Connections { target: root; function onViewKeyChanged() { lineRoot.selectedIndex = -1; lineRoot.hoveredIndex = -1 } }
     onMaxSecondsChanged: requestPaint()
-    onHoveredIndexChanged: requestPaint()
-    onSelectedIndexChanged: requestPaint()
     onAverageSecondsChanged: requestPaint()
     onWidthChanged: requestPaint()
     onHeightChanged: requestPaint()
@@ -1566,10 +1793,17 @@ Ui.Panel {
           target: root
           function onAccentChanged() { lineCanvas.requestPaint() }
           function onForegroundChanged() { lineCanvas.requestPaint() }
+          function onRichGraphsChanged() { lineCanvas.requestPaint() }
         }
 
         anchors.fill: parent
         antialiasing: true
+        opacity: root.richGraphs ? 0.72 + 0.28 * root.graphProgress : 1
+        transform: Scale {
+          origin.x: lineCanvas.width / 2; origin.y: lineCanvas.height
+          xScale: 1
+          yScale: root.richGraphs ? 0.96 + 0.04 * root.graphProgress : 1
+        }
 
         onPaint: {
           var ctx = getContext("2d")
@@ -1577,42 +1811,31 @@ Ui.Panel {
           var list = lineRoot.days || []
           if (list.length <= 0 || lineRoot.maxSeconds <= 0 || width <= 0 || height <= 0) return
 
-          var accent = root.sliceColor(0, 1.0)
-          var mutedAccent = root.sliceColor(0, 0.26)
+          var accent = root.accent
+          var mutedAccent = root.withAlpha(root.accent, 0.26)
           var area = ctx.createLinearGradient(0, 0, 0, height)
-          area.addColorStop(0, root.canvasColor(accent, 0.28))
+          area.addColorStop(0, root.canvasColor(accent, root.richGraphs ? 0.40 : 0.28))
           area.addColorStop(1, root.canvasColor(accent, 0.03))
 
           ctx.beginPath()
           ctx.moveTo(lineRoot.pointX(0), height)
-          for (var i = 0; i < list.length; i++) {
-            ctx.lineTo(lineRoot.pointX(i), lineRoot.pointY(Number(list[i].seconds || 0)))
-          }
+          lineRoot.traceCurve(ctx, "seconds", true)
           ctx.lineTo(lineRoot.pointX(list.length - 1), height)
           ctx.closePath()
           ctx.fillStyle = area
           ctx.fill()
 
           ctx.beginPath()
-          for (var j = 0; j < list.length; j++) {
-            var x = lineRoot.pointX(j)
-            var y = lineRoot.pointY(Number(list[j].seconds || 0))
-            if (j === 0) ctx.moveTo(x, y)
-            else ctx.lineTo(x, y)
-          }
+          lineRoot.traceCurve(ctx, "seconds", false)
           ctx.strokeStyle = root.canvasColor(accent, 0.92)
-          ctx.lineWidth = Style.space(3)
+          ctx.lineWidth = Style.space(root.richGraphs ? 2.5 : 3)
           ctx.lineJoin = "round"
           ctx.lineCap = "round"
           ctx.stroke()
 
           if (list.some(function(d) { return Number(d.multitasked_seconds || 0) > 0 })) {
             ctx.beginPath()
-            for (var m = 0; m < list.length; m++) {
-              var mx = lineRoot.pointX(m)
-              var my = lineRoot.pointY(Number(list[m].multitasked_seconds || 0))
-              if (m === 0) ctx.moveTo(mx, my); else ctx.lineTo(mx, my)
-            }
+            lineRoot.traceCurve(ctx, "multitasked_seconds", false)
             ctx.strokeStyle = root.canvasColor(root.foreground, 0.85)
             ctx.lineWidth = Style.space(2)
             ctx.stroke()
@@ -1622,18 +1845,17 @@ Ui.Panel {
           var dotStride = count <= 14 ? 1 : (count <= 31 ? 3 : Math.ceil(count / 12))
           for (var k = 0; k < count; k++) {
             var seconds = Number(list[k].seconds || 0)
-            var active = k === lineRoot.inspectedIndex
             var partial = lineRoot.isCurrentDay(list[k])
-            if (!active && !partial && seconds <= 0 && k % dotStride !== 0) continue
-            if (!active && !partial && k % dotStride !== 0 && k !== 0 && k !== count - 1) continue
+            if (!partial && seconds <= 0 && k % dotStride !== 0) continue
+            if (!partial && k % dotStride !== 0 && k !== 0 && k !== count - 1) continue
             var px = lineRoot.pointX(k)
             var py = lineRoot.pointY(seconds)
             ctx.beginPath()
-            ctx.arc(px, py, active ? Style.space(5) : Style.space(3), 0, Math.PI * 2, false)
-            ctx.fillStyle = active ? root.canvasColor(root.foreground, 0.96) : root.canvasColor(accent, count === 1 ? 0.92 : mutedAccent.a)
+            ctx.arc(px, py, Style.space(3), 0, Math.PI * 2, false)
+            ctx.fillStyle = root.canvasColor(accent, count === 1 ? 0.92 : mutedAccent.a)
             if (!partial) ctx.fill()
-            ctx.lineWidth = active || partial ? Style.space(2) : 0
-            if (active || partial) {
+            ctx.lineWidth = partial ? Style.space(2) : 0
+            if (partial) {
               ctx.strokeStyle = root.canvasColor(accent, 0.95)
               ctx.stroke()
             }
@@ -1654,6 +1876,21 @@ Ui.Panel {
       }
 
       Rectangle {
+        visible: !!lineRoot.inspectedDay
+        x: lineRoot.pointX(lineRoot.inspectedIndex) - width / 2
+        y: lineRoot.pointY(lineRoot.inspectedDay ? lineRoot.inspectedDay.seconds : 0) - height / 2
+        width: Style.space(9); height: width; radius: width / 2
+        color: root.foreground; border.width: Style.space(2); border.color: root.accent
+      }
+      Rectangle {
+        visible: !!lineRoot.inspectedDay && Number(lineRoot.inspectedDay.multitasked_seconds || 0) > 0
+        x: lineRoot.pointX(lineRoot.inspectedIndex) - width / 2
+        y: lineRoot.pointY(lineRoot.inspectedDay ? lineRoot.inspectedDay.multitasked_seconds : 0) - height / 2
+        width: Style.space(7); height: width; radius: width / 2
+        color: root.foreground
+      }
+
+      Rectangle {
         width: Math.min(parent.width, hoverReadout.implicitWidth + Style.space(16))
         height: hoverReadout.implicitHeight + Style.space(10)
         x: Math.max(0, Math.min(parent.width - width, lineRoot.pointX(lineRoot.inspectedIndex) - width / 2))
@@ -1661,13 +1898,13 @@ Ui.Panel {
         opacity: lineRoot.inspectedDay ? 1 : 0
         visible: opacity > 0
         Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
-        radius: Style.space(4)
+        radius: Style.space(root.richGraphs ? 10 : 4)
         color: root.foreground
         Label {
           id: hoverReadout
           anchors.centerIn: parent
           width: parent.width - Style.space(16)
-          text: lineRoot.inspectedDay ? Model.chartDateLabel(lineRoot.inspectedDay) + " · " + Model.fmt(lineRoot.inspectedDay.seconds) + (lineRoot.isCurrentDay(lineRoot.inspectedDay) ? " so far" : "") : ""
+          text: lineRoot.inspectedDay ? Model.chartDateLabel(lineRoot.inspectedDay) + " · " + Model.fmtPrecise(lineRoot.inspectedDay.seconds) + (lineRoot.isCurrentDay(lineRoot.inspectedDay) ? " so far" : "") : ""
           color: Color.background
           font.pixelSize: Style.font.caption
           wrapMode: Text.NoWrap
@@ -1722,6 +1959,7 @@ Ui.Panel {
 
     ChartReadout {
       id: lineReadout
+      reservedLines: 2
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: parent.bottom
@@ -1896,7 +2134,7 @@ Ui.Panel {
               required property var modelData
               readonly property real cellSeconds: Number(modelData.seconds || 0)
               readonly property real cellIntensity: Model.heatIntensity(cellSeconds, monthRhythmRoot.maxSeconds)
-              readonly property color heatBase: root.sliceColor(0, 1.0)
+              readonly property color heatBase: root.accent
 
               readonly property bool canOpen: Model.cellDestination(modelData, Model.dateKey(new Date())) !== null
               activeFocusOnTab: canOpen
@@ -2024,7 +2262,7 @@ Ui.Panel {
                   width: parent.width * root.clamp01(Number(modelData.seconds || 0) / monthRhythmRoot.weekMaxSeconds) * monthRhythmRoot.revealProgress
                   height: parent.height
                   radius: parent.radius
-                  color: root.sliceColor(0, 0.9)
+                  color: root.withAlpha(root.accent, 0.9)
                 }
               }
             }
@@ -2082,7 +2320,7 @@ Ui.Panel {
                   width: parent.width
                   height: Math.max(Style.space(3), parent.height * root.clamp01(Number(modelData.seconds || 0) / monthRhythmRoot.weekdayMaxSeconds) * monthRhythmRoot.revealProgress)
                   radius: parent.radius
-                  color: root.sliceColor(1, 0.82)
+                  color: root.withAlpha(root.accent, 0.82)
                 }
               }
 
@@ -2124,11 +2362,12 @@ Ui.Panel {
 
   component ChartReadout: Rectangle {
     id: readoutRoot
+    property int reservedLines: 0
 
     property string text: ""
 
     visible: text.length > 0
-    implicitHeight: visible ? readoutLabel.implicitHeight + Style.space(8) : 0
+    implicitHeight: visible ? Math.max(readoutLabel.implicitHeight, reservedLines * Style.font.caption * 1.4) + Style.space(8) : 0
     height: implicitHeight
     radius: Style.space(5)
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)

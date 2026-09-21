@@ -29,7 +29,9 @@
       "refreshIntervalSec": 60,
       "iconOnly": false,
       "dynamicIslandStyle": false,
-      "panelWidth": 1160
+      "panelWidth": 1160,
+      "richGraphs": true,
+      "reduceMotion": false
     },
     "schema": [
       {
@@ -54,11 +56,23 @@
         "defaultValue": false
       },
       {
+        "key": "richGraphs",
+        "type": "boolean",
+        "label": "Rich graphs",
+        "defaultValue": true
+      },
+      {
+        "key": "reduceMotion",
+        "type": "boolean",
+        "label": "Reduce motion",
+        "defaultValue": false
+      },
+      {
         "key": "panelWidth",
         "type": "integer",
         "label": "Dashboard width",
         "min": 380,
-        "max": 1600,
+        "max": 2000,
         "step": 20,
         "defaultValue": 1160
       }

@@ -327,8 +327,7 @@ pub fn widget_summary_for_period(
 
     Ok(WidgetSummaryReport {
         total_multitasked_seconds: storage
-            .multitasking_between(period.start_ts, period.query_end_ts, config)?
-            .total_seconds,
+            .multitasked_seconds_between(period.start_ts, period.query_end_ts)?,
         schema_version: 1,
         generated_at: clock::unix_now(),
         query_start_ts: period.start_ts,
@@ -468,6 +467,7 @@ fn usage_report_with_rollups_for_period_with_days(
             period.query_end_ts,
             &context.metadata,
             config,
+            lens == Lens::Day,
         )?,
         activity_analytics,
         generated_at,

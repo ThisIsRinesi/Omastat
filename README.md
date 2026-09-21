@@ -73,6 +73,28 @@ omastat today
 omastat export-data --lens month --offset -1 --format csv --output ~/omastat-august
 ```
 
+## Dashboard appearance
+
+Open **Settings** in the dashboard to change its appearance. Choose **Narrow**,
+**Normal**, or **Wide (4K)** to save your preferred width. Wide places activity,
+rhythm charts, and insights in three columns; smaller screens automatically
+fall back to a layout that fits. **Rich graphs**
+adds curved trends, soft chart surfaces, gradient bars, and smoother entry and
+selection transitions. It is enabled by default; turn it off for the classic
+presentation. **Reduce motion** removes animated transitions and immediately
+settles any in-progress chart reveal. These preferences persist with the widget's
+other settings.
+
+Time spent leads the summary; multitasked time is shown as a secondary duration
+and share of focused time. Without insights, the layout places activity browsing
+beside the rhythm charts. Hover or use arrow keys to inspect chart values;
+trend selection survives refreshes and resets when changing periods.
+
+Curves pass through the recorded values without overshooting them. The
+multitasking overlay stays below focused time, and keyboard/hover readouts show
+exact durations. Chart entry uses opacity and scale transforms, without
+repainting canvas charts every animation frame.
+
 ## Optional Dynamic Island appearance
 
 Enable **Dynamic Island appearance** in the Omastat widget settings. The black
