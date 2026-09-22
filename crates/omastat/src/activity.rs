@@ -409,6 +409,10 @@ pub(crate) fn analyze_context(
             })
             .collect();
     }
+    output.insights.splice(
+        0..0,
+        crate::context_insights::history(context, config, baseline_end, selector)?,
+    );
     for insight in &mut output.insights {
         crate::routines::humanize(insight);
     }

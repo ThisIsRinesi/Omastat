@@ -452,3 +452,12 @@ for (const [year, month, day] of [[2026, 2, 8], [2026, 10, 1]]) {
   assert.equal(result.end - result.start, end - start);
 }
 console.log('Day map gaps, stretches, grouping, audio union, clipping, and local-day boundaries passed');
+
+// Context insights retain their methods and exact comparison dates in the inspector.
+const stretchTrend = { kind: 'stretch-trend', supporting: { method: 'Only completed, observed days.', comparison: { current_dates: ['2026-09-20'], baseline_dates: ['2026-09-13'] } } };
+assert.equal(context.insightQualifier(stretchTrend), 'Recent change · Completed days');
+assert.match(context.insightEvidence(stretchTrend), /Only completed, observed days/);
+assert.match(context.insightEvidence(stretchTrend), /Recent days: Sep 20, 2026/);
+assert.match(context.insightEvidence(stretchTrend), /Earlier days: Sep 13, 2026/);
+assert.equal(context.insightQualifier({kind: 'audio-companion'}), 'This period · Audio overlap');
+assert.equal(context.insightQualifier({kind: 'app-handoff'}), 'Recurring sequence · Last 28 completed days');

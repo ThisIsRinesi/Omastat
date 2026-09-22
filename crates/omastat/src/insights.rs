@@ -77,6 +77,9 @@ pub struct Insight {
 #[serde(rename_all = "kebab-case")]
 pub enum InsightKind {
     TopApp,
+    StretchTrend,
+    AppHandoff,
+    AudioCompanion,
     DayComparison,
     SameWeekdayPace,
     UsuallyActiveNow,
@@ -157,8 +160,21 @@ pub struct RoutineEvidence {
     pub visit_start_window: Option<(u32, u32)>,
 }
 
+/// Personal-baseline evidence; durations are daily medians, not summed totals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrendComparison {
+    pub current_seconds: i64,
+    pub baseline_seconds: i64,
+    pub current_dates: Vec<String>,
+    pub baseline_dates: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InsightSupport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<TrendComparison>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine: Option<RoutineEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

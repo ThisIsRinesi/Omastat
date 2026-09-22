@@ -363,3 +363,5 @@ The bundled signed extension is 0.3.0. Run the browser integration installer
 and restart Zen/Firefox to load the update. Older extensions remain compatible
 with app-level audio tracking and optional media-title fallback, but do not
 report audible domains.
+
+See [Context insights](INSIGHTS.md) for comparison windows, evidence thresholds and audio companion semantics.

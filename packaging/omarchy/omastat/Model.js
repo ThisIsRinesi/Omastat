@@ -1053,7 +1053,12 @@ function insightEvidence(item) {
     text += "\n\nThis happened on " + Number(support.occurrence_count || 0) + " of " + Number(support.eligible_count || 0) + " days with enough tracking."
     text += " Only time windows with at least 90% tracking are compared."
   }
-  if (!support.routine && support.matching_dates && support.matching_dates.length)
+  if (support.method) text += "\n\n" + String(support.method)
+  if (support.comparison) {
+    text += "\n\nRecent days: " + support.comparison.current_dates.map(insightDate).join("; ")
+    text += "\n\nEarlier days: " + support.comparison.baseline_dates.map(insightDate).join("; ")
+  }
+  if (!support.routine && !support.comparison && support.matching_dates && support.matching_dates.length)
     text += "\n\nDays used for comparison: " + support.matching_dates.map(insightDate).join("; ")
   if (item.evidence) {
     var confidence = { low: "Limited evidence so far", medium: "Some supporting history", high: "Strong supporting history" }
@@ -1070,6 +1075,8 @@ function widgetInsights(items) {
 }
 
 function insightQualifier(item) {
+  var labels = { "stretch-trend": "Recent change · Completed days", "app-handoff": "Recurring sequence · Last 28 completed days", "audio-companion": "This period · Audio overlap" }
+  if (item && labels[item.kind]) return labels[item.kind]
   if (item && item.confidence === "low") return "Early hint"
   var routine = item && item.supporting && item.supporting.routine
   return routine && routine.status === "recent" ? "Recent pattern · Last two weeks" : ""

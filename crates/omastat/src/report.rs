@@ -456,19 +456,29 @@ fn usage_report_with_rollups_for_period_with_days(
         false,
     )?;
     insights.splice(0..0, activity_analytics.insights.clone());
+    let multitasking = storage.multitasking_from_metadata(
+        period.start_ts,
+        period.query_end_ts,
+        &context.metadata,
+        config,
+        lens == Lens::Day,
+    )?;
+    if let Some(audio) = crate::context_insights::audio(
+        &multitasking,
+        total_focused_seconds,
+        config,
+        period.meta.start_date.as_deref(),
+        period.meta.end_date.as_deref(),
+    ) {
+        insights.insert(0, audio);
+    }
     apply_configured_insight_labels(&mut insights, config);
 
     let generated_at = clock::unix_now();
     let widget_insight = widget_insight_for(&insights, generated_at);
 
     let report = UsageReport {
-        multitasking: storage.multitasking_from_metadata(
-            period.start_ts,
-            period.query_end_ts,
-            &context.metadata,
-            config,
-            lens == Lens::Day,
-        )?,
+        multitasking,
         activity_analytics,
         generated_at,
         query_start_ts: period.start_ts,

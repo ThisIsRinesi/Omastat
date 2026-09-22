@@ -612,6 +612,17 @@ Ui.Panel {
                 rowSpacing: Style.space(12)
               }
               GridLayout {
+                id: dayActivityRail
+                visible: root.wide && root.selectedLens === "day"
+                columns: 1
+                Layout.row: 0
+                Layout.column: 1
+                Layout.fillWidth: true
+                Layout.preferredWidth: body.width * (root.expansive ? 0.50 : 0.64)
+                Layout.alignment: Qt.AlignTop
+                rowSpacing: Style.space(12)
+              }
+              GridLayout {
                 id: supportRail
                 visible: root.supportRailVisible
                 columns: 1
@@ -624,13 +635,13 @@ Ui.Panel {
               }
               ColumnLayout {
                 id: insightsSection
-                parent: root.expansive ? supportRail : root.wide ? activityRail : contentGrid
+                parent: root.expansive ? supportRail : root.wide ? (root.selectedLens === "day" ? dayActivityRail : activityRail) : contentGrid
                 visible: root.hasInsightContent
-                Layout.row: root.expansive ? (root.selectedLens === "day" ? 1 : 0) : root.wide && root.selectedLens === "day" ? 3 : 2
+                Layout.row: root.expansive ? 0 : 2
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.expansive ? supportRail.width : root.wide ? activityRail.width : body.width
+                Layout.preferredWidth: root.expansive ? supportRail.width : root.wide ? (root.selectedLens === "day" ? dayActivityRail.width : activityRail.width) : body.width
                 Layout.alignment: Qt.AlignTop
                 spacing: Style.space(14)
                 Label { Layout.fillWidth: true; text: "Patterns & insights"; font.pixelSize: Style.font.subtitle; font.bold: true }
@@ -685,7 +696,9 @@ Ui.Panel {
                           Label { Layout.fillWidth: true; text: insightButton.modelData.title || "Insight"; wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
                           Label { text: "›"; color: root.dim; font.pixelSize: Style.font.subtitle }
                         }
+                        Label { Layout.fillWidth: true; visible: text.length > 0; text: Model.insightQualifier(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
                         Label { Layout.fillWidth: true; text: insightButton.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle; font.bold: true }
+                        InsightComparison { comparison: (insightButton.modelData.supporting || {}).comparison || null }
                         Label { Layout.fillWidth: true; visible: text.length > 0; text: insightButton.presentation.frequency; color: root.accent }
                         Label { Layout.fillWidth: true; text: Model.insightExplanation(insightButton.modelData); wrapMode: Text.Wrap }
                       }
@@ -713,6 +726,7 @@ Ui.Panel {
                   Label { Layout.fillWidth: true; text: insightDetail.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle }
                   Label { Layout.fillWidth: true; text: insightDetail.presentation.frequency; color: root.accent; visible: text.length > 0 }
                   Label { Layout.fillWidth: true; text: Model.insightExplanation(insightDetail.item); wrapMode: Text.Wrap }
+                  InsightComparison { comparison: (insightDetail.item.supporting || {}).comparison || null }
                   Label { Layout.fillWidth: true; text: "How we know"; font.bold: true }
                   Label { Layout.fillWidth: true; text: Model.insightQualifier(insightDetail.item); visible: text.length > 0; color: root.dim }
                   Label { Layout.fillWidth: true; text: root.evidenceText(insightDetail.item) || "No additional evidence is available for this finding."; wrapMode: Text.Wrap; color: root.dim }
@@ -830,9 +844,10 @@ Ui.Panel {
               }
               Section {
                 id: rhythmSection
+                parent: root.wide && root.selectedLens === "day" ? dayActivityRail : contentGrid
                 title: "Your rhythm"
                 Layout.row: root.wide ? 0 : 1
-                Layout.column: root.wide ? 1 : 0
+                Layout.column: root.wide && root.selectedLens !== "day" ? 1 : 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
                 Layout.preferredWidth: root.expansive ? body.width * (root.supportRailVisible ? 0.50 : 0.73) : root.wide ? body.width * 0.64 : body.width
@@ -845,12 +860,12 @@ Ui.Panel {
                   columnSpacing: Style.space(16)
                   rowSpacing: Style.space(12)
                   FocusRing {
-                    parent: root.wide ? (root.expansive ? supportRail : activityRail) : dayCharts
+                    parent: root.wide ? activityRail : dayCharts
                     visible: root.selectedLens === "day"
-                    Layout.row: root.wide && !root.expansive ? 1 : 0
+                    Layout.row: root.wide ? 1 : 0
                     Layout.column: 0
                     Layout.fillWidth: true
-                    Layout.preferredWidth: root.expansive ? supportRail.width : root.wide ? activityRail.width : dayCharts.width
+                    Layout.preferredWidth: root.wide ? activityRail.width : dayCharts.width
                     Layout.alignment: Qt.AlignTop
                     Layout.preferredHeight: implicitHeight
                     title: "Busiest hours"
@@ -930,13 +945,13 @@ Ui.Panel {
 
               }
               Section {
-                parent: root.wide ? activityRail : contentGrid
+                parent: root.wide ? (root.selectedLens === "day" ? dayActivityRail : activityRail) : contentGrid
                 title: "Explore activity"
-                Layout.row: root.wide ? (root.selectedLens === "day" && !root.expansive ? 2 : 1) : 3
+                Layout.row: root.wide ? 1 : 3
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: root.wide ? activityRail.width : body.width
+                Layout.preferredWidth: root.wide ? (root.selectedLens === "day" ? dayActivityRail.width : activityRail.width) : body.width
                 Layout.alignment: Qt.AlignTop
                 RowLayout {
                   Layout.fillWidth: true
@@ -1130,6 +1145,34 @@ Ui.Panel {
     Label { Layout.fillWidth: true; text: parent.value; font.pixelSize: Style.font.title * (parent.primary ? (root.richGraphs ? 1.85 : 1.5) : 1.05); font.bold: parent.primary; color: parent.primary ? root.foreground : root.dim }
     Label { visible: parent.detail.length > 0; Layout.fillWidth: true; text: parent.detail; color: root.dim; font.pixelSize: Style.font.caption }
   }
+  component InsightComparison: ColumnLayout {
+    id: comparisonChart
+    property var comparison: null
+    readonly property real maximum: comparison ? Math.max(1, comparison.baseline_seconds, comparison.current_seconds) : 1
+    Layout.fillWidth: true
+    visible: comparison !== null
+    spacing: Style.space(6)
+    Repeater {
+      model: comparisonChart.comparison ? [
+        { label: "Earlier weekdays", seconds: comparisonChart.comparison.baseline_seconds, current: false },
+        { label: "Recent weekdays", seconds: comparisonChart.comparison.current_seconds, current: true }
+      ] : []
+      RowLayout {
+        required property var modelData
+        Layout.fillWidth: true
+        Label { Layout.preferredWidth: Style.space(104); text: modelData.label; color: root.dim; font.pixelSize: Style.font.caption }
+        Rectangle {
+          Layout.fillWidth: true
+          implicitHeight: Style.space(6)
+          color: root.fill
+          radius: height / 2
+          Rectangle { width: parent.width * root.clamp01(modelData.seconds / comparisonChart.maximum); height: parent.height; radius: height / 2; color: modelData.current ? root.accent : root.withAlpha(root.foreground, 0.4) }
+        }
+        Label { Layout.preferredWidth: Style.space(54); text: Model.fmt(modelData.seconds); horizontalAlignment: Text.AlignRight; font.pixelSize: Style.font.caption }
+      }
+    }
+  }
+
   component DayTimeline: ColumnLayout {
     id: dayMapRoot
     property var timeline: null

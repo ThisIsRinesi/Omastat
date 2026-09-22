@@ -4,6 +4,7 @@ pub mod browser;
 pub mod cli;
 pub mod clock;
 pub mod config;
+mod context_insights;
 pub mod export;
 pub mod hyprland;
 pub mod identity;
