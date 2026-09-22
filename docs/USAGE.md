@@ -319,9 +319,23 @@ Multiple simultaneous audio sources count each elapsed second once. Audio from
 the focused app alone does not count; different tabs in the same focused browser
 are not currently treated as separate apps.
 
-The dashboard includes an hourly overlay, a daily/weekly trend overlay, and the
-background audio sources. Hover or keyboard-select graph points for exact times.
-Selected-activity charts continue to show that activity's focused time.
+The Day view pairs the ring clock with an app timeline. Each colored lane shows
+when an app was focused; the separate audio lane shows overlapping background
+audio. Blank space means no focused activity was recorded, without assuming why.
+When more than six apps were used, the busiest five have their own lanes and
+remaining apps share “Other apps”, with actual names retained during inspection.
+
+Switch between Active span (whole-hour bounds around recorded activity) and Full
+day. Hover to inspect, click to pin a moment, or use Tab and arrow keys to step
+through intervals. Enter, Space, or double-click opens the inspected app; lane
+labels and audio sources also open activity details. Longest stretch joins
+continuous use of the same app, even when audio changes. App switches count
+adjacent changes of foreground app and exclude gaps in recording.
+
+The timeline always describes the overall day. Selecting an app or website
+updates the clock to that activity's focused hours. Week, Month, Year and Lifetime
+retain their trend overlays. Background audio is labeled by owning app/game or,
+when available, the audible website domain.
 The report JSON includes `multitasking` (total seconds, daily totals, hourly
 heatmap, and sources); the compact summary includes `total_multitasked_seconds`.
 JSON/CSV exports and purge include the new media data.

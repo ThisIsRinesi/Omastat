@@ -409,3 +409,46 @@ assert.equal(context.cellDestination(comparisonMonths[0], '2026-02-01').lens, 'm
 assert.equal(context.cellDestination(comparisonMonths[0], '2026-02-01').offset, -2);
 assert.equal(context.cellDestination(comparisonMonths[1], '2026-02-01').offset, -1);
 console.log('Responsive date axes and monthly comparison drilldown checks passed');
+
+// Day map preserves time gaps and merges audio-only splits of a focused stretch.
+const mapStart = new Date(2026, 8, 20).getTime() / 1000;
+const mapEnd = new Date(2026, 8, 21).getTime() / 1000;
+const mediaSource = { app_class: 'discord', label: 'Discord', attribution: 'app' };
+const mapFixture = { start: mapStart, end: mapEnd, segments: [
+  { start: mapStart + 3600, end: mapStart + 3900, app_class: 'editor', label: 'Editor', audio: [] },
+  { start: mapStart + 3900, end: mapStart + 4500, app_class: 'editor', label: 'Editor', audio: [mediaSource] },
+  { start: mapStart + 4500, end: mapStart + 4800, app_class: 'browser', label: 'Browser', audio: [mediaSource] },
+  { start: mapStart + 7200, end: mapStart + 7500, app_class: 'editor', label: 'Editor', audio: [] },
+] };
+const mapped = context.dayMap(mapFixture, true, 6);
+assert.equal(mapped.lanes[0].seconds, 1200);
+assert.equal(mapped.lanes[0].spans.length, 2, 'a recording gap breaks an app stretch');
+assert.equal(mapped.longest.end - mapped.longest.start, 900, 'audio changes do not split a stretch');
+assert.equal(mapped.switches, 1, 'switch count excludes recording gaps');
+assert.equal(mapped.audio.length, 1, 'continuous audio across app switches is unioned');
+assert.equal(mapped.audio[0].end - mapped.audio[0].start, 900);
+assert.equal(mapped.start, mapStart + 3600);
+assert.equal(mapped.end, mapStart + 10800);
+assert.equal(context.timelineIndexAt(mapped.segments, mapStart + 6000), -1);
+assert.equal(context.dayMap(mapFixture, false, 6).start, mapStart);
+assert.equal(context.dayMap(mapFixture, false, 6).end, mapEnd);
+assert.equal(context.dayMap(null, true, 6).lanes.length, 0);
+assert.equal(context.dayMap({ start: mapStart, end: mapEnd, segments: [] }, true, 6).lanes.length, 0);
+const groupedMap = context.dayMap(mapFixture, true, 1);
+assert.equal(groupedMap.lanes.length, 1);
+assert.equal(groupedMap.lanes[0].label, 'Other apps');
+assert.equal(groupedMap.lanes[0].seconds, 1500);
+assert.equal(groupedMap.segments[0].label, 'Editor', 'grouping preserves the true owner for inspection');
+const partialMap = context.dayMap({ start: mapStart, end: mapStart + 4000, segments: mapFixture.segments }, true, 6);
+assert.equal(partialMap.lanes[0].seconds, 400, 'intervals clip at the recorded boundary');
+assert.equal(partialMap.observedEnd, mapStart + 4000);
+assert.equal(context.timelineClock(mapStart + 3660), '01:01');
+// Run this suite with TZ=America/New_York too: full-day extent is a calendar day,
+// not a fixed 24 hours, on daylight-saving transitions.
+for (const [year, month, day] of [[2026, 2, 8], [2026, 10, 1]]) {
+  const start = new Date(year, month, day).getTime() / 1000;
+  const end = new Date(year, month, day + 1).getTime() / 1000;
+  const result = context.dayMap({ start, end, segments: [] }, false, 6);
+  assert.equal(result.end - result.start, end - start);
+}
+console.log('Day map gaps, stretches, grouping, audio union, clipping, and local-day boundaries passed');

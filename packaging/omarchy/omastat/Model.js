@@ -1235,3 +1235,60 @@ function trendAxisTicks(days, width) {
   }
   return out
 }
+
+function timelineClock(timestamp) {
+  var date = new Date(Number(timestamp) * 1000)
+  return pad2(date.getHours()) + ":" + pad2(date.getMinutes())
+}
+
+// The report already contains disjoint foreground intervals. Retain real gaps;
+// merge adjacent same-app fragments only for drawing and uninterrupted stretches.
+function dayMap(timeline, fit, limit) {
+  var source = timeline || {}, start = Number(source.start), observedEnd = Number(source.end)
+  if (!isFinite(start) || !isFinite(observedEnd) || observedEnd <= start)
+    return { start: 0, end: 1, observedEnd: 0, segments: [], lanes: [], audio: [], switches: 0, longest: null }
+  var next = new Date(start * 1000)
+  next.setHours(0, 0, 0, 0)
+  next.setDate(next.getDate() + 1)
+  var end = next.getTime() / 1000
+  observedEnd = Math.min(end, observedEnd)
+  var segments = (source.segments || []).map(function(s) {
+    return Object.assign({}, s, { start: Math.max(start, Number(s.start)), end: Math.min(observedEnd, Number(s.end)) })
+  }).filter(function(s) { return isFinite(s.start) && isFinite(s.end) && s.end > s.start })
+    .sort(function(a, b) { return a.start - b.start })
+  var apps = Object.create(null), audio = [], longest = null, switches = 0, previous = null
+  function append(list, segment) {
+    var last = list[list.length - 1]
+    if (last && last.end === segment.start) last.end = segment.end
+    else list.push({ start: segment.start, end: segment.end, app_class: segment.app_class, label: segment.label })
+  }
+  segments.forEach(function(s) {
+    var key = String(s.app_class || "unknown")
+    if (!apps[key]) apps[key] = { app_class: key, label: String(s.label || key), seconds: 0, spans: [] }
+    var app = apps[key]
+    app.seconds += s.end - s.start
+    append(app.spans, s)
+    var stretch = app.spans[app.spans.length - 1]
+    if (!longest || stretch.end - stretch.start > longest.end - longest.start) longest = Object.assign({}, stretch)
+    if (previous && previous.end === s.start && previous.app_class !== s.app_class) switches++
+    if ((s.audio || []).length) append(audio, s)
+    previous = s
+  })
+  var lanes = Object.keys(apps).map(function(key) { return apps[key] })
+    .sort(function(a, b) { return b.seconds - a.seconds || a.label.localeCompare(b.label) })
+  var count = Math.max(1, Number(limit) || 6)
+  if (lanes.length > count) {
+    var remaining = lanes.slice(count - 1)
+    lanes = lanes.slice(0, count - 1)
+    lanes.push({ app_class: "", label: "Other apps", seconds: remaining.reduce(function(n, a) { return n + a.seconds }, 0),
+      spans: remaining.reduce(function(all, a) { return all.concat(a.spans) }, []).sort(function(a, b) { return a.start - b.start }) })
+  }
+  if (fit && segments.length) {
+    var first = segments[0].start, last = segments[segments.length - 1].end
+    var a = Math.max(start, start + Math.floor((first - start) / 3600) * 3600)
+    var b = Math.min(end, start + Math.ceil((last - start) / 3600) * 3600)
+    if (b - a < 7200) { b = Math.min(end, a + 7200); a = Math.max(start, b - 7200) }
+    start = a; end = b
+  }
+  return { start: start, end: end, observedEnd: observedEnd, segments: segments, lanes: lanes, audio: audio, switches: switches, longest: longest }
+}

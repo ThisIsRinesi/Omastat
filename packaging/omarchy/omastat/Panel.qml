@@ -186,7 +186,7 @@ Ui.Panel {
   readonly property bool expansive: panel.contentWidth >= Style.space(1500)
   readonly property bool wide: panel.contentWidth >= Style.space(900)
   readonly property bool calendarLens: selectedLens === "month" || selectedLens === "year"
-  readonly property bool supportRailVisible: expansive && (hasInsightContent || calendarLens)
+  readonly property bool supportRailVisible: expansive && (hasInsightContent || calendarLens || selectedLens === "day")
   readonly property bool selected: selectedActivityKey.length > 0
   readonly property var detail: selected ? (activityDetail || {}) : activityAnalytics
   readonly property var activityMetrics: Model.activityMetricValues(activityDetail, detailRunning, detailError)
@@ -626,7 +626,7 @@ Ui.Panel {
                 id: insightsSection
                 parent: root.expansive ? supportRail : root.wide ? activityRail : contentGrid
                 visible: root.hasInsightContent
-                Layout.row: root.expansive ? 0 : 2
+                Layout.row: root.expansive ? (root.selectedLens === "day" ? 1 : 0) : root.wide && root.selectedLens === "day" ? 3 : 2
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
@@ -838,15 +838,20 @@ Ui.Panel {
                 Layout.preferredWidth: root.expansive ? body.width * (root.supportRailVisible ? 0.50 : 0.73) : root.wide ? body.width * 0.64 : body.width
                 Layout.alignment: Qt.AlignTop
                 GridLayout {
+                  id: dayCharts
                   Layout.fillWidth: true
                   visible: root.selectedLens === "day"
-                  columns: width >= Style.space(620) ? 2 : 1
-                  columnSpacing: Style.space(12)
-                  rowSpacing: Style.space(8)
+                  columns: 1
+                  columnSpacing: Style.space(16)
+                  rowSpacing: Style.space(12)
                   FocusRing {
+                    parent: root.wide ? (root.expansive ? supportRail : activityRail) : dayCharts
+                    visible: root.selectedLens === "day"
+                    Layout.row: root.wide && !root.expansive ? 1 : 0
+                    Layout.column: 0
                     Layout.fillWidth: true
-                    Layout.preferredWidth: Style.space(350)
-                    Layout.maximumWidth: parent.columns === 2 ? Style.space(350) : Infinity
+                    Layout.preferredWidth: root.expansive ? supportRail.width : root.wide ? activityRail.width : dayCharts.width
+                    Layout.alignment: Qt.AlignTop
                     Layout.preferredHeight: implicitHeight
                     title: "Busiest hours"
                     detail: "Local time"
@@ -854,20 +859,13 @@ Ui.Panel {
                     maxSeconds: root.maximum(root.hours)
                     expanded: true
                   }
-                  ColumnLayout {
+                  DayTimeline {
+                    objectName: "dayTimeline"
+                    Layout.row: root.wide ? 0 : 1
+                    Layout.column: 0
                     Layout.fillWidth: true
-                    Layout.preferredWidth: Style.space(400)
-                    Layout.alignment: Qt.AlignTop
-                    Layout.topMargin: Style.space(12)
-                    spacing: Style.space(12)
-                    Label { text: "Hour by hour"; font.bold: true }
-                    BarChart {
-                      Layout.fillWidth: true
-                      Layout.minimumHeight: Style.space(200)
-                      Layout.preferredHeight: root.expansive ? Style.space(280) : Style.space(220)
-                      cells: root.hours
-                      hourly: true
-                    }
+                    Layout.preferredWidth: Style.space(600)
+                    timeline: root.multitasking.timeline || null
                   }
                 }
                 FocusTrendLine {
@@ -884,13 +882,13 @@ Ui.Panel {
                 }
                 Label {
                   Layout.fillWidth: true
-                  visible: !root.selected
+                  visible: !root.selected && root.selectedLens !== "day"
                   text: "Multitasked time overlaps focused time · light bars / line show background audio"
                   color: root.dim
                   font.pixelSize: Style.font.caption
                 }
                 Repeater {
-                  model: root.selected ? [] : (root.multitasking.sources || []).slice(0, 5)
+                  model: root.selected || root.selectedLens === "day" ? [] : (root.multitasking.sources || []).slice(0, 5)
                   Label {
                     required property var modelData
                     Layout.fillWidth: true
@@ -915,7 +913,7 @@ Ui.Panel {
                   weekdayMaxSeconds: root.maximum(root.calendarWeekdays)
                   onActivatedCell: function(cell) { root.openCell(cell) }
                 }
-                Label { Layout.fillWidth: true; Layout.minimumHeight: Style.space(32); visible: root.selectedLens === "day" || root.chartReadout.length > 0; text: root.chartReadout || "Point to an hour to inspect focused and multitasked time."; color: root.dim; font.pixelSize: Style.font.caption }
+                Label { Layout.fillWidth: true; Layout.minimumHeight: Style.space(32); visible: root.selectedLens !== "day" && root.chartReadout.length > 0; text: root.chartReadout || "Point to an hour to inspect focused and multitasked time."; color: root.dim; font.pixelSize: Style.font.caption }
                 ColumnLayout {
                   // The wide view pairs the calendar with hourly patterns in its own rail.
                   parent: root.expansive && root.calendarLens ? supportRail : rhythmSection.contentLayout
@@ -934,7 +932,7 @@ Ui.Panel {
               Section {
                 parent: root.wide ? activityRail : contentGrid
                 title: "Explore activity"
-                Layout.row: root.wide ? 1 : 3
+                Layout.row: root.wide ? (root.selectedLens === "day" && !root.expansive ? 2 : 1) : 3
                 Layout.column: 0
                 Layout.rowSpan: 1
                 Layout.fillWidth: true
@@ -1132,85 +1130,199 @@ Ui.Panel {
     Label { Layout.fillWidth: true; text: parent.value; font.pixelSize: Style.font.title * (parent.primary ? (root.richGraphs ? 1.85 : 1.5) : 1.05); font.bold: parent.primary; color: parent.primary ? root.foreground : root.dim }
     Label { visible: parent.detail.length > 0; Layout.fillWidth: true; text: parent.detail; color: root.dim; font.pixelSize: Style.font.caption }
   }
-  component BarChart: RowLayout {
-    id: chart
-    onCellsChanged: inspected = Math.min(inspected, cells.length - 1)
-    Connections { target: root; function onViewKeyChanged() { chart.inspected = -1 } }
-    property var cells: []
-    property bool hourly: false
-    property int inspected: -1
-    readonly property real maxSeconds: root.maximum(cells)
-    implicitHeight: Style.space(175)
-    spacing: Style.space(3)
+  component DayTimeline: ColumnLayout {
+    id: dayMapRoot
+    property var timeline: null
+    property bool fitSpan: true
+    property int selectedIndex: -1
+    property real hoveredTime: -1
+    property real pinnedTime: -1
+    readonly property var chartData: Model.dayMap(timeline, fitSpan, 6)
+    readonly property var colors: Model.stableAppColors(chartData.lanes, String(root.accent))
+    readonly property real labelWidth: Style.space(width < Style.space(500) ? 104 : 136)
+    readonly property real rowHeight: Style.space(38)
+    readonly property real inspectedTime: hoveredTime >= 0 ? hoveredTime : pinnedTime >= 0 ? pinnedTime : selectedIndex >= 0 && selectedIndex < chartData.segments.length ? chartData.segments[selectedIndex].start : -1
+    readonly property int inspectedIndex: inspectedTime >= 0 ? Model.timelineIndexAt(chartData.segments, inspectedTime) : -1
+    readonly property var inspected: inspectedIndex >= 0 ? chartData.segments[inspectedIndex] : null
+    readonly property real audioSeconds: chartData.audio.reduce(function(n, span) { return n + span.end - span.start }, 0)
+    readonly property string readout: inspected
+      ? Model.timelineClock(inspected.start) + "–" + Model.timelineClock(inspected.end) + " · " + inspected.label + " · " + Model.fmtPrecise(inspected.end - inspected.start) + "\n" + Model.timelineAudioLabel(inspected)
+      : inspectedTime >= 0 ? Model.timelineClock(inspectedTime) + (inspectedTime >= chartData.observedEnd ? " · Outside the recorded period" : " · No focused activity recorded")
+      : chartData.segments.length ? "Point to a moment · Click to pin · Arrow keys step through activity · Enter opens the app" : !root.panelDataLoaded ? "Loading your activity timeline…" : !timeline ? "Activity timeline unavailable for this report." : "No focused activity recorded in this day."
+    spacing: Style.space(12)
+    onTimelineChanged: { selectedIndex = -1; hoveredTime = -1; pinnedTime = -1 }
+    Connections { target: root; function onViewKeyChanged() { dayMapRoot.selectedIndex = -1; dayMapRoot.hoveredTime = -1; dayMapRoot.pinnedTime = -1; dayMapRoot.fitSpan = true } }
+    function position(timestamp) { return (timestamp - chartData.start) / Math.max(1, chartData.end - chartData.start) }
+    function step(direction) {
+      hoveredTime = -1; pinnedTime = -1
+      selectedIndex = Math.max(0, Math.min(chartData.segments.length - 1, selectedIndex + direction))
+    }
+    function activate() { if (inspected) root.selectActivity("app", inspected.app_class) }
+
+    RowLayout {
+      Layout.fillWidth: true
+      Label { text: "Your day, in sequence"; font.bold: true; Layout.fillWidth: true }
+      Action { text: dayMapRoot.fitSpan ? "Active span" : "Full day"; enabled: dayMapRoot.chartData.segments.length > 0; checked: dayMapRoot.fitSpan; Accessible.name: "Timeline range: " + text + ". Activate to switch range"; onClicked: dayMapRoot.fitSpan = !dayMapRoot.fitSpan }
+    }
+    Label {
+      Layout.fillWidth: true
+      text: "Overall app timeline · Local time" + (root.selected ? " · Clock shows " + root.activityLabel : "")
+      color: root.dim
+      font.pixelSize: Style.font.caption
+    }
+    RowLayout {
+      Layout.fillWidth: true
+      visible: dayMapRoot.chartData.segments.length > 0
+      spacing: Style.space(16)
+      Metric { label: "Longest stretch"; value: dayMapRoot.chartData.longest ? Model.fmt(dayMapRoot.chartData.longest.end - dayMapRoot.chartData.longest.start) : "—"; detail: dayMapRoot.chartData.longest ? dayMapRoot.chartData.longest.label : "" }
+      Metric { label: "App switches"; value: String(dayMapRoot.chartData.switches); detail: "During continuous activity" }
+      Metric { label: "Audio overlap"; value: Model.fmt(dayMapRoot.audioSeconds); detail: "Included in focused time" }
+    }
     Item {
-      Layout.preferredWidth: Style.space(46)
-      Layout.fillHeight: true
+      id: dayPlot
+      objectName: "dayTimelinePlot"
+      Layout.fillWidth: true
+      implicitHeight: (dayMapRoot.chartData.lanes.length + 1) * dayMapRoot.rowHeight + Style.space(28)
+      visible: dayMapRoot.chartData.segments.length > 0
+      activeFocusOnTab: visible
+      Accessible.role: Accessible.Button
+      Accessible.name: "Day timeline. " + dayMapRoot.readout
+      onActiveFocusChanged: if (activeFocus) { if (dayMapRoot.selectedIndex < 0) dayMapRoot.selectedIndex = 0; Qt.callLater(function() { root.revealControl(dayReadout) }) }
+      Keys.onLeftPressed: dayMapRoot.step(-1)
+      Keys.onRightPressed: dayMapRoot.step(1)
+      Keys.onReturnPressed: dayMapRoot.activate()
+      Keys.onSpacePressed: dayMapRoot.activate()
       Repeater {
-        model: [1, 0.5, 0]
+        model: dayMapRoot.chartData.lanes
+        Action {
+          required property var modelData
+          required property int index
+          x: 0; y: index * dayMapRoot.rowHeight
+          width: dayMapRoot.labelWidth - Style.space(12)
+          height: dayMapRoot.rowHeight
+          text: modelData.label
+          Accessible.name: modelData.label + ", " + Model.fmtPrecise(modelData.seconds) + (modelData.app_class ? ". Explore app" : "")
+          enabled: modelData.app_class.length > 0
+          opacity: 1
+          onClicked: root.selectActivity("app", modelData.app_class)
+          Controls.ToolTip.visible: hovered || activeFocus
+          Controls.ToolTip.text: Accessible.name
+          contentItem: Column {
+            spacing: Style.space(2)
+            Label { width: parent.width; text: modelData.label; elide: Text.ElideRight; wrapMode: Text.NoWrap; font.pixelSize: Style.font.caption; color: root.colorFromHex(dayMapRoot.colors[index], 1) }
+            Label { width: parent.width; text: Model.fmt(modelData.seconds); color: root.dim; font.pixelSize: Style.font.caption }
+          }
+        }
+      }
+      Label { x: 0; y: dayMapRoot.chartData.lanes.length * dayMapRoot.rowHeight + Style.space(10); width: dayMapRoot.labelWidth; text: "Background audio"; color: root.dim; font.pixelSize: Style.font.caption }
+      Item {
+        id: dayTracks
+        x: dayMapRoot.labelWidth
+        width: Math.max(1, parent.width - x)
+        height: (dayMapRoot.chartData.lanes.length + 1) * dayMapRoot.rowHeight
+        clip: true
+        Canvas {
+          id: dayCanvas
+          anchors.fill: parent
+          onWidthChanged: requestPaint()
+          onHeightChanged: requestPaint()
+          Connections { target: dayMapRoot; function onChartDataChanged() { dayCanvas.requestPaint() } function onColorsChanged() { dayCanvas.requestPaint() } }
+          Connections { target: root; function onForegroundChanged() { dayCanvas.requestPaint() } }
+          onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            var chartData = dayMapRoot.chartData, row = dayMapRoot.rowHeight
+            // Neutral rows keep time away visible without inventing an idle reason.
+            ctx.fillStyle = root.canvasColor(root.foreground, 0.045)
+            for (var r = 0; r <= chartData.lanes.length; r++) ctx.fillRect(0, r * row + Style.space(8), width, Style.space(22))
+            ctx.fillStyle = root.canvasColor(root.foreground, 0.08)
+            for (var t = 0; t <= 4; t++) ctx.fillRect(Math.round(width * t / 4), 0, 1, height)
+            function spanRect(span, y, h) {
+              var x = Math.max(0, dayMapRoot.position(span.start) * width)
+              var end = Math.min(width, dayMapRoot.position(span.end) * width)
+              if (end > x) ctx.fillRect(x, y, Math.max(1, end - x), h)
+            }
+            for (var i = 0; i < chartData.lanes.length; i++) {
+              ctx.fillStyle = dayMapRoot.colors[i]
+              for (var j = 0; j < chartData.lanes[i].spans.length; j++) spanRect(chartData.lanes[i].spans[j], i * row + Style.space(8), Style.space(22))
+            }
+            ctx.fillStyle = root.canvasColor(root.foreground, 0.7)
+            for (var k = 0; k < chartData.audio.length; k++) spanRect(chartData.audio[k], chartData.lanes.length * row + Style.space(14), Style.space(10))
+          }
+        }
+        Rectangle {
+          visible: dayMapRoot.inspectedTime >= dayMapRoot.chartData.start && dayMapRoot.inspectedTime <= dayMapRoot.chartData.end
+          x: Math.min(parent.width - width, Math.max(0, dayMapRoot.position(dayMapRoot.inspectedTime) * parent.width))
+          height: parent.height; width: Style.space(1)
+          color: root.foreground
+        }
+        Rectangle { anchors.fill: parent; color: "transparent"; border.width: dayPlot.activeFocus ? 1 : 0; border.color: root.accent }
+        MouseArea {
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onPositionChanged: function(mouse) { dayMapRoot.hoveredTime = dayMapRoot.chartData.start + Math.min(0.999999, Math.max(0, mouse.x / width)) * (dayMapRoot.chartData.end - dayMapRoot.chartData.start) }
+          onExited: dayMapRoot.hoveredTime = -1
+          onClicked: function(mouse) {
+            var time = dayMapRoot.chartData.start + Math.min(0.999999, Math.max(0, mouse.x / width)) * (dayMapRoot.chartData.end - dayMapRoot.chartData.start)
+            dayPlot.forceActiveFocus()
+            dayMapRoot.selectedIndex = Model.timelineIndexAt(dayMapRoot.chartData.segments, time)
+            dayMapRoot.pinnedTime = time
+          }
+          onDoubleClicked: dayMapRoot.activate()
+        }
+      }
+      Repeater {
+        model: dayMapRoot.width < Style.space(500) ? 3 : 5
         Label {
-          required property real modelData
-          width: parent.width - Style.space(4)
-          y: Math.max(0, (parent.height - Style.space(28)) * (1 - modelData) - height / 2)
-          text: Model.fmt(Model.maxHourlySeconds(chart.cells) * modelData)
-          horizontalAlignment: Text.AlignRight
+          required property int index
+          readonly property int count: dayMapRoot.width < Style.space(500) ? 3 : 5
+          readonly property real fraction: index / (count - 1)
+          width: Style.space(58)
+          x: dayMapRoot.labelWidth + Math.max(0, Math.min(dayTracks.width - width, dayTracks.width * fraction - width / 2))
+          y: dayTracks.height + Style.space(4)
+          text: Model.timelineClock(dayMapRoot.chartData.start + fraction * (dayMapRoot.chartData.end - dayMapRoot.chartData.start))
           color: root.dim
           font.pixelSize: Style.font.caption
+          horizontalAlignment: index === 0 ? Text.AlignLeft : index === count - 1 ? Text.AlignRight : Text.AlignHCenter
         }
       }
     }
-    Repeater {
-      id: hourButtons
-      model: chart.cells
-      Controls.AbstractButton {
-        id: barButton
-        required property var modelData
-        required property int index
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-        Layout.preferredWidth: 1
-        activeFocusOnTab: true
-        onActiveFocusChanged: if (activeFocus) { chart.inspected = index; root.chartReadout = Accessible.name; Qt.callLater(function() { root.revealControl(this) }.bind(this)) }
-        onHoveredChanged: if (hovered) { chart.inspected = index; root.chartReadout = Accessible.name }
-        readonly property real seconds: Number(modelData.seconds || modelData.focused_seconds || 0)
-        readonly property string name: chart.hourly ? String(index).padStart(2, "0") + ":00" : String(modelData.label || modelData.date || "")
-        Accessible.name: name + ", " + Model.fmtPrecise(seconds) + " focused" + (Number(modelData.multitasked_seconds || 0) > 0 ? ", " + Model.fmtPrecise(modelData.multitasked_seconds) + " multitasked" : "")
-        Keys.onLeftPressed: if (index > 0) hourButtons.itemAt(index - 1).forceActiveFocus()
-        Keys.onRightPressed: if (index + 1 < chart.cells.length) hourButtons.itemAt(index + 1).forceActiveFocus()
-        onClicked: { chart.inspected = index; root.chartReadout = Accessible.name }
-        background: Rectangle { radius: Style.space(4); color: chart.inspected === barButton.index ? root.fill : "transparent"; border.width: barButton.activeFocus ? 1 : 0; border.color: root.accent }
-        contentItem: Item {
-          Rectangle {
-            id: hourBar
-            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top
-            anchors.bottomMargin: Style.space(6)
-            height: Math.max(barButton.seconds > 0 ? Style.space(2) : 0, (parent.height - Style.space(28)) * barButton.seconds / Math.max(1, chart.maxSeconds))
-            radius: Style.space(root.richGraphs ? 4 : 2)
-            color: root.accent
-            gradient: root.richGraphs ? hourGradient : null
-            Gradient {
-              id: hourGradient
-              GradientStop { position: 0; color: Qt.lighter(root.accent, 1.18) }
-              GradientStop { position: 1; color: root.withAlpha(root.accent, 0.65) }
+    ChartReadout { id: dayReadout; Layout.fillWidth: true; text: dayMapRoot.readout; reservedLines: 2 }
+    Label { Layout.fillWidth: true; visible: dayMapRoot.chartData.segments.length > 0; text: "Blank space means no focused activity was recorded. Audio overlaps focused time."; color: root.dim; font.pixelSize: Style.font.caption }
+    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line; visible: audioSources.count > 0 }
+    Label { text: "Alongside your day"; font.bold: true; visible: audioSources.count > 0 }
+    GridLayout {
+      Layout.fillWidth: true
+      columns: width >= Style.space(600) ? 2 : 1
+      columnSpacing: Style.space(20)
+      rowSpacing: Style.space(4)
+      Repeater {
+        id: audioSources
+        model: (root.multitasking.sources || []).slice(0, 6)
+        Action {
+          required property var modelData
+          Layout.fillWidth: true
+          Layout.minimumWidth: 0
+          implicitHeight: Style.space(46)
+          Accessible.name: modelData.label + ", " + Model.fmtPrecise(modelData.seconds) + " alongside other apps. Explore activity"
+          onClicked: root.selectActivity(modelData.attribution === "domain" ? "domain" : "app", modelData.attribution === "domain" ? modelData.label : modelData.app_class)
+          contentItem: ColumnLayout {
+            spacing: Style.space(6)
+            RowLayout {
+              Layout.fillWidth: true
+              Label { Layout.fillWidth: true; Layout.minimumWidth: 0; text: modelData.label; elide: Text.ElideRight; wrapMode: Text.NoWrap }
+              Label { text: Model.fmt(modelData.seconds); color: root.dim; font.pixelSize: Style.font.caption }
             }
-            opacity: barButton.hovered || barButton.activeFocus || chart.inspected === barButton.index || barButton.seconds === chart.maxSeconds ? 1 : 0.72
-            Behavior on opacity { NumberAnimation { duration: root.motionDuration } }
-            transform: Scale { origin.y: hourBar.height; yScale: root.richGraphs ? 0.92 + 0.08 * root.graphProgress : 1 }
+            Rectangle { Layout.fillWidth: true; implicitHeight: Style.space(3); color: root.fill
+              Rectangle { width: parent.width * root.clamp01(Number(modelData.seconds) / Math.max(1, root.totalMultitasked)); height: parent.height; color: root.withAlpha(root.foreground, 0.6); radius: height / 2 }
+            }
           }
-          Rectangle {
-            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: barLabel.top
-            anchors.bottomMargin: Style.space(6)
-            height: Math.max(0, (parent.height - Style.space(28)) * Number(barButton.modelData.multitasked_seconds || 0) / Math.max(1, chart.maxSeconds))
-            id: mediaBar
-            color: root.foreground; opacity: 0.8; radius: Style.space(root.richGraphs ? 4 : 2)
-            transform: Scale { origin.y: mediaBar.height; yScale: root.richGraphs ? 0.92 + 0.08 * root.graphProgress : 1 }
-          }
-          Label { id: barLabel; anchors.bottom: parent.bottom; width: chart.hourly ? Style.space(44) : parent.width; x: chart.hourly && barButton.index === 0 ? 0 : (parent.width - width) / 2; text: chart.hourly ? (barButton.index % 6 === 0 ? Model.clockLabel(barButton.index) : "") : (chart.cells.length <= 12 || barButton.index % Math.ceil(chart.cells.length / 6) === 0 ? barButton.name : ""); font.pixelSize: Style.font.caption; color: root.dim; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; wrapMode: Text.NoWrap }
         }
-        Controls.ToolTip.visible: hovered || activeFocus
-        Controls.ToolTip.text: Accessible.name
       }
     }
   }
+
   component IntensityLegend: RowLayout {
     property real maxSeconds: 0
     property string contextLabel: "Time spent"
@@ -1476,7 +1588,7 @@ Ui.Panel {
     property int hoveredIndex: -1
     property string hoveredText: ""
     property bool expanded: false
-    readonly property int chartSize: expanded ? Math.max(Style.space(146), Math.min(Style.space(210), width - Style.space(128))) : Style.space(132)
+    readonly property int chartSize: expanded ? Math.max(Style.space(146), Math.min(Style.space(root.expansive ? 260 : 210), width - Style.space(128))) : Style.space(132)
     readonly property string selectedText: selectedIndex >= 0 && selectedIndex < hours.length
       ? hourlyDetailText(hours[selectedIndex])
       : ""
