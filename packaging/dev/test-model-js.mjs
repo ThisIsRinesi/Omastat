@@ -461,3 +461,15 @@ assert.match(context.insightEvidence(stretchTrend), /Recent days: Sep 20, 2026/)
 assert.match(context.insightEvidence(stretchTrend), /Earlier days: Sep 13, 2026/);
 assert.equal(context.insightQualifier({kind: 'audio-companion'}), 'This period · Audio overlap');
 assert.equal(context.insightQualifier({kind: 'app-handoff'}), 'Recurring sequence · Last 28 completed days');
+
+// Window totals and grouped visits must explain their different duration bases.
+for (const basis of ['usage', 'usage-and-visit-start']) {
+  const evidence = context.insightEvidence({supporting: {routine: {timing_basis: basis}}});
+  assert.match(evidence, /median daily total inside the displayed time window/);
+  assert.match(evidence, /matching days with at least five minutes/);
+  assert.doesNotMatch(evidence, /per visit/);
+}
+const visitEvidence = context.insightEvidence({supporting: {routine: {timing_basis: 'visit-start'}}});
+assert.match(visitEvidence, /median recorded use per visit/);
+assert.match(visitEvidence, /Returns within five minutes/);
+assert.match(visitEvidence, /time away is excluded/);

@@ -526,17 +526,19 @@ pub(crate) fn humanize(insight: &mut Insight) {
     } else {
         [
             format!(
-                "{lead}you've {frequency} spent about {duration} here {when}, around this time of day."
+                "{lead}you've {frequency} returned {when}. On days with this pattern, your use between {range} typically totals about {duration} across visits."
             ),
             format!(
-                "{lead}this has {frequency} been part of the day {when}. On days it shows up, about {duration} goes here during this window."
+                "{lead}this has {frequency} been part of the day {when}. Your use between {range} typically adds up to about {duration} across visits on matching days."
             ),
             format!(
-                "{lead}about {duration} of use falls in this part of the day when the pattern appears. You've {frequency} found your way here {when}."
+                "{lead}your use between {range} typically totals about {duration} across visits on days with this pattern. You've {frequency} found your way here {when}."
             ),
-            format!("{lead}about {duration} here has {frequency} been part of the picture {when}."),
             format!(
-                "{lead}a typical day with this pattern includes about {duration} here {when}, around this time."
+                "{lead}you've {frequency} spent time here {when}. Across visits between {range}, a matching day typically adds up to about {duration} of use."
+            ),
+            format!(
+                "{lead}on days with this pattern {when}, your use typically totals about {duration} across visits between {range}."
             ),
         ]
     };
@@ -639,6 +641,14 @@ mod tests {
             );
             assert_eq!(insight.supporting.routine, original.supporting.routine);
             assert!(insight.explanation.contains("30 minutes"));
+            if insight.supporting.routine.as_ref().unwrap().timing_basis != "visit-start" {
+                assert!(insight.explanation.to_lowercase().contains("across visits"));
+                assert!(
+                    insight
+                        .explanation
+                        .contains(insight.supporting.hour_label.as_ref().unwrap())
+                );
+            }
             titles.insert(insight.title);
             explanations.insert(insight.explanation);
         }

@@ -1052,6 +1052,10 @@ function insightEvidence(item) {
   if (support.routine) {
     text += "\n\nThis happened on " + Number(support.occurrence_count || 0) + " of " + Number(support.eligible_count || 0) + " days with enough tracking."
     text += " Only time windows with at least 90% tracking are compared."
+    if (support.routine.timing_basis === "visit-start")
+      text += " The duration is the median recorded use per visit starting in this window. Returns within five minutes are grouped into a visit; time away is excluded. Visits may continue beyond the window."
+    else
+      text += " The duration is the median daily total inside the displayed time window, using matching days with at least five minutes of use. It combines visits and includes only the portion inside that window."
   }
   if (support.method) text += "\n\n" + String(support.method)
   if (support.comparison) {
