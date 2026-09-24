@@ -14,7 +14,14 @@ JavaScript checks are never silently skipped.
 The command runs Rust formatting, shell syntax checks, QML lint/parse checks,
 JavaScript model/controller/motion/browser checks, isolated installer tests,
 Clippy with warnings denied, all workspace Rust tests, and locked release builds
-of the backend binaries. Runtime UI review and performance benchmarks remain
+of the backend binaries. CI sets `OMASTAT_QML_CHECK_MODE=portable` because its Qt installation lacks
+Omarchy and Quickshell type definitions. This disables unresolved-type, incompatible-type, and
+required-property diagnostics, which otherwise report false errors for external
+base classes. Syntax, other lint diagnostics, and all JavaScript checks still
+run. Local checks default to `desktop`, retaining those type diagnostics and
+Omarchy manifest validation.
+
+Runtime UI review and performance benchmarks remain
 separate: lint checks cannot verify rendering or desktop integration.
 
 ## Dependencies

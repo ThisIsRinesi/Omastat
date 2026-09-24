@@ -46,5 +46,6 @@ jobs:
           cache: true
       - name: Run all checks
         env:
+          OMASTAT_QML_CHECK_MODE: portable
           OMASTAT_TEST_OMARCHY_BIN: ${{ github.workspace }}/.ci-omarchy/bin
         run: packaging/dev/check.sh
