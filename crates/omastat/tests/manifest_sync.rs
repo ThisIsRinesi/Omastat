@@ -5,8 +5,14 @@ use std::path::{Path, PathBuf};
 const PLUGIN_ID: &str = "local.omastat";
 const ROOT_ENTRYPOINT: &str = "packaging/omarchy/omastat/BarWidget.qml";
 const PACKAGED_ENTRYPOINT: &str = "BarWidget.qml";
-const REQUIRED_PACKAGED_FILES: &[&str] =
-    &["manifest.json", "BarWidget.qml", "Panel.qml", "Model.js"];
+const REQUIRED_PACKAGED_FILES: &[&str] = &[
+    "manifest.json",
+    "BarWidget.qml",
+    "Panel.qml",
+    "DashboardWindow.qml",
+    "TrackingStatus.qml",
+    "Model.js",
+];
 
 #[test]
 fn omarchy_manifests_stay_synchronized() {

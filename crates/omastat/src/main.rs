@@ -51,6 +51,9 @@ async fn main() -> Result<()> {
     let mut steam = SteamResolver::default();
 
     match cli.command {
+        Commands::TrackingStatus => {
+            cli::print_json(&storage.tracking_status(&config, omastat::clock::unix_now())?)?;
+        }
         Commands::Today => {
             cli::print_report(
                 "Today",

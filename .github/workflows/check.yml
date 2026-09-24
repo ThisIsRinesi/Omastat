@@ -1,0 +1,50 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch pinned Omarchy installer dependencies
+        uses: actions/checkout@v4
+        with:
+          repository: omacom/omarchy
+          ref: 28ceaae70ebac3a0edcc21f2faa77a90dc6d404c
+          path: .ci-omarchy
+          sparse-checkout: bin
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bubblewrap jq ripgrep
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          # The installer suite uses unprivileged mount namespaces, never a live desktop.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install Qt lint and parse tools
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          cache: true
+      - name: Run all checks
+        env:
+          OMASTAT_TEST_OMARCHY_BIN: ${{ github.workspace }}/.ci-omarchy/bin
+        run: packaging/dev/check.sh

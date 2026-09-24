@@ -73,6 +73,11 @@ omastat today
 omastat export-data --lens month --offset -1 --format csv --output ~/omastat-august
 ```
 
+**Settings → Tracking status** shows the latest tracker heartbeat and browser
+report, including idle, stopped, and stale states. It checks when Settings opens
+and every 30 seconds while visible. Browser silence can mean the browser is
+closed; it does not by itself diagnose a broken extension.
+
 ## Dashboard appearance
 
 Open **Settings** in the dashboard to change its appearance. Choose **Narrow**,
@@ -138,6 +143,13 @@ Your recorded activity and configuration are kept. See [installation details](do
 for plugin backups and existing Git-managed installs.
 
 [MIT license](LICENSE)
+
+## Development checks
+
+Run `packaging/dev/check.sh` for formatting, shell syntax, QML/JavaScript checks,
+isolated installer tests, Rust tests, Clippy, and a locked release build. The
+same command runs on pushes and pull requests in GitHub Actions. See
+[check setup and dependencies](docs/CHECKS.md).
 
 Installer file ownership: the user service and optional browser integration use
 SHA-256 and mode receipts under `${XDG_STATE_HOME:-~/.local/state}/omastat/install-ownership`.

@@ -1,3 +1,30 @@
+function trackingStatusView(report) {
+  report = report || {}
+  var trackerLabels = {
+    "never-seen": "No reports yet", "stopped": "Stopped", "stale": "No recent heartbeat",
+    "disconnected": "Desktop connection unavailable", "sleeping": "Sleeping",
+    "locked": "Session locked", "idle": "Idle", "reporting": "Reporting"
+  }
+  var browserLabels = {
+    "disabled": "Disabled in config", "never-seen": "No reports yet",
+    "stale": "No recent reports", "reporting": "Reporting"
+  }
+  function lastReport(timestamp) {
+    return timestamp === null || timestamp === undefined ? "No report recorded."
+      : "Last report: " + new Date(timestamp * 1000).toLocaleString() + "."
+  }
+  return {
+    tracker: trackerLabels[report.tracker] || "Unknown",
+    trackerDetail: lastReport(report.last_heartbeat_at)
+      + (["idle", "locked", "sleeping"].indexOf(report.tracker) >= 0 ? " This time is not counted as focus." : ""),
+    browser: browserLabels[report.browser] || "Unknown",
+    browserDetail: report.browser === "disabled" ? "Website reporting is turned off in privacy settings."
+      : lastReport(report.last_browser_report_at)
+        + (report.browser === "reporting" ? " A browser integration is sending updates."
+          : " The browser may be closed or its extension unavailable.")
+  }
+}
+
 function fmt(seconds) {
   seconds = Math.max(0, Math.floor(Number(seconds) || 0))
   if (seconds < 60) return seconds + "s"

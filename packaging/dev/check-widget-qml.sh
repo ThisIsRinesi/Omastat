@@ -10,7 +10,7 @@ fi
 
 # Quickshell uses Qt 6. The unversioned Arch tools may still point to Qt 5,
 # which silently rejects typed IPC methods.
-qml_bin_dir="/usr/lib/qt6/bin"
+qml_bin_dir="${OMASTAT_QT_BIN_DIR:-${QT_ROOT_DIR:-/usr/lib/qt6}/bin}"
 if [[ -x "$qml_bin_dir/qmllint" && -x "$qml_bin_dir/qmlformat" ]]; then
   qml_lint="$qml_bin_dir/qmllint"
   qml_format="$qml_bin_dir/qmlformat"
@@ -44,10 +44,10 @@ for qml_file in "${qml_files[@]}"; do
   "$qml_format" -n "$qml_file" >/dev/null
 done
 
-if command -v node >/dev/null 2>&1; then
-  node --check "$widget_dir/Model.js"
-  node "$repo_root/packaging/dev/test-model-js.mjs"
-  node "$repo_root/packaging/dev/test-widget-controller.mjs"
-  node "$repo_root/packaging/dev/test-widget-motion.mjs"
-  node "$repo_root/packaging/dev/test-browser-extension.mjs"
-fi
+command -v node >/dev/null 2>&1 || { echo 'missing required tool: node' >&2; exit 1; }
+node --check "$widget_dir/Model.js"
+node "$repo_root/packaging/dev/test-model-js.mjs"
+node "$repo_root/packaging/dev/test-widget-controller.mjs"
+node "$repo_root/packaging/dev/test-widget-motion.mjs"
+node "$repo_root/packaging/dev/test-tracking-status.mjs"
+node "$repo_root/packaging/dev/test-browser-extension.mjs"

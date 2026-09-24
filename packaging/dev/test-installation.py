@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise installation in a filesystem namespace with fake Cargo and desktop IPC."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,7 +9,7 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
-OMARCHY_BIN = Path("/usr/share/omarchy/bin")
+OMARCHY_BIN = Path(os.environ.get('OMASTAT_TEST_OMARCHY_BIN', '/usr/share/omarchy/bin')).resolve()
 USER_HOME = Path.home()
 MOCK = r'''#!/usr/bin/python3
 import json, os, pathlib, subprocess, sys
@@ -65,7 +66,7 @@ elif name == 'omarchy':
     elif args[:2] in [['plugin', 'remove'], ['plugin', 'update']]:
         # Exercise Omarchy's actual lifecycle commands, with only desktop IPC mocked.
         save()
-        sys.exit(subprocess.run(['/usr/share/omarchy/bin/omarchy-plugin-' + args[1]] + args[2:]).returncode)
+        sys.exit(subprocess.run([os.environ['OMASTAT_TEST_OMARCHY_BIN'] + '/omarchy-plugin-' + args[1]] + args[2:]).returncode)
 save()
 '''
 
@@ -80,6 +81,8 @@ class InstallationTests(unittest.TestCase):
         self.bin.mkdir()
         self.source = self.root / 'repo'
         self.source.mkdir()
+        self.omarchy_bin = self.root / 'omarchy-bin'
+        self.omarchy_bin.mkdir()
         self.state = self.root / 'state.json'
         self.state.write_text('{}')
         for name in ['cargo', 'systemctl', 'omarchy', 'omarchy-shell']:
@@ -106,10 +109,12 @@ class InstallationTests(unittest.TestCase):
             'bwrap', '--die-with-parent', '--unshare-all', '--ro-bind', '/', '/',
             '--dev', '/dev', '--proc', '/proc',
             '--bind', str(self.root), str(self.root),
+            '--ro-bind', str(OMARCHY_BIN), str(self.omarchy_bin),
             '--bind', str(self.home), str(USER_HOME),
             '--ro-bind', str(REPO), str(self.source), '--chdir', str(self.source),
-            '--setenv', 'PATH', str(self.bin) + ':' + str(OMARCHY_BIN) + ':/usr/bin',
+            '--setenv', 'PATH', str(self.bin) + ':' + str(self.omarchy_bin) + ':/usr/bin',
             '--setenv', 'OMASTAT_TEST_STATE', str(self.state),
+            '--setenv', 'OMASTAT_TEST_OMARCHY_BIN', str(self.omarchy_bin),
         ]
         for variable in ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_BIN_HOME', 'CARGO_HOME', 'CARGO_INSTALL_ROOT']:
             command += ['--unsetenv', variable]

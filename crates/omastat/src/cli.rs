@@ -156,6 +156,8 @@ pub enum Commands {
     NativeHost,
     /// Check environment, IPC, config, and storage paths.
     Doctor,
+    /// Show current tracker and browser reporting status as JSON.
+    TrackingStatus,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

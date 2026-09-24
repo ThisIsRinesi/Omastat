@@ -397,7 +397,7 @@ Ui.Panel {
               objectName: "appearanceSettingsButton"
               text: "Settings"
               checked: root.appearanceOpen
-              Accessible.name: "Dashboard appearance settings"
+              Accessible.name: "Dashboard settings"
               onClicked: {
                 root.appearanceOpen = !root.appearanceOpen
                 if (root.appearanceOpen) Qt.callLater(function() { richGraphsToggle.forceActiveFocus() })
@@ -475,6 +475,14 @@ Ui.Panel {
               label: "Dynamic Island"; detail: "Use the black island presentation"
               value: root.dynamicIslandStyle
               onRequested: function(nextValue) { root.setAppearance("dynamicIslandStyle", nextValue) }
+            }
+            TrackingStatus {
+              Layout.fillWidth: true
+              Layout.topMargin: Style.space(8)
+              active: root.opened && root.appearanceOpen
+              foreground: root.foreground
+              dim: root.dim
+              fontFamily: root.fontFamily
             }
           }
         }

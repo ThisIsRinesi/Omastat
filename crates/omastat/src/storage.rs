@@ -3,12 +3,14 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::Serialize;
+mod tracking_status;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+pub use tracking_status::TrackingStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
