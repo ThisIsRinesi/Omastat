@@ -4,7 +4,7 @@ Local app and website activity tracking for **Arch Linux, Hyprland, and Omarchy
 Quattro**. Open the bar widget to see where your time went, when you were active,
 and which habits keep showing up. No timers, accounts, or cloud service.
 
-![Week of September 7: app usage and rich graphs on the left, personal observations and recurring habits on the right](assets/screenshots/widget-week.png)
+![Day view: app breakdown and busiest-hours clock, activity timeline with background audio, and personal insights](assets/screenshots/widget-day.png)
 
 - Browse a day, week, month, year, or your full history.
 - Select an app or website to see its usage, visits, and patterns.
@@ -12,15 +12,18 @@ and which habits keep showing up. No timers, accounts, or cloud service.
 - Click an insight to see **How we know**, then return to the observations.
 
 <details>
-<summary>Month and day views</summary>
+<summary>Week, month, and year views</summary>
 
-![September 2026: daily activity, calendar, and recurring habits](assets/screenshots/widget-month.png)
+![Week view: daily time, multitasking, activity browsing, and hourly patterns](assets/screenshots/widget-week.png)
 
-![September 12, 2026: app breakdown, hour-by-hour activity, and insights](assets/screenshots/widget-day.png)
+![Month view: daily trends, calendar, and recurring habits](assets/screenshots/widget-month.png)
+
+![Year view: weekly trends, calendar weeks, and monthly totals](assets/screenshots/widget-year.png)
 
 </details>
 
-*Screenshots captured September 12, 2026, using real activity data.*
+*Captured September 24, 2026, using real activity data, Rich graphs, Wide (4K),
+and Dynamic Island appearance.*
 
 ## Install
 
