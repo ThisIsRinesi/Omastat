@@ -53,3 +53,24 @@ invalid JSON clear previously successful status and display an unavailable
 message. A missing or incompatible database also appears as unavailable; use
 `omastat doctor` for detailed diagnostics. Current status is independent of the
 historical period selected in the dashboard.
+
+## Dashboard layout audit
+
+On a machine with Quickshell, run:
+
+```sh
+python3 packaging/dev/test-widget-layout.py --output /tmp/omastat-layout-audit
+```
+
+This separate offscreen audit renders the production panel across five lenses,
+four widths (380, 760, 1160, and 2000), three appearances, and seven states:
+populated, empty, selected website, loading, error, Settings, and insight evidence.
+The 420 cases check text and control bounds, a usable scroll viewport, Settings
+inside the scroller, and empty support columns. Screenshots include every
+populated layout and compact Settings. Full-content images have transparency.
+
+The fixtures supply synthetic activity, style tokens, a shell lifecycle, and a
+window host; the tracking-status process receives synthetic JSON. The audit
+never reads the activity database or loads user plugins. Live bar positioning,
+compositor focus/dismissal, theme scaling, and Notchbar embedding still require
+separate desktop review. The standard CI suite does not require Quickshell.

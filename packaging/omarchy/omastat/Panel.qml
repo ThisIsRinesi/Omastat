@@ -186,7 +186,7 @@ Ui.Panel {
   readonly property bool expansive: panel.contentWidth >= Style.space(1500)
   readonly property bool wide: panel.contentWidth >= Style.space(900)
   readonly property bool calendarLens: selectedLens === "month" || selectedLens === "year"
-  readonly property bool supportRailVisible: expansive && (hasInsightContent || calendarLens || selectedLens === "day")
+  readonly property bool supportRailVisible: expansive && (hasInsightContent || calendarLens)
   readonly property bool selected: selectedActivityKey.length > 0
   readonly property var detail: selected ? (activityDetail || {}) : activityAnalytics
   readonly property var activityMetrics: Model.activityMetricValues(activityDetail, detailRunning, detailError)
@@ -381,9 +381,13 @@ Ui.Panel {
             spacing: Style.space(3)
             Label { Layout.fillWidth: true; text: root.periodLabel + (root.selectedOffset === 0 && root.selectedLens !== "day" && root.selectedLens !== "life" ? " to date" : ""); font.pixelSize: Style.font.title * 1.2; font.bold: true }
           }
-          RowLayout {
+          GridLayout {
+            Layout.fillWidth: true
+            Layout.preferredWidth: Style.space(360)
             Layout.alignment: Qt.AlignRight
-            spacing: Style.space(4)
+            columns: width < Style.space(340) ? 3 : 5
+            columnSpacing: Style.space(4)
+            rowSpacing: Style.space(4)
             Action {
               visible: root.selectedOffset < 0 && root.selectedLens !== "life"
               text: root.selectedLens === "day" ? "Today" : "This " + root.selectedLens
@@ -400,7 +404,10 @@ Ui.Panel {
               Accessible.name: "Dashboard settings"
               onClicked: {
                 root.appearanceOpen = !root.appearanceOpen
-                if (root.appearanceOpen) Qt.callLater(function() { richGraphsToggle.forceActiveFocus() })
+                if (root.appearanceOpen) {
+                  scroll.contentY = 0
+                  Qt.callLater(function() { richGraphsToggle.forceActiveFocus() })
+                }
               }
             }
             Action {
@@ -414,75 +421,6 @@ Ui.Panel {
               Accessible.description: root.refreshRunning ? "Refreshing activity" : ""
               onClicked: root.refresh()
               TextMetrics { id: refreshTextMetrics; font: refreshAction.contentItem.font; text: "Refreshing…" }
-            }
-          }
-        }
-        Rectangle {
-          objectName: "appearanceSettings"
-          Layout.fillWidth: true
-          implicitHeight: appearanceBody.implicitHeight + Style.space(24)
-          visible: root.appearanceOpen
-          color: root.fill
-          radius: Style.space(16)
-          border.width: 1; border.color: root.line
-          ColumnLayout {
-            id: appearanceBody
-            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-            anchors.margins: Style.space(12)
-            spacing: Style.space(4)
-            RowLayout {
-              Layout.fillWidth: true
-              Label { text: "Appearance"; font.bold: true; Layout.fillWidth: true }
-              Action { text: "Done"; onClicked: { root.appearanceOpen = false; appearanceButton.forceActiveFocus() } }
-            }
-            Label { text: "Dashboard width"; font.bold: true }
-            RowLayout {
-              Layout.fillWidth: true
-              spacing: Style.space(4)
-              Repeater {
-                model: [{ label: "Narrow", size: 760 }, { label: "Normal", size: 1160 }, { label: "Wide (4K)", size: 2000 }]
-                Action {
-                  required property var modelData
-                  Layout.fillWidth: true
-                  text: modelData.label
-                  checked: modelData.size === 760 ? root.requestedWidth < 900
-                    : modelData.size === 1160 ? root.requestedWidth >= 900 && root.requestedWidth < 1500
-                    : root.requestedWidth >= 1500
-                  Accessible.name: modelData.label + " dashboard width"
-                  onClicked: root.setAppearance("panelWidth", modelData.size)
-                }
-              }
-            }
-            Label {
-              Layout.fillWidth: true
-              text: "Wide adds a dedicated chart column. Width always fits the available screen."
-              color: root.dim
-              font.pixelSize: Style.font.caption
-            }
-            SettingToggle {
-              id: richGraphsToggle
-              objectName: "richGraphsToggle"
-              label: "Rich graphs"; detail: "Soft gradients and curved trends"
-              value: root.richGraphs
-              onRequested: function(nextValue) { root.setAppearance("richGraphs", nextValue) }
-            }
-            SettingToggle {
-              label: "Reduce motion"; detail: "Show updates without animated transitions"
-              value: root.reducedMotion
-              onRequested: function(nextValue) { root.setAppearance("reduceMotion", nextValue) }
-            }
-            SettingToggle {
-              label: "Dynamic Island"; detail: "Use the black island presentation"
-              value: root.dynamicIslandStyle
-              onRequested: function(nextValue) { root.setAppearance("dynamicIslandStyle", nextValue) }
-            }
-            TrackingStatus {
-              Layout.fillWidth: true
-              Layout.topMargin: Style.space(8)
-              active: root.opened && root.appearanceOpen
-              foreground: root.foreground
-              dim: root.dim
-              fontFamily: root.fontFamily
             }
           }
         }
@@ -575,6 +513,75 @@ Ui.Panel {
             NumberAnimation { id: dataReveal; target: body; property: "opacity"; from: root.richGraphs ? 0.96 : 0.88; to: 1; duration: root.motionDuration; easing.type: Easing.OutCubic }
             width: scroll.width - Style.space(12)
             spacing: Style.space(10)
+            Rectangle {
+              objectName: "appearanceSettings"
+              Layout.fillWidth: true
+              implicitHeight: appearanceBody.implicitHeight + Style.space(24)
+              visible: root.appearanceOpen
+              color: root.fill
+              radius: Style.space(16)
+              border.width: 1; border.color: root.line
+              ColumnLayout {
+                id: appearanceBody
+                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                anchors.margins: Style.space(12)
+                spacing: Style.space(4)
+                RowLayout {
+                  Layout.fillWidth: true
+                  Label { text: "Appearance"; font.bold: true; Layout.fillWidth: true }
+                  Action { text: "Done"; onClicked: { root.appearanceOpen = false; appearanceButton.forceActiveFocus() } }
+                }
+                Label { text: "Dashboard width"; font.bold: true }
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(4)
+                  Repeater {
+                    model: [{ label: "Narrow", size: 760 }, { label: "Normal", size: 1160 }, { label: "Wide (4K)", size: 2000 }]
+                    Action {
+                      required property var modelData
+                      Layout.fillWidth: true
+                      text: modelData.label
+                      checked: modelData.size === 760 ? root.requestedWidth < 900
+                        : modelData.size === 1160 ? root.requestedWidth >= 900 && root.requestedWidth < 1500
+                        : root.requestedWidth >= 1500
+                      Accessible.name: modelData.label + " dashboard width"
+                      onClicked: root.setAppearance("panelWidth", modelData.size)
+                    }
+                  }
+                }
+                Label {
+                  Layout.fillWidth: true
+                  text: "Wide adds a dedicated chart column. Width always fits the available screen."
+                  color: root.dim
+                  font.pixelSize: Style.font.caption
+                }
+                SettingToggle {
+                  id: richGraphsToggle
+                  objectName: "richGraphsToggle"
+                  label: "Rich graphs"; detail: "Soft gradients and curved trends"
+                  value: root.richGraphs
+                  onRequested: function(nextValue) { root.setAppearance("richGraphs", nextValue) }
+                }
+                SettingToggle {
+                  label: "Reduce motion"; detail: "Show updates without animated transitions"
+                  value: root.reducedMotion
+                  onRequested: function(nextValue) { root.setAppearance("reduceMotion", nextValue) }
+                }
+                SettingToggle {
+                  label: "Dynamic Island"; detail: "Use the black island presentation"
+                  value: root.dynamicIslandStyle
+                  onRequested: function(nextValue) { root.setAppearance("dynamicIslandStyle", nextValue) }
+                }
+                TrackingStatus {
+                  Layout.fillWidth: true
+                  Layout.topMargin: Style.space(8)
+                  active: root.opened && root.appearanceOpen
+                  foreground: root.foreground
+                  dim: root.dim
+                  fontFamily: root.fontFamily
+                }
+              }
+            }
             RowLayout {
               Layout.fillWidth: true
               Action { text: "All activity"; visible: root.selected; onClicked: root.selectActivity("", "") }
@@ -626,7 +633,7 @@ Ui.Panel {
                 Layout.row: 0
                 Layout.column: 1
                 Layout.fillWidth: true
-                Layout.preferredWidth: body.width * (root.expansive ? 0.50 : 0.64)
+                Layout.preferredWidth: body.width * (root.expansive ? (root.supportRailVisible ? 0.50 : 0.73) : 0.64)
                 Layout.alignment: Qt.AlignTop
                 rowSpacing: Style.space(12)
               }
@@ -1083,7 +1090,7 @@ Ui.Panel {
     color: root.foreground
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
-    wrapMode: Text.WordWrap
+    wrapMode: Text.Wrap
     textFormat: Text.PlainText
   }
   component Action: Controls.AbstractButton {
@@ -1108,6 +1115,7 @@ Ui.Panel {
     Layout.fillWidth: true
     implicitHeight: Math.max(Style.space(50), preferenceContent.implicitHeight + Style.space(12))
     activeFocusOnTab: true
+    onActiveFocusChanged: if (activeFocus) Qt.callLater(function() { root.revealControl(preference) })
     Accessible.role: Accessible.CheckBox
     Accessible.name: label
     Accessible.description: detail
@@ -2630,7 +2638,7 @@ Ui.Panel {
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       verticalAlignment: Text.AlignVCenter
-      wrapMode: Text.WordWrap
+      wrapMode: Text.Wrap
     }
   }
 
