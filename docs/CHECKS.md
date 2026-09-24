@@ -28,7 +28,7 @@ separate: lint checks cannot verify rendering or desktop integration.
 
 - Rust/Cargo with rustfmt and Clippy, plus a C compiler.
 - Bash, Node.js (CI uses 22), Python 3, Git, jq, ripgrep, and bubblewrap.
-- Qt 6 lint and format tools (CI pins 6.8.3; local validation also uses 6.11.2).
+- Qt 6 lint and format tools (CI pins 6.11.2, matching local validation).
   `OMASTAT_QT_BIN_DIR` can select their directory; otherwise `QT_ROOT_DIR/bin`,
   `/usr/lib/qt6/bin`, or the tools on PATH are used.
 - Omarchy Quattro's `omarchy-plugin-remove`, `omarchy-plugin-update`, and
