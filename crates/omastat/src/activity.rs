@@ -41,6 +41,7 @@ pub struct ActivityAnalytics {
     pub eligible_days: usize,
     pub activities: Vec<ActivityStats>,
     pub insights: Vec<Insight>,
+    pub predictions: Vec<Insight>,
     pub daily: Vec<ActivityDay>,
     pub heatmap: Vec<FocusHeatCell>,
     pub browser_domains_enabled: bool,
@@ -355,6 +356,11 @@ pub(crate) fn analyze_context(
         output.insights.extend(crate::routines::detect(
             &grid, kind, &key, &label, &intervals, &visits,
         ));
+        if baseline_end == Local::now().date_naive() {
+            output.predictions.extend(crate::routines::predict(
+                &grid, kind, &key, &label, &visits, end,
+            ));
+        }
     }
     output.activities.sort_by(|a, b| {
         b.focused_seconds
@@ -362,6 +368,43 @@ pub(crate) fn analyze_context(
             .then(a.key.cmp(&b.key))
     });
     crate::routines::rank(&mut output.insights);
+    output.predictions.retain(|item| {
+        item.supporting.activity_kind.as_deref() != Some("domain")
+            || context.domain_observation.covered(end - 120, end) >= 90
+    });
+    output.predictions.sort_by(|a, b| {
+        let a_recent = a
+            .supporting
+            .routine
+            .as_ref()
+            .is_some_and(|r| r.status == "recent");
+        let b_recent = b
+            .supporting
+            .routine
+            .as_ref()
+            .is_some_and(|r| r.status == "recent");
+        a_recent
+            .cmp(&b_recent)
+            .then(
+                b.supporting
+                    .occurrence_count
+                    .cmp(&a.supporting.occurrence_count),
+            )
+            .then(
+                a.supporting
+                    .expected_start
+                    .cmp(&b.supporting.expected_start),
+            )
+            .then(a.supporting.activity_key.cmp(&b.supporting.activity_key))
+    });
+    let mut seen_predictions = BTreeSet::new();
+    output.predictions.retain(|i| {
+        seen_predictions.insert((
+            i.supporting.activity_kind.clone(),
+            i.supporting.activity_key.clone(),
+        ))
+    });
+    output.predictions.truncate(2);
     if selector.is_none() {
         let mut seen = BTreeSet::new();
         let mut first = Vec::new();

@@ -66,6 +66,7 @@ pub struct UsageReport {
     pub daily: Vec<DayTotals>,
     pub heatmap: Vec<FocusHeatCell>,
     pub insights: Vec<Insight>,
+    pub predictions: Vec<Insight>,
     pub widget_insight: Option<WidgetInsight>,
 }
 
@@ -455,6 +456,31 @@ fn usage_report_with_rollups_for_period_with_days(
         None,
         false,
     )?;
+    let prediction_ready = period.query_end_ts - period.start_ts >= 120
+        && context
+            .observation
+            .covered(period.query_end_ts - 120, period.query_end_ts)
+            >= 90
+        && context
+            .pauses
+            .covered(period.query_end_ts - 120, period.query_end_ts)
+            == 0;
+    let predictions = if offset == 0 && prediction_ready {
+        activity_analytics
+            .predictions
+            .iter()
+            .filter(|item| {
+                item.supporting.activity_kind.as_deref() != Some("domain")
+                    || context
+                        .domain_observation
+                        .covered(period.query_end_ts - 120, period.query_end_ts)
+                        >= 90
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
     insights.splice(0..0, activity_analytics.insights.clone());
     let multitasking = storage.multitasking_from_metadata(
         period.start_ts,
@@ -478,6 +504,7 @@ fn usage_report_with_rollups_for_period_with_days(
     let widget_insight = widget_insight_for(&insights, generated_at);
 
     let report = UsageReport {
+        predictions,
         multitasking,
         activity_analytics,
         generated_at,
@@ -1242,6 +1269,7 @@ mod tests {
     #[test]
     fn insights_report_json_keeps_structured_payload_compact() {
         let usage = UsageReport {
+            predictions: vec![],
             activity_analytics: Default::default(),
             generated_at: 1234,
             query_start_ts: 1000,

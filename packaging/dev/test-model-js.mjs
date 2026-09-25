@@ -473,3 +473,29 @@ const visitEvidence = context.insightEvidence({supporting: {routine: {timing_bas
 assert.match(visitEvidence, /median recorded use per visit/);
 assert.match(visitEvidence, /Returns within five minutes/);
 assert.match(visitEvidence, /time away is excluded/);
+
+const prediction = {kind: 'upcoming-activity', supporting: {activity_kind: 'app', activity_key: 'spire', app_label: 'Slay the Spire 2', display_until: 300, routine: {status: 'established'}}};
+for (const tone of ['warm', 'concise', 'playful']) {
+  const title = context.predictionTitle(prediction, tone, '2026-09-25');
+  assert.match(title, /Slay the Spire 2/);
+  assert.equal(title, context.predictionTitle(prediction, tone, '2026-09-25'));
+}
+assert.equal(context.visiblePredictions([prediction], 299, 'app', 'spire').length, 1);
+assert.equal(context.visiblePredictions([prediction], 300, 'app', 'spire').length, 0);
+prediction.supporting.generated_at = 100;
+assert.equal(context.visiblePredictions([prediction], 221, 'app', 'spire').length, 0);
+assert.equal(context.visiblePredictions([prediction], 299, 'domain', 'spire').length, 0);
+prediction.supporting.routine.status = 'recent';
+assert.match(context.predictionTitle(prediction, 'warm', '2026-09-25'), /may|might|chance|could/i);
+assert.doesNotMatch(context.insightEvidence(prediction), /median recorded use per visit/);
+const orderedInsights = context.dashboardInsights([
+  {kind: 'app-routine', category: 'patterns', supporting: {activity_kind: 'app', activity_key: 'spire'}},
+  {kind: 'audio-companion', category: 'patterns', supporting: {activity_kind: 'app', activity_key: 'music'}},
+  {kind: 'stretch-trend', category: 'patterns', supporting: {activity_kind: 'app', activity_key: 'editor'}},
+], [prediction]);
+assert.equal(orderedInsights.length, 2);
+assert.equal(orderedInsights[0].kind, 'stretch-trend');
+const routineCard = {kind: 'app-routine', title: 'Spire, most evenings', supporting: {activity_kind: 'app', activity_key: 'spire', app_label: 'Spire'}};
+assert.equal(context.insightHeading(routineCard, 'warm', '2026-09-25'), routineCard.title);
+assert.match(context.insightHeading(routineCard, 'concise', '2026-09-25'), /Spire/);
+assert.match(context.insightHeading(routineCard, 'playful', '2026-09-25'), /Spire/);

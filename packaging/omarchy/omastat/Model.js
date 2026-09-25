@@ -1079,7 +1079,9 @@ function insightEvidence(item) {
   if (support.routine) {
     text += "\n\nThis happened on " + Number(support.occurrence_count || 0) + " of " + Number(support.eligible_count || 0) + " days with enough tracking."
     text += " Only time windows with at least 90% tracking are compared."
-    if (support.routine.timing_basis === "visit-start")
+    if (item.kind === "upcoming-activity")
+      text += " The suggestion appears near a repeated visit start and disappears after the window passes or the activity begins."
+    else if (support.routine.timing_basis === "visit-start")
       text += " The duration is the median recorded use per visit starting in this window. Returns within five minutes are grouped into a visit; time away is excluded. Visits may continue beyond the window."
     else
       text += " The duration is the median daily total inside the displayed time window, using matching days with at least five minutes of use. It combines visits and includes only the portion inside that window."
@@ -1105,6 +1107,27 @@ function widgetInsights(items) {
   }))
 }
 
+function dashboardInsights(items, predictions) {
+  var keys = {}
+  for (var i = 0; i < (predictions || []).length; i++) {
+    var p = predictions[i]
+    var ps = p.supporting || {}
+    keys[String(ps.activity_kind) + ":" + String(ps.activity_key)] = true
+  }
+  var priority = {"stretch-trend": 0, "app-handoff": 1, "app-routine": 2, "audio-companion": 3,
+    "same-weekday-pace": 4, "period-comparison": 5, "day-comparison": 6}
+  var ranked = widgetInsights(items).filter(function(item) {
+    var s = item.supporting || {}
+    return item.kind !== "app-routine" || !keys[String(s.activity_kind) + ":" + String(s.activity_key)]
+  }).map(function(item, index) { return {item: item, index: index} })
+  ranked.sort(function(a, b) {
+    var pa = Object.prototype.hasOwnProperty.call(priority, a.item.kind) ? priority[a.item.kind] : 7
+    var pb = Object.prototype.hasOwnProperty.call(priority, b.item.kind) ? priority[b.item.kind] : 7
+    return pa - pb || a.index - b.index
+  })
+  return ranked.map(function(entry) { return entry.item })
+}
+
 function insightQualifier(item) {
   var labels = { "stretch-trend": "Recent change · Completed days", "app-handoff": "Recurring sequence · Last 28 completed days", "audio-companion": "This period · Audio overlap" }
   if (item && labels[item.kind]) return labels[item.kind]
@@ -1123,6 +1146,61 @@ function insightPresentation(item) {
     activityKind: String(support.activity_kind || "app"),
     activityLabel: String(support.app_label || support.activity_key || support.app_class || "activity")
   }
+}
+
+function predictionTitle(item, tone, date) {
+  var s = item.supporting || {}, name = String(s.app_label || s.activity_key || "this activity")
+  var recent = s.routine && s.routine.status === "recent"
+  var phrases = recent ? {
+    warm: ["There's a chance you might open {name} soon", "You may find your way to {name} soon", "{name} could be part of your evening", "A visit to {name} may be coming up", "You might return to {name} soon", "{name} has been showing up around now", "A little time with {name} may be ahead", "This could be a time for {name}", "{name} might fit into this part of your day", "Your recent rhythm may bring you to {name}", "You may spend some time with {name} soon", "{name} could be next"],
+    concise: ["You might open {name} soon", "{name} may be coming up", "Possible visit to {name}", "{name} could be next", "You may return to {name}", "A visit to {name} is possible", "{name} may start soon", "{name} might be near", "You could open {name}", "Possible {name} time", "{name} may be ahead", "You might use {name}"],
+    playful: ["Could {name} be next?", "Maybe a little {name} soon?", "{name} might make an appearance", "A visit to {name} could be in the cards", "Your day might have room for {name}", "Is {name} around the corner?", "Perhaps {name} is up next", "{name} may be calling", "A little {name} could be ahead", "Might {name} turn up soon?", "The day may bring you back to {name}", "Maybe it's time for {name} soon"]
+  } : {
+    warm: ["{name} might be coming up", "You often return to {name} around now", "{name} may be part of your next hour", "This is often your time for {name}", "You may be heading toward {name}", "{name} usually shows up around now", "A familiar time for {name} is near", "You often open {name} soon", "{name} may be just ahead", "Your usual {name} time is coming up", "You might return to {name} shortly", "A visit to {name} may be near"],
+    concise: ["{name} may be coming up", "You may open {name} soon", "Usual {name} time is near", "{name} is often next", "You often start {name} soon", "{name} usually starts around now", "You may return to {name}", "{name} may start soon", "Your {name} window is near", "A {name} visit may be ahead", "You often use {name} soon", "{name} could be next"],
+    playful: ["Another visit to {name} could be around the corner", "Could {name} be next?", "This is often when {name} joins the day", "A familiar {name} moment may be near", "{name} might make an appearance", "Your {name} hour is drawing near", "Is {name} on the horizon?", "The day often turns toward {name} now", "Perhaps {name} is up next", "{name} tends to show up about now", "A little {name} may be ahead", "The usual {name} time may be close"]
+  }
+  var list = phrases[tone] || phrases.warm
+  var identity = String(s.activity_kind || "") + ":" + String(s.activity_key || "") + ":" + date
+  var hash = 0
+  for (var i = 0; i < identity.length; i++) hash = (hash * 31 + identity.charCodeAt(i)) >>> 0
+  return list[hash % list.length].replace("{name}", name)
+}
+
+function insightHeading(item, tone, date) {
+  if (item.kind === "upcoming-activity") return predictionTitle(item, tone, date)
+  if (tone === "warm") return String(item.title || "Insight")
+  var s = item.supporting || {}, name = String(s.app_label || s.activity_key || "this activity")
+  var templates = {
+    "app-routine": {
+      concise: ["A regular time for {name}", "{name} shows up regularly", "Your {name} rhythm", "A familiar {name} time", "You often use {name}", "{name} has a pattern"],
+      playful: ["{name} keeps finding its way into your day", "A familiar moment for {name}", "{name} has found a place in your routine", "Your day often makes room for {name}", "{name} likes this part of your day", "You and {name} have a rhythm"]
+    },
+    "audio-companion": {
+      concise: ["{name} played in the background", "Background audio from {name}", "{name} alongside other apps", "You listened to {name} while active", "{name} accompanied this period", "Audio from {name} overlapped your activity"],
+      playful: ["{name} kept you company", "{name} was along for the ride", "A little {name} in the background", "{name} played alongside your day", "{name} stayed in the mix", "Your day had a {name} soundtrack"]
+    }
+  }
+  var tentativeRoutine = s.routine && s.routine.status === "recent" || item.kind === "app-routine" && item.confidence === "low"
+  var tentative = {
+    concise: ["A possible {name} pattern", "You may be using {name} more regularly", "{name} may be finding a rhythm", "A recent pattern with {name}", "{name} could be settling into a routine", "You might be returning to {name}"],
+    playful: ["Could {name} be finding its place?", "{name} may be making a habit of showing up", "A little {name} rhythm might be forming", "Perhaps {name} is settling in", "You and {name} might be finding a groove", "{name} could be making a regular appearance"]
+  }
+  var choices = item.kind === "app-routine" && tentativeRoutine ? tentative[tone] : templates[item.kind] && templates[item.kind][tone]
+  if (!choices) return String(item.title || "Insight")
+  var key = String(s.activity_kind || "") + ":" + String(s.activity_key || "") + ":" + String(date || "") + ":" + item.kind
+  var hash = 0
+  for (var i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0
+  return choices[hash % choices.length].replace("{name}", name)
+}
+
+function visiblePredictions(items, nowSeconds, selectedKind, selectedKey) {
+  return (items || []).filter(function(item) {
+    var s = item.supporting || {}
+    return Number(s.display_until || 0) > nowSeconds
+      && (!s.generated_at || nowSeconds - Number(s.generated_at) <= 120)
+      && (!selectedKey || s.activity_kind === selectedKind && s.activity_key === selectedKey)
+  }).slice(0, 2)
 }
 
 // Only comparable days appear here; missing tracking is never shown as a miss.

@@ -31,7 +31,8 @@
       "dynamicIslandStyle": false,
       "panelWidth": 1160,
       "richGraphs": true,
-      "reduceMotion": false
+      "reduceMotion": false,
+      "insightTone": 0
     },
     "schema": [
       {
@@ -75,6 +76,15 @@
         "max": 2000,
         "step": 20,
         "defaultValue": 1160
+      },
+      {
+        "key": "insightTone",
+        "type": "integer",
+        "label": "Insight tone (0 Warm, 1 Concise, 2 Playful)",
+        "min": 0,
+        "max": 2,
+        "step": 1,
+        "defaultValue": 0
       }
     ]
   }

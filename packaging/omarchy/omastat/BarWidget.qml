@@ -125,6 +125,7 @@ Ui.BarWidget {
   property var browserActivity: []
   property var summaryTopApp: null
   property var reportInsights: []
+  property var reportPredictions: []
   property var widgetInsight: null
   property var daily: []
   property var heatmap: []
@@ -414,6 +415,7 @@ Ui.BarWidget {
     browserActivity = report.browserActivity
     summaryTopApp = null
     reportInsights = report.insights
+    reportPredictions = report.predictions || []
     widgetInsight = report.widgetInsight
     daily = report.daily
     heatmap = report.heatmap
@@ -543,6 +545,7 @@ Ui.BarWidget {
     if ("selectedOffset" in target && target.selectedOffset !== root.selectedOffset) target.selectedOffset = root.selectedOffset
     if ("refreshRunning" in target && target.refreshRunning !== root.refreshRunning) target.refreshRunning = root.refreshRunning
     if (target.activityAnalytics !== root.activityAnalytics) target.activityAnalytics = root.activityAnalytics
+    if (target.reportPredictions !== root.reportPredictions) target.reportPredictions = root.reportPredictions
     if (target.activityDetail !== root.activityDetail) target.activityDetail = root.activityDetail
     if (target.selectedActivityKind !== root.selectedActivityKind) target.selectedActivityKind = root.selectedActivityKind
     if (target.selectedActivityKey !== root.selectedActivityKey) target.selectedActivityKey = root.selectedActivityKey
@@ -604,7 +607,7 @@ Ui.BarWidget {
     var cached = cachedReport(currentKey)
     if (cached) applyReport(cached, false)
     var ttl = selectedOffset === 0 ? summaryTtlMs : fullReportTtlMs
-    if (!reportIsFresh(currentKey, ttl)) refresh(true)
+    if (!reportIsFresh(currentKey, selectedOffset === 0 ? Math.min(ttl, 60000) : ttl)) refresh(true)
     else { refreshQueued = false; refreshQueuedFull = false }
     injectPanel(true)
   }
@@ -616,12 +619,13 @@ Ui.BarWidget {
   }
 
   function setAppearanceSetting(name, value) {
-    if (["iconOnly", "richGraphs", "reduceMotion", "dynamicIslandStyle", "panelWidth"].indexOf(name) < 0) return
+    if (["iconOnly", "richGraphs", "reduceMotion", "dynamicIslandStyle", "panelWidth", "insightTone"].indexOf(name) < 0) return
     var entry = { id: root.moduleName }
     var current = root.settings || {}
     for (var key in current) if (key !== "id" && key !== "overviewCommand") entry[key] = current[key]
     if (name === "panelWidth" && [760, 1160, 2000].indexOf(value) < 0) return
-    entry[name] = name === "panelWidth" ? value : value === true
+    if (name === "insightTone" && [0, 1, 2].indexOf(value) < 0) return
+    entry[name] = name === "panelWidth" || name === "insightTone" ? value : value === true
     root.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
@@ -689,6 +693,7 @@ Ui.BarWidget {
         apps: [],
         browserActivity: [],
         insights: [],
+        predictions: [],
         widgetInsight: null,
         daily: [],
         heatmap: [],
@@ -716,6 +721,7 @@ Ui.BarWidget {
       apps: Array.isArray(object.apps) ? normalizeApps(object.apps) : [],
       browserActivity: Array.isArray(object.browser_activity) ? normalizeBrowserActivity(object.browser_activity) : [],
       insights: Array.isArray(object.insights) ? normalizeInsights(object.insights) : [],
+      predictions: Array.isArray(object.predictions) ? normalizeInsights(object.predictions) : [],
       widgetInsight: object.widget_insight && typeof object.widget_insight === "object" ? normalizeWidgetInsight(object.widget_insight) : null,
       daily: Array.isArray(object.daily) ? normalizeDaily(object.daily) : [],
       heatmap: Array.isArray(object.heatmap) ? normalizeHeatmap(object.heatmap) : [],

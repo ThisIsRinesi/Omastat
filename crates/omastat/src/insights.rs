@@ -76,6 +76,7 @@ pub struct Insight {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InsightKind {
+    UpcomingActivity,
     TopApp,
     StretchTrend,
     AppHandoff,
@@ -171,6 +172,14 @@ pub struct TrendComparison {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InsightSupport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_until: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_start: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comparison: Option<TrendComparison>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

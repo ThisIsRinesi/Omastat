@@ -9,6 +9,7 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone, Timelike};
+use std::collections::BTreeSet;
 
 const DAYS: usize = 56;
 const BINS: usize = 96;
@@ -221,6 +222,244 @@ fn typical_visit(visits: &[(usize, i64)], window: &Window, matching: u64) -> i64
     }
     durations.sort_unstable();
     analytics::median(&durations)
+}
+
+/// A suggestion is based on observed visit starts, never merely on time spent open.
+pub(crate) fn predict(
+    calendar: &Calendar,
+    kind: &str,
+    key: &str,
+    label: &str,
+    visits: &[Visit],
+    now: i64,
+) -> Vec<Insight> {
+    let Some(local_now) = Local.timestamp_opt(now, 0).single() else {
+        return Vec::new();
+    };
+    let today = local_now.date_naive();
+    if today != calendar.end {
+        return Vec::new();
+    }
+    let mut starts = vec![Vec::<i64>::new(); SIZE];
+    for visit in visits {
+        if !visit.known_start
+            || visit.seconds < 300
+            || visit.start < calendar.from
+            || visit.start >= calendar.to
+        {
+            continue;
+        }
+        let Some(at) = Local.timestamp_opt(visit.start, 0).single() else {
+            continue;
+        };
+        let day = (at.date_naive() - calendar.start).num_days();
+        if !(0..DAYS as i64).contains(&day) {
+            continue;
+        }
+        let bin = at.hour() as usize * 4 + at.minute() as usize / 15;
+        starts[day as usize * BINS + bin].push(visit.start);
+    }
+    let mut candidates = Vec::new();
+    // Only a one-hour window can justify an imminent start.
+    for window in calendar.windows.iter().filter(|w| w.width == 4) {
+        let eligible = if kind == "domain" {
+            window.domain
+        } else {
+            window.app
+        };
+        let start_minute = window.start as u32 * 15;
+        let anchor_day = if local_now.hour() == 0 && start_minute >= 23 * 60 {
+            today - Duration::days(1)
+        } else if local_now.hour() == 23 && start_minute < 60 {
+            today + Duration::days(1)
+        } else {
+            today
+        };
+        let weekday = anchor_day.weekday().num_days_from_monday() as usize;
+        let naive_start = anchor_day
+            .and_hms_opt(start_minute / 60, start_minute % 60, 0)
+            .unwrap();
+        let naive_end = naive_start + Duration::hours(1);
+        // Ambiguous or missing local times should not become a precise prediction.
+        let (Some(begin), Some(end)) = (
+            Local.from_local_datetime(&naive_start).single(),
+            Local.from_local_datetime(&naive_end).single(),
+        ) else {
+            continue;
+        };
+        if now < begin.timestamp() - 1800 || now >= end.timestamp() {
+            continue;
+        }
+        if visits.iter().any(|v| {
+            v.start <= now && v.end > begin.timestamp() - 1800 && v.start < end.timestamp()
+        }) {
+            continue;
+        }
+        for cohort in [3 + weekday, if weekday < 5 { 1 } else { 2 }, 0] {
+            let cohort_mask = eligible & calendar.masks[cohort];
+            for (recent, mask) in [(false, cohort_mask), (true, cohort_mask & (!0u64 << 42))] {
+                if recent && cohort >= 3 {
+                    continue;
+                }
+                let sample = mask.count_ones() as usize;
+                let minimum = if cohort >= 3 { 5 } else { 7 };
+                if sample < minimum {
+                    continue;
+                }
+                let mut matches = 0u64;
+                let mut stamps = Vec::new();
+                for day in 0..DAYS {
+                    if mask & (1u64 << day) == 0 {
+                        continue;
+                    }
+                    let found = (window.start..window.start + window.width)
+                        .flat_map(|bin| starts[day * BINS + bin].iter().copied())
+                        .collect::<Vec<_>>();
+                    if !found.is_empty() {
+                        matches |= 1u64 << day;
+                        stamps.extend(found);
+                    }
+                }
+                let count = matches.count_ones() as usize;
+                let required = if cohort >= 3 { 4 } else { 5 };
+                if count < required || count * 100 < sample * if recent { 60 } else { 70 } {
+                    continue;
+                }
+                let all_starts: usize = (0..DAYS)
+                    .filter(|day| mask & (1u64 << day) != 0)
+                    .map(|day| {
+                        starts[day * BINS..(day + 1) * BINS]
+                            .iter()
+                            .map(Vec::len)
+                            .sum::<usize>()
+                    })
+                    .sum();
+                if stamps.len() * 48 < all_starts * 3 {
+                    continue;
+                }
+                if !recent {
+                    let weeks = (0..DAYS)
+                        .filter(|d| matches & (1u64 << d) != 0)
+                        .map(|d| d / 7)
+                        .collect::<BTreeSet<_>>();
+                    if weeks.len() < 3 {
+                        continue;
+                    }
+                }
+                let last_three = (0..DAYS)
+                    .rev()
+                    .filter(|d| mask & (1u64 << d) != 0)
+                    .take(3)
+                    .collect::<Vec<_>>();
+                if last_three
+                    .iter()
+                    .filter(|d| matches & (1u64 << **d) != 0)
+                    .count()
+                    < 2
+                {
+                    continue;
+                }
+                let minutes = stamps
+                    .iter()
+                    .filter_map(|s| Local.timestamp_opt(*s, 0).single())
+                    .map(|at| {
+                        let minute = at.hour() * 60 + at.minute();
+                        if minute < start_minute {
+                            minute + 1440
+                        } else {
+                            minute
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut minutes = minutes;
+                minutes.sort_unstable();
+                let middle = minutes[minutes.len() / 2] % 1440;
+                let rounded = ((middle + 7) / 15 * 15) % 1440;
+                let time_label = analytics::clock_label(rounded);
+                let display_time = if minutes.last().unwrap() - minutes[0] <= 30 {
+                    format!("Around {time_label}")
+                } else {
+                    analytics::clock_range(start_minute, start_minute + 60)
+                };
+                let expected_day = if middle < start_minute {
+                    anchor_day + Duration::days(1)
+                } else {
+                    anchor_day
+                };
+                let expected = expected_day
+                    .and_hms_opt(middle / 60, middle % 60, 0)
+                    .and_then(|naive| Local.from_local_datetime(&naive).single())
+                    .map(|at| at.timestamp())
+                    .unwrap_or(begin.timestamp());
+                let status = if recent { "recent" } else { "established" };
+                let eligible_dates = calendar.dates(mask);
+                candidates.push(Insight {
+                    kind: InsightKind::UpcomingActivity,
+                    category: InsightCategory::Patterns,
+                    tone: InsightTone::Info,
+                    title: format!("{label} might be coming up"),
+                    value: display_time,
+                    explanation: format!("{} started {label} around this time on {count} of {sample} tracked {}.", if recent { "Recently, you" } else { "You" }, if cohort >= 3 { "weeks" } else { "days" }),
+                    confidence: if recent { InsightConfidence::Low } else { InsightConfidence::High },
+                    evidence: InsightEvidence { data_points: sample, minimum_data_points: minimum, observed_focus_seconds: 0, observed_open_seconds: 0 },
+                    supporting: InsightSupport {
+                        prediction_id: Some(format!("{kind}:{key}:{anchor_day}:{start_minute}")),
+                        generated_at: Some(now),
+                        activity_kind: Some(kind.into()), activity_key: Some(key.into()), app_label: Some(label.into()),
+                        occurrence_count: Some(count), eligible_count: Some(sample), matching_dates: Some(calendar.dates(matches)),
+                        period_start_date: eligible_dates.first().cloned(), period_end_date: eligible_dates.last().cloned(),
+                        display_until: Some(end.timestamp()), expected_start: Some(expected),
+                        routine: Some(RoutineEvidence { cadence: cadence(cohort), status: status.into(), start_minute,
+                            end_minute: (start_minute + 60) % 1440, timing_basis: "visit-start".into(), eligible_dates,
+                            visit_start_window: None }),
+                        method: Some("Known foreground visits of at least five minutes, on days with at least 90% tracking of this hour. The displayed frequency counts tracked opportunities, not the probability of opening the app today. Recent matching starts must remain present.".into()),
+                        ..Default::default()
+                    },
+                });
+                break;
+            }
+        }
+    }
+    candidates.sort_by(|a, b| {
+        let ar = a
+            .supporting
+            .routine
+            .as_ref()
+            .is_some_and(|r| r.status == "recent");
+        let br = b
+            .supporting
+            .routine
+            .as_ref()
+            .is_some_and(|r| r.status == "recent");
+        ar.cmp(&br)
+            .then(
+                b.supporting
+                    .occurrence_count
+                    .cmp(&a.supporting.occurrence_count),
+            )
+            .then_with(|| {
+                let distance = |item: &Insight| {
+                    let routine = item.supporting.routine.as_ref().unwrap();
+                    let median = item
+                        .supporting
+                        .expected_start
+                        .and_then(|ts| Local.timestamp_opt(ts, 0).single())
+                        .map(|at| at.hour() * 60 + at.minute())
+                        .unwrap_or(routine.start_minute);
+                    let midpoint = (routine.start_minute + 30) % 1440;
+                    let gap = (i64::from(midpoint) - i64::from(median)).abs();
+                    gap.min(1440 - gap)
+                };
+                distance(a).cmp(&distance(b))
+            })
+            .then(
+                a.supporting
+                    .expected_start
+                    .cmp(&b.supporting.expected_start),
+            )
+    });
+    candidates.truncate(1);
+    candidates
 }
 
 pub(crate) fn detect(
@@ -598,6 +837,132 @@ mod tests {
     fn detect_fixture(times: &[(usize, u32, u32)]) -> Vec<Insight> {
         let (c, s, v) = fixture(times, None);
         detect(&c, "app", "game", "Game", &s, &v)
+    }
+    #[test]
+    fn upcoming_visit_needs_repeated_starts_and_disappears_after_use() {
+        let end = Local::now().date_naive();
+        let first = end - Duration::days(56);
+        let from = midnight(first).unwrap();
+        let today = midnight(end).unwrap();
+        let coverage = Coverage::new(vec![(from, today)]);
+        let calendar = Calendar::new(end, &coverage, &coverage).unwrap();
+        let now = today + 19 * 3600 + 45 * 60;
+        let mut visits = (0..56)
+            .map(|day| {
+                let start = midnight(first + Duration::days(day)).unwrap() + 20 * 3600;
+                Visit {
+                    start,
+                    end: start + 1200,
+                    seconds: 1200,
+                    known_start: true,
+                    first: day as usize,
+                    last: day as usize,
+                }
+            })
+            .collect::<Vec<_>>();
+        let found = predict(&calendar, "app", "spire", "Slay the Spire 2", &visits, now);
+        assert!(!found.is_empty());
+        assert_eq!(found[0].kind, InsightKind::UpcomingActivity);
+        assert_eq!(
+            found[0].supporting.routine.as_ref().unwrap().status,
+            "established"
+        );
+        assert!(found[0].supporting.display_until.unwrap() > now);
+        visits.push(Visit {
+            start: now - 120,
+            end: now + 900,
+            seconds: 1020,
+            known_start: true,
+            first: 56,
+            last: 56,
+        });
+        assert!(predict(&calendar, "app", "spire", "Slay the Spire 2", &visits, now).is_empty());
+        visits.pop();
+        assert!(
+            predict(
+                &calendar,
+                "app",
+                "spire",
+                "Slay the Spire 2",
+                &visits,
+                today + 22 * 3600
+            )
+            .is_empty()
+        );
+        for visit in &mut visits {
+            visit.known_start = false;
+        }
+        assert!(predict(&calendar, "app", "spire", "Slay the Spire 2", &visits, now).is_empty());
+    }
+    #[test]
+    fn recent_pattern_is_tentative_and_unobserved_days_do_not_count_as_misses() {
+        let end = Local::now().date_naive();
+        let first = end - Duration::days(56);
+        let today = midnight(end).unwrap();
+        let observed = Coverage::new(vec![(midnight(end - Duration::days(14)).unwrap(), today)]);
+        let calendar = Calendar::new(end, &observed, &observed).unwrap();
+        let visits = (42..56)
+            .map(|day| {
+                let start = midnight(first + Duration::days(day)).unwrap() + 20 * 3600;
+                Visit {
+                    start,
+                    end: start + 900,
+                    seconds: 900,
+                    known_start: true,
+                    first: day as usize,
+                    last: day as usize,
+                }
+            })
+            .collect::<Vec<_>>();
+        let result = predict(
+            &calendar,
+            "app",
+            "spire",
+            "Spire",
+            &visits,
+            today + 19 * 3600 + 45 * 60,
+        );
+        assert_eq!(result[0].confidence, InsightConfidence::Low);
+        assert_eq!(result[0].supporting.eligible_count, Some(14));
+        assert_eq!(
+            result[0].supporting.routine.as_ref().unwrap().status,
+            "recent"
+        );
+    }
+    #[test]
+    fn walk_forward_replay_uses_only_prior_observed_starts() {
+        let first = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let mut hits = 0;
+        for day in 1..56 {
+            let cutoff = first + Duration::days(day);
+            let coverage =
+                Coverage::new(vec![(midnight(first).unwrap(), midnight(cutoff).unwrap())]);
+            let calendar = Calendar::new(cutoff, &coverage, &coverage).unwrap();
+            let visits = (0..day)
+                .map(|d| {
+                    let start = midnight(first + Duration::days(d)).unwrap() + 20 * 3600;
+                    Visit {
+                        start,
+                        end: start + 1200,
+                        seconds: 1200,
+                        known_start: true,
+                        first: d as usize,
+                        last: d as usize,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let now = midnight(cutoff).unwrap() + 19 * 3600 + 45 * 60;
+            let result = predict(&calendar, "app", "spire", "Spire", &visits, now);
+            if day < 7 {
+                assert!(result.is_empty(), "thin history should abstain");
+            }
+            if day >= 42 {
+                assert_eq!(result.len(), 1);
+                assert!(result[0].supporting.expected_start.unwrap() > now);
+                hits += 1;
+            }
+        }
+        assert_eq!(hits, 14);
     }
     #[test]
     fn natural_copy_preserves_the_underlying_routine() {

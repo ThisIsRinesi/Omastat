@@ -45,6 +45,12 @@ Ui.Panel {
   property var browserActivity: []
   property var summaryTopApp: null
   property var reportInsights: []
+  property var reportPredictions: []
+  property real insightClock: Date.now() / 1000
+  Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: root.insightClock = Date.now() / 1000 }
+  Timer { interval: 60000; running: root.opened && root.selectedOffset === 0; repeat: true; onTriggered: if (root.hostWidget) root.hostWidget.refresh(true) }
+  readonly property string insightTone: ["warm", "concise", "playful"][Number(root.setting("insightTone", 0))] || "warm"
+  readonly property string insightCopyDate: selectedOffset === 0 ? todayKey : periodLabel
   property var widgetInsight: null
   property var daily: []
   property var heatmap: []
@@ -198,7 +204,9 @@ Ui.Panel {
   readonly property var hours: Model.withMultitaskingHours(Model.hourlyCells(shownHeat), selected ? [] : multitasking.heatmap)
   readonly property var trend: Model.activityCells(shownDaily, selectedLens)
   readonly property var heatCells: Model.heatmapCells(shownHeat)
-  readonly property var insights: Model.widgetInsights(selected ? (detail.insights || []) : reportInsights)
+  readonly property var insights: Model.dashboardInsights(selected ? (detail.insights || []) : reportInsights, predictions)
+  readonly property var predictions: selectedOffset === 0
+    ? Model.visiblePredictions(reportPredictions, insightClock, selectedActivityKind, selectedActivityKey) : []
   readonly property var filteredActivities: {
     var list = activityAnalytics.activities || []
     var query = search.text.toLowerCase().trim()
@@ -206,7 +214,7 @@ Ui.Panel {
       return item.kind === root.activityType && (!query || String(item.label).toLowerCase().indexOf(query) >= 0 || String(item.key).toLowerCase().indexOf(query) >= 0)
     })
   }
-  readonly property bool hasInsightContent: insights.length > 0 || inspectedInsight !== null
+  readonly property bool hasInsightContent: insights.length > 0 || predictions.length > 0 || inspectedInsight !== null
   readonly property string baselineText: detail.baseline_start
     ? Model.insightDateRange(detail.baseline_start, detail.baseline_end) : "Up to eight weeks of history"
   onSelectedLensChanged: resetView()
@@ -567,6 +575,21 @@ Ui.Panel {
                   value: root.reducedMotion
                   onRequested: function(nextValue) { root.setAppearance("reduceMotion", nextValue) }
                 }
+                Label { text: "Insight tone"; font.bold: true }
+                RowLayout {
+                  Layout.fillWidth: true
+                  Repeater {
+                    model: ["warm", "concise", "playful"]
+                    Controls.Button {
+                      required property string modelData
+                      text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
+                      checkable: true
+                      checked: root.insightTone === modelData
+                      Accessible.name: text + " insight tone"
+                      onClicked: root.setAppearance("insightTone", ["warm", "concise", "playful"].indexOf(modelData))
+                    }
+                  }
+                }
                 SettingToggle {
                   label: "Dynamic Island"; detail: "Use the black island presentation"
                   value: root.dynamicIslandStyle
@@ -660,9 +683,38 @@ Ui.Panel {
                 Layout.alignment: Qt.AlignTop
                 spacing: Style.space(14)
                 Label { Layout.fillWidth: true; text: "Patterns & insights"; font.pixelSize: Style.font.subtitle; font.bold: true }
+                Label { Layout.fillWidth: true; visible: !root.inspectedInsight && root.predictions.length > 0; text: "Coming up"; font.bold: true; color: root.accent }
+                Repeater {
+                  model: root.inspectedInsight ? [] : root.predictions
+                  Controls.AbstractButton {
+                    id: predictionButton
+                    required property var modelData
+                    required property int index
+                    Layout.fillWidth: true
+                    activeFocusOnTab: true
+                    padding: Style.space(14)
+                    implicitHeight: predictionContent.implicitHeight + Style.space(28)
+                    Accessible.name: Model.predictionTitle(modelData, root.insightTone, root.todayKey) + ". " + modelData.explanation
+                    onClicked: root.inspectInsight(modelData, predictionButton)
+                    onActiveFocusChanged: if (activeFocus) root.revealControl(predictionButton)
+                    background: Rectangle {
+                      radius: Style.space(10)
+                      color: root.withAlpha(root.accent, predictionButton.hovered || predictionButton.activeFocus ? 0.20 : 0.12)
+                      border.width: predictionButton.activeFocus ? 2 : 1
+                      border.color: root.withAlpha(root.accent, 0.5)
+                    }
+                    contentItem: ColumnLayout {
+                      id: predictionContent
+                      spacing: Style.space(7)
+                      Label { Layout.fillWidth: true; text: Model.predictionTitle(predictionButton.modelData, root.insightTone, root.todayKey); wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.subtitle }
+                      Label { Layout.fillWidth: true; text: predictionButton.modelData.value; color: root.accent; font.bold: true }
+                      Label { Layout.fillWidth: true; text: predictionButton.modelData.explanation; wrapMode: Text.Wrap; color: root.dim }
+                    }
+                  }
+                }
                 Label {
                   Layout.fillWidth: true
-                  visible: !root.inspectedInsight && root.insights.length === 0
+                  visible: !root.inspectedInsight && root.insights.length === 0 && root.predictions.length === 0
                   text: root.detailRunning || !root.panelDataLoaded ? "Finding the little things in your day…" : "Your story is still taking shape. A few more days of activity will help recurring habits stand out."
                   color: root.dim
                 }
@@ -690,7 +742,7 @@ Ui.Panel {
                       implicitHeight: insightSummary.implicitHeight + Style.space(20)
                       padding: Style.space(10)
                       activeFocusOnTab: true
-                      Accessible.name: modelData.title + ". " + presentation.value + ". " + presentation.frequency
+                      Accessible.name: Model.insightHeading(modelData, root.insightTone, root.insightCopyDate) + ". " + presentation.value + ". " + presentation.frequency
                       onActiveFocusChanged: if (activeFocus) root.revealControl(insightButton)
                       onClicked: root.inspectInsight(modelData, insightButton)
                       scale: down ? 0.99 : 1
@@ -708,7 +760,7 @@ Ui.Panel {
                         spacing: Style.space(8)
                         RowLayout {
                           Layout.fillWidth: true
-                          Label { Layout.fillWidth: true; text: insightButton.modelData.title || "Insight"; wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
+                          Label { Layout.fillWidth: true; text: Model.insightHeading(insightButton.modelData, root.insightTone, root.insightCopyDate); wrapMode: Text.Wrap; font.bold: true; font.pixelSize: Style.font.body }
                           Label { text: "›"; color: root.dim; font.pixelSize: Style.font.subtitle }
                         }
                         Label { Layout.fillWidth: true; visible: text.length > 0; text: Model.insightQualifier(insightButton.modelData); color: root.dim; font.pixelSize: Style.font.caption }
@@ -737,7 +789,7 @@ Ui.Panel {
                   opacity: visible ? 1 : 0
                   Behavior on opacity { NumberAnimation { duration: root.motionDuration; easing.type: Easing.OutCubic } }
                   Action { id: insightBack; text: "‹ Back to insights"; onClicked: root.closeInsight() }
-                  Label { Layout.fillWidth: true; text: insightDetail.item.title || ""; wrapMode: Text.Wrap; font.pixelSize: Style.font.subtitle; font.bold: true }
+                  Label { Layout.fillWidth: true; text: Model.insightHeading(insightDetail.item, root.insightTone, root.insightCopyDate); wrapMode: Text.Wrap; font.pixelSize: Style.font.subtitle; font.bold: true }
                   Label { Layout.fillWidth: true; text: insightDetail.presentation.value; wrapMode: Text.Wrap; color: root.accent; font.pixelSize: Style.font.subtitle }
                   Label { Layout.fillWidth: true; text: insightDetail.presentation.frequency; color: root.accent; visible: text.length > 0 }
                   Label { Layout.fillWidth: true; text: Model.insightExplanation(insightDetail.item); wrapMode: Text.Wrap }

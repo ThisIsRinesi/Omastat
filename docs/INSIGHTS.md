@@ -1,5 +1,13 @@
 # Context insights
 
+## Coming up
+
+Current dashboard periods can show up to two possible upcoming app or website starts. These are based on known foreground visits of at least five minutes, not on an app merely staying open. Each compared one-hour local-clock window needs at least 90% tracking coverage. The card appears from 30 minutes before the window until the window ends, then expires; a visit during that time removes it. Stale tracking and pauses suppress suggestions. Historical views do not show predictions.
+
+An established pattern requires five matching starts among seven observed days at a 70% rate, spread across at least three weeks. A same-weekday pattern requires four matches among five observed weeks. A recent pattern can qualify from the last 14 completed days with five matches among seven observed days at a 60% rate; its wording stays tentative. Both types need matches on at least two of the last three eligible occasions and a concentration of starts in the predicted hour. The displayed frequency is historical evidence, not a probability for today.
+
+Dashboard Settings → Insight tone offers Warm, Concise, and Playful. Prediction wording changes by day and stays stable during refreshes. How we know keeps the same dates and method in every tone. Predictions are local to the dashboard and never enter the bar widget rotation.
+
 The dashboard groups the day’s composition and ring clock on the left, the timeline and Explore activity in the center, and insights on the right at expansive widths. Narrower presets collapse these columns.
 
 Insights describe recorded behavior using local data. Open a card to inspect its method, dates and supporting activity. They do not score productivity or infer the effect of audio on focus.

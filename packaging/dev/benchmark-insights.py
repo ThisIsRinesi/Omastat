@@ -95,7 +95,7 @@ def stable_data(report):
     # subprocesses. Historical reports are also compared separately below.
     volatile = {"generated_at", "query_end_ts", "total_elapsed_seconds",
                 "total_unobserved_seconds", "elapsed_seconds", "unobserved_seconds",
-                "insights", "widget_insight", "tooltip", "status_text"}
+                "insights", "predictions", "widget_insight", "tooltip", "status_text"}
     if isinstance(report, dict):
         return {k: stable_data(v) for k, v in report.items() if k not in volatile}
     if isinstance(report, list):
@@ -106,7 +106,7 @@ def stable_data(report):
 def historical_data(report):
     if isinstance(report, dict):
         return {k: historical_data(v) for k, v in report.items()
-                if k not in {"generated_at", "widget_insight"}}
+                if k not in {"generated_at", "widget_insight", "predictions"}}
     if isinstance(report, list):
         return [historical_data(v) for v in report]
     return report
