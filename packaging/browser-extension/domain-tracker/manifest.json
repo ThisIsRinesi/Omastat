@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "name": "Omastat Domain Tracker",
-  "version": "0.3.0",
-  "description": "Reports focused and audible tab domains to local Omastat.",
+  "name": "Nagori Domain Tracker",
+  "version": "0.4.0",
+  "description": "Reports focused and audible tab domains to local Nagori.",
   "permissions": [
     "tabs",
     "nativeMessaging"
@@ -16,10 +16,12 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "omastat-domain-tracker@thisisrinesi.github.io",
+      "id": "nagori-domain-tracker@thisisrinesi.github.io",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": ["browsingActivity"]
+        "required": [
+          "browsingActivity"
+        ]
       }
     }
   }

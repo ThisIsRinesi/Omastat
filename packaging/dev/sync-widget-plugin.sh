@@ -6,8 +6,8 @@ usage() {
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-plugin_id="local.omastat"
-widget_dir="$repo_root/packaging/omarchy/omastat"
+plugin_id="local.nagori"
+widget_dir="$repo_root/packaging/omarchy/nagori"
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
 capture=""
 lens=""

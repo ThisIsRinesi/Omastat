@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Shared paths and preflight checks for the user-level installer/uninstaller.
 
-plugin_id="local.omastat"
+plugin_id="local.nagori"
 backend_root="$HOME/.cargo"
 # Omarchy's plugin registry uses this path independently of XDG_CONFIG_HOME.
 plugin_dir="$HOME/.config/omarchy/plugins/$plugin_id"
 service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-backup_root="${XDG_STATE_HOME:-$HOME/.local/state}/omastat/install-backups"
+backup_root="${XDG_STATE_HOME:-$HOME/.local/state}/nagori/install-backups"
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 
-fail() { printf 'omastat: %s\n' "$*" >&2; exit 1; }
+fail() { printf 'nagori: %s\n' "$*" >&2; exit 1; }
 
 require_commands() {
   local command

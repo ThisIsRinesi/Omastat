@@ -7,10 +7,10 @@ cd "$repo_root"
 for tool in cargo cc node python3 jq bwrap git rg; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
-omarchy_bin="${OMASTAT_TEST_OMARCHY_BIN:-/usr/share/omarchy/bin}"
+omarchy_bin="${NAGORI_TEST_OMARCHY_BIN:-/usr/share/omarchy/bin}"
 for tool in omarchy-plugin-remove omarchy-plugin-update omarchy-plugin-validate; do
   [[ -x "$omarchy_bin/$tool" ]] || {
-    echo "Missing $omarchy_bin/$tool; set OMASTAT_TEST_OMARCHY_BIN to an Omarchy Quattro bin directory." >&2
+    echo "Missing $omarchy_bin/$tool; set NAGORI_TEST_OMARCHY_BIN to an Omarchy Quattro bin directory." >&2
     exit 1
   }
 done

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-const panel = readFileSync(new URL("../omarchy/omastat/Panel.qml", import.meta.url), "utf8");
+const panel = readFileSync(new URL("../omarchy/nagori/Panel.qml", import.meta.url), "utf8");
 function motion() {
   const later = [];
   const timer = () => ({ running: false, starts: 0, start() { this.running = true; this.starts++; }, stop() { this.running = false; } });

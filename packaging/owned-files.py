@@ -69,7 +69,7 @@ def backup_target(path):
 def atomic_write(path, data, mode, *, create_only=False, replace_symlink=False):
     safe_path(path.parent if replace_symlink else path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix='.omastat-', dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.nagori-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)
@@ -87,26 +87,32 @@ def atomic_write(path, data, mode, *, create_only=False, replace_symlink=False):
 
 
 def browser_plan():
-    host = 'io.github.thisisrinesi.omastat'
-    extension = 'omastat-domain-tracker@thisisrinesi.github.io.xpi'
-    wrapper = xdg('XDG_BIN_HOME', '.local/bin') / 'omastat-native-host'
-    binary = shutil.which('omastat')
-    if not binary and os.access(HOME / '.cargo/bin/omastat', os.X_OK):
-        binary = str(HOME / '.cargo/bin/omastat')
+    host = 'io.github.thisisrinesi.nagori'
+    extension = 'nagori-domain-tracker@thisisrinesi.github.io.xpi'
+    wrapper = xdg('XDG_BIN_HOME', '.local/bin') / 'nagori-native-host'
+    binary = shutil.which('nagori')
+    if not binary and os.access(HOME / '.cargo/bin/nagori', os.X_OK):
+        binary = str(HOME / '.cargo/bin/nagori')
     if not binary:
-        raise ValueError('omastat binary not found; install it first')
+        raise ValueError('nagori binary not found; install it first')
     binary = str(Path(binary).resolve())
     plan = [(wrapper, f'#!/bin/bash\nexec {shlex.quote(binary)} native-host\n'.encode(), 0o755)]
-    manifest = json.dumps({'name': host, 'description': 'Omastat browser domain native host',
+    manifest = json.dumps({'name': host, 'description': 'Nagori browser domain native host',
                           'path': str(wrapper), 'type': 'stdio',
                           'allowed_extensions': [extension[:-4]]}, indent=2).encode() + b'\n'
     for root in [xdg('XDG_CONFIG_HOME', '.config') / 'zen',
                  xdg('XDG_CONFIG_HOME', '.config') / 'mozilla', HOME / '.mozilla', HOME / '.zen']:
         plan.append((root / 'native-messaging-hosts' / (host + '.json'), manifest, 0o644))
-    archive = (Path(__file__).parent / 'browser-extension/signed/omastat-domain-tracker-firefox.xpi').read_bytes()
-    storage = xdg('XDG_DATA_HOME', '.local/share') / 'omastat/browser-extension'
+    signed_path = Path(__file__).parent / 'browser-extension/signed/nagori-domain-tracker-firefox.xpi'
+    signed = signed_path.is_file()
+    archive = (signed_path if signed else Path(__file__).parent / 'browser-extension/nagori-domain-tracker-unsigned.zip').read_bytes()
+    storage = xdg('XDG_DATA_HOME', '.local/share') / 'nagori/browser-extension'
     for browser in ['firefox', 'zen']:
-        plan.append((storage / f'omastat-domain-tracker-{browser}.xpi', archive, 0o644))
+        suffix = 'xpi' if signed else 'zip'
+        plan.append((storage / f'nagori-domain-tracker-{browser}.{suffix}', archive, 0o644))
+    if not signed:
+        print('Nagori native host installed with an unsigned development extension. Permanent Firefox installation requires a Mozilla-signed release.')
+        return plan
     for root in [HOME / '.zen', HOME / '.mozilla/firefox']:
         if root.is_dir():
             for profile in root.iterdir():
@@ -119,7 +125,7 @@ def main():
     action, group = sys.argv[1:]
     if action not in ('install', 'uninstall') or group not in ('service', 'browser'):
         raise ValueError('Expected install/uninstall and service/browser')
-    state = xdg('XDG_STATE_HOME', '.local/state') / 'omastat/install-ownership'
+    state = xdg('XDG_STATE_HOME', '.local/state') / 'nagori/install-ownership'
     safe_path(state)
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = state / 'lock'
@@ -133,8 +139,8 @@ def main():
             atomic_write(receipt, (json.dumps(records, indent=2) + '\n').encode(), 0o600)
         if action == 'install':
             plan = browser_plan() if group == 'browser' else [
-                (xdg('XDG_CONFIG_HOME', '.config') / 'systemd/user/omastat.service',
-                 (Path(__file__).parent / 'systemd/omastat.service').read_bytes(), 0o644)]
+                (xdg('XDG_CONFIG_HOME', '.config') / 'systemd/user/nagori.service',
+                 (Path(__file__).parent / 'systemd/nagori.service').read_bytes(), 0o644)]
             # Validate parents/types before changing any target. Leaf symlinks
             # are backed up as links; their referents are never written.
             for path, data, mode in plan:
@@ -153,7 +159,7 @@ def main():
                 try:
                     current = fingerprint(path)
                 except ValueError as error:
-                    print(f'omastat: Preserving {path}: {error}', file=sys.stderr)
+                    print(f'nagori: Preserving {path}: {error}', file=sys.stderr)
                     continue
                 if current is None:
                     del records[name]
@@ -161,17 +167,17 @@ def main():
                 elif current == expected:
                     if group == 'service':
                         import subprocess
-                        subprocess.run(['systemctl', '--user', 'disable', '--now', 'omastat.service'], check=True)
+                        subprocess.run(['systemctl', '--user', 'disable', '--now', 'nagori.service'], check=True)
                         if fingerprint(path) != expected:
-                            print(f'omastat: Preserving changed target: {path}', file=sys.stderr)
+                            print(f'nagori: Preserving changed target: {path}', file=sys.stderr)
                             continue
                     path.unlink()
                     del records[name]
                     save()
                 else:
-                    print(f'omastat: Preserving modified target: {path}', file=sys.stderr)
+                    print(f'nagori: Preserving modified target: {path}', file=sys.stderr)
             if group == 'browser':
-                storage = xdg('XDG_DATA_HOME', '.local/share') / 'omastat/browser-extension'
+                storage = xdg('XDG_DATA_HOME', '.local/share') / 'nagori/browser-extension'
                 try:
                     safe_path(storage)
                     storage.rmdir()  # Never recursively remove untracked contents.
@@ -183,4 +189,4 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError) as error:
-        sys.exit(f'omastat: {error}')
+        sys.exit(f'nagori: {error}')

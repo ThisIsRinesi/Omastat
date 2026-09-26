@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-const source = readFileSync(new URL("../omarchy/omastat/TrackingStatus.qml", import.meta.url), "utf8");
+const source = readFileSync(new URL("../omarchy/nagori/TrackingStatus.qml", import.meta.url), "utf8");
 const model = vm.createContext({});
-vm.runInContext(readFileSync(new URL("../omarchy/omastat/Model.js", import.meta.url), "utf8"), model);
+vm.runInContext(readFileSync(new URL("../omarchy/nagori/Model.js", import.meta.url), "utf8"), model);
 
 function controller() {
   const context = vm.createContext({ checking: false, report: null, errorText: "", statusProcess: { running: false } });

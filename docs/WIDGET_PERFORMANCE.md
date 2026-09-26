@@ -60,11 +60,11 @@ sizes differ only where wall-clock-dependent values have different lengths.
 Keep a release binary from before the change, then build the updated binary:
 
 ```sh
-cargo build --release --bin omastat
-python3 packaging/dev/benchmark-insights.py /path/to/before target/release/omastat \
-  --database /path/to/omastat.db --runs 7
-python3 packaging/dev/benchmark-insights.py /path/to/before target/release/omastat \
-  --database /path/to/omastat.db --synthetic-intervals 12000 --runs 7
+cargo build --release --bin nagori
+python3 packaging/dev/benchmark-insights.py /path/to/before target/release/nagori \
+  --database /path/to/nagori.db --runs 7
+python3 packaging/dev/benchmark-insights.py /path/to/before target/release/nagori \
+  --database /path/to/nagori.db --synthetic-intervals 12000 --runs 7
 ```
 
 The benchmark creates a private temporary snapshot and freezes open telemetry

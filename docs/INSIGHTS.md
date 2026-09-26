@@ -28,4 +28,42 @@ A period needs 30 minutes of focused use and at least ten minutes from one audio
 
 ## Design references
 
-[Apple Health trends](https://support.apple.com/en-il/guide/iphone/iphe3d379c32/ios) informed comparisons against personal history. [Apple Journal suggestions](https://www.apple.com/newsroom/2023/12/apple-launches-journal-app-a-new-app-for-reflecting-on-everyday-moments/) informed contextual summaries of recorded activity. The thresholds above are Omastat heuristics, not Apple algorithms or validated measures of productivity.
+[Apple Health trends](https://support.apple.com/en-il/guide/iphone/iphe3d379c32/ios) informed comparisons against personal history. [Apple Journal suggestions](https://www.apple.com/newsroom/2023/12/apple-launches-journal-app-a-new-app-for-reflecting-on-everyday-moments/) informed contextual summaries of recorded activity. The thresholds above are Nagori heuristics, not Apple algorithms or validated measures of productivity.
+
+## Prediction lifecycle and evaluation
+
+The engine fits windows from completed days before checking the current clock.
+Each date contributes its earliest qualifying start within a window; reopening an
+app many times on one date cannot move the typical time toward that date. History
+is clipped at the training cutoff. Ambiguous, missing, or non-hour-long local
+clock windows are not emitted as precise predictions.
+
+The JSON `predictions` array contains a dedicated occurrence ID, strength,
+generation time, display start/end, expected start, and the existing finding and
+evidence fields. Ranking prefers established patterns, historical match rate,
+number of supporting dates, then proximity. Activity filtering happens before the
+dashboard's two-card limit. Cards expire locally even when refreshing fails; data
+older than two minutes is hidden. The dashboard uses the controller's refresh
+schedule, capped at one minute while open.
+
+Run the chronological synthetic replay with:
+
+```sh
+cargo test --locked --lib chronological_replay -- --nocapture
+```
+
+Each run trains only on earlier observed days and scores the withheld day's
+actual start against the predicted window. The 42-day evaluation currently gives:
+
+| Scenario | Hits | Misses | Abstentions | Unobserved, excluded | Mean timing error on hits |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Steady, five-minute variation | 42 | 0 | 0 | 0 | 200 seconds |
+| Occasional skipped visits | 35 | 7 | 0 | 0 | 197 seconds |
+| Abrupt shift two hours later | 14 | 14 | 14 | 0 | 192 seconds |
+| Scattered starts | 0 | 0 | 42 | 0 | — |
+| Observation gaps | 34 | 0 | 0 | 8 | 194 seconds |
+
+These are regression fixtures, not an estimate of real-world accuracy. The abrupt
+shift exposes the deliberate inertia in weekly cohorts: an established weekday
+pattern can survive one missed weekly occasion and fade after the second. The
+replay also verifies that refreshing after expiry cannot extend that occurrence.

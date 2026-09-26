@@ -1,0 +1,14 @@
+[Unit]
+Description=Nagori app usage daemon
+Documentation=https://wiki.hypr.land/IPC/
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/nagorid
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=graphical-session.target

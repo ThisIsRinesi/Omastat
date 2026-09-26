@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-const widget = readFileSync(new URL("../omarchy/omastat/BarWidget.qml", import.meta.url), "utf8");
-const model = readFileSync(new URL("../omarchy/omastat/Model.js", import.meta.url), "utf8");
+const widget = readFileSync(new URL("../omarchy/nagori/BarWidget.qml", import.meta.url), "utf8");
+const model = readFileSync(new URL("../omarchy/nagori/Model.js", import.meta.url), "utf8");
 
 // Execute the actual controller functions with process and shell UI boundaries stubbed.
 function controller() {
@@ -357,7 +357,7 @@ console.log("Stale retention, bounded caches, hidden injection, and navigation c
   assert.equal(c.refreshRunning, true);
 }
 {
-  const panel = readFileSync(new URL("../omarchy/omastat/Panel.qml", import.meta.url), "utf8");
+  const panel = readFileSync(new URL("../omarchy/nagori/Panel.qml", import.meta.url), "utf8");
   const handlers = panel.match(/  IpcHandler \{[\s\S]*?\n  \}/)[0];
   const calls = [];
   const hostWidget = { open: () => calls.push("open"), togglePanel: () => calls.push("toggle"), statusText: "current" };
@@ -381,7 +381,7 @@ console.log("Stale retention, bounded caches, hidden injection, and navigation c
 
 {
   const c=controller();
-  c.moduleName='local.omastat';
+  c.moduleName='local.nagori';
   c.settings={refreshIntervalSec:90,panelWidth:1200,dynamicIslandStyle:true};
   const writes=[];
   c.bar={shell:{updateEntryInline(id,entry) { writes.push({id,entry}); }}};
@@ -389,7 +389,7 @@ console.log("Stale retention, bounded caches, hidden injection, and navigation c
   assert.equal(c.settings.richGraphs,false);
   assert.equal(c.settings.refreshIntervalSec,90);
   assert.equal(c.settings.dynamicIslandStyle,true);
-  assert.equal(writes[0].id,'local.omastat');
+  assert.equal(writes[0].id,'local.nagori');
   c.setAppearanceSetting('reduceMotion',true);
   assert.equal(c.settings.reduceMotion,true);
   c.setAppearanceSetting('unrecognized',true);

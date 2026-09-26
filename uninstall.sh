@@ -6,7 +6,7 @@ usage() {
 Usage: ./uninstall.sh
 
 Disable and remove the Omarchy plugin, stop/remove the user service, uninstall
-Cargo-installed Omastat binaries, and remove the optional browser integration.
+Cargo-installed Nagori binaries, and remove the optional browser integration.
 Recorded activity, user configuration, and installer backups are preserved.
 Run as your normal user inside Omarchy. System package installs are not removed.
 
@@ -39,11 +39,11 @@ python3 "$repo_root/packaging/owned-files.py" uninstall service
 systemctl --user daemon-reload
 
 installed=$(cargo install --list --root "$backend_root")
-if [[ "$installed" =~ (^|$'\n')omastat\ v ]]; then
-  cargo uninstall --root "$backend_root" omastat
+if [[ "$installed" =~ (^|$'\n')nagori\ v ]]; then
+  cargo uninstall --root "$backend_root" nagori
 fi
 "$repo_root/packaging/browser-extension/uninstall.sh"
-printf '\nOmastat uninstalled. Recorded activity, configuration, and installer backups were kept.\n'
-if [[ -x /usr/bin/omastat || -x /usr/local/bin/omastat ]]; then
-  printf 'A system-wide Omastat binary is still installed; remove it with its package manager.\n'
+printf '\nNagori uninstalled. Recorded activity, configuration, and installer backups were kept.\n'
+if [[ -x /usr/bin/nagori || -x /usr/local/bin/nagori ]]; then
+  printf 'A system-wide Nagori binary is still installed; remove it with its package manager.\n'
 fi

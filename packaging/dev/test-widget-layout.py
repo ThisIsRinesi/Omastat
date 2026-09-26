@@ -17,13 +17,13 @@ ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output', type=Path, help='Keep screenshots and logs here')
 args = parser.parse_args()
-output = (args.output or Path(tempfile.mkdtemp(prefix='omastat-layout-'))).resolve()
+output = (args.output or Path(tempfile.mkdtemp(prefix='nagori-layout-'))).resolve()
 output.mkdir(parents=True, exist_ok=True)
-with tempfile.TemporaryDirectory(prefix='omastat-layout-shell-') as directory:
+with tempfile.TemporaryDirectory(prefix='nagori-layout-shell-') as directory:
     stage = Path(directory)
     shutil.copytree(ROOT / 'packaging/dev/layout-fixtures', stage, dirs_exist_ok=True)
-    for name in ['Panel.qml', 'Model.js', 'TrackingStatus.qml']:
-        shutil.copy2(ROOT / 'packaging/omarchy/omastat' / name, stage / name)
+    for name in ['Panel.qml', 'Model.js', 'InsightCopy.js', 'TrackingStatus.qml']:
+        shutil.copy2(ROOT / 'packaging/omarchy/nagori' / name, stage / name)
     # Keep the real status component but substitute its external process input.
     tracking = stage / 'TrackingStatus.qml'
     status = json.dumps({'tracker': 'reporting', 'browser': 'stale', 'checked_at': 1790000000})
@@ -49,8 +49,8 @@ with tempfile.TemporaryDirectory(prefix='omastat-layout-shell-') as directory:
     reports = [json.loads(line.split('AUDIT ', 1)[1]) for line in log.splitlines() if 'AUDIT ' in line]
     failures = [report for report in reports if report['failures']]
     warnings = [line for line in log.splitlines() if 'WARN scene:' in line or 'ERROR' in line]
-    if result.returncode or failures or warnings or len(reports) != 420:
+    if result.returncode or failures or warnings or len(reports) != 540:
         print(json.dumps(failures, indent=2))
         print('\n'.join(warnings))
-        raise SystemExit(f'Layout audit failed: {len(reports)}/420 cases. Log: {output / "render.log"}')
+        raise SystemExit(f'Layout audit failed: {len(reports)}/540 cases. Log: {output / "render.log"}')
     print(f'All {len(reports)} layout cases passed. Screenshots and log: {output}')

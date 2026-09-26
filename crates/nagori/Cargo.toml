@@ -1,0 +1,29 @@
+[package]
+name = "nagori"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "Local app focus tracking for Arch/Omarchy Hyprland desktops."
+repository = "https://github.com/ThisIsRinesi/Nagori"
+default-run = "nagori"
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", features = ["clock"] }
+clap = { version = "4.5.53", features = ["derive"] }
+csv = "1.4.0"
+dirs = "6.0.0"
+futures-util = "0.3.31"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+toml = "0.9.8"
+tracing = "0.1.43"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+wayland-client = "0.31.11"
+wayland-protocols = { version = "0.32.9", features = ["client", "staging"] }
+zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"

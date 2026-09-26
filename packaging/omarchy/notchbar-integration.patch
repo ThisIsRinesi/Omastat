@@ -2,7 +2,7 @@
 *** Update File: Bar.qml
 @@
    property var centerIslandRef: null
-+  // Optional shared-surface API for external dashboards (Omastat).
++  // Optional shared-surface API for external dashboards (Nagori).
 +  property var islandPanelHosts: []
 +  property var islandPanelRequest: null
 +  function registerIslandPanelHost(host) {

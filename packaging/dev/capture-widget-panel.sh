@@ -6,7 +6,7 @@ usage() {
 }
 
 shell_path="${OMARCHY_SHELL_PATH:-/usr/share/omarchy/shell}"
-output="/tmp/omastat-panel-$(date +%Y%m%d-%H%M%S).png"
+output="/tmp/nagori-panel-$(date +%Y%m%d-%H%M%S).png"
 delay="1.2"
 region=""
 lens=""
@@ -86,9 +86,9 @@ for tool in quickshell grim; do
 done
 
 if ((open_panel)); then
-  if ! quickshell ipc -n -p "$shell_path" call local.omastat open; then
+  if ! quickshell ipc -n -p "$shell_path" call local.nagori open; then
     cat >&2 <<'EOF'
-could not open local.omastat through Quickshell IPC.
+could not open local.nagori through Quickshell IPC.
 Make sure the plugin is installed, enabled, and the shell has loaded it:
   packaging/dev/reinstall-and-restart.sh
 EOF
@@ -96,9 +96,9 @@ EOF
   fi
   if [[ -n "$lens" ]]; then
     if [[ -n "$offset" ]]; then
-      quickshell ipc -n -p "$shell_path" call local.omastat period "$lens" "$offset"
+      quickshell ipc -n -p "$shell_path" call local.nagori period "$lens" "$offset"
     else
-      quickshell ipc -n -p "$shell_path" call local.omastat "$lens"
+      quickshell ipc -n -p "$shell_path" call local.nagori "$lens"
     fi
   fi
   sleep "$delay"
@@ -112,7 +112,7 @@ else
 fi
 
 if ((open_panel)) && ((! keep_open)); then
-  quickshell ipc -n -p "$shell_path" call local.omastat close || true
+  quickshell ipc -n -p "$shell_path" call local.nagori close || true
 fi
 
 printf '%s\n' "$output"

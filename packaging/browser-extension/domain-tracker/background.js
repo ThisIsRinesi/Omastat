@@ -1,12 +1,12 @@
-/* global OMastatDomainTrackerConfig, browser, chrome */
+/* global NagoriDomainTrackerConfig, browser, chrome */
 (function() {
   var api = typeof browser !== "undefined" ? browser : chrome
-  var config = typeof OMastatDomainTrackerConfig !== "undefined"
-    ? OMastatDomainTrackerConfig
+  var config = typeof NagoriDomainTrackerConfig !== "undefined"
+    ? NagoriDomainTrackerConfig
     : {}
-  var hostName = config.hostName || "io.github.thisisrinesi.omastat"
+  var hostName = config.hostName || "io.github.thisisrinesi.nagori"
   var appClass = config.appClass || "zen"
-  var source = config.source || ("omastat-" + appClass)
+  var source = config.source || ("nagori-" + appClass)
   var lastKey = ""
   var lastSentAt = 0
 

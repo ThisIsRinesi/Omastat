@@ -1,4 +1,4 @@
-# Omastat
+# Nagori
 
 Local app and website activity tracking for **Arch Linux, Hyprland, and Omarchy
 Quattro**. Open the bar widget to see where your time went, when you were active,
@@ -31,8 +31,8 @@ Requires a running Omarchy Quattro desktop, Git, jq, Cargo/Rust, and a C compile
 Run as your normal user, without `sudo`:
 
 ```bash
-git clone https://github.com/ThisIsRinesi/Omastat.git
-cd Omastat
+git clone https://github.com/ThisIsRinesi/Nagori.git
+cd Nagori
 ./install.sh
 ```
 
@@ -45,20 +45,7 @@ For website breakdowns in Zen or Firefox:
 ./install.sh --with-browser
 ```
 
-The installer includes a Mozilla-signed extension for Firefox 140+ and compatible
-Zen versions. Restart your browser and enable **Omastat Domain Tracker**, accepting
-the browsing activity permission. Domains go only to your local Omastat app;
-the native host automatically distinguishes Zen from Firefox.
-
-If the extension does not appear, open `about:addons`, choose **Install Add-on
-From File** from the gear menu, and select:
-
-```text
-~/.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi
-```
-
-The same signed file works in both browsers. If you use `XDG_DATA_HOME`, use that
-directory instead of `~/.local/share`. See [browser setup](docs/USAGE.md) for details.
+The signed Nagori extension is included and installed into supported Zen and Firefox profiles by `./install.sh --with-browser`. Restart the browser after installation.
 
 ## Use
 
@@ -72,8 +59,8 @@ search, **R** to refresh, and **Escape** to clear the selection or close.
 CLI reports and JSON/CSV exports are also available:
 
 ```bash
-omastat today
-omastat export-data --lens month --offset -1 --format csv --output ~/omastat-august
+nagori today
+nagori export-data --lens month --offset -1 --format csv --output ~/nagori-august
 ```
 
 **Settings → Tracking status** shows the latest tracker heartbeat and browser
@@ -105,7 +92,7 @@ repainting canvas charts every animation frame.
 
 ## Optional Dynamic Island appearance
 
-Enable **Dynamic Island appearance** in the Omastat widget settings. The black
+Enable **Dynamic Island appearance** in the Nagori widget settings. The black
 dashboard expands inside the central notch when the optional Notchbar integration
 is installed; other bars use a separate black panel. The full dashboard is
 retained in both presentations. Disable the toggle to restore the standard appearance. The
@@ -119,7 +106,7 @@ falls back to the standalone panel if the shared-content API is unavailable.
 
 ## Privacy
 
-Omastat counts foreground app use. Idle, locked, sleep, and unrecorded time are
+Nagori counts foreground app use. Idle, locked, sleep, and unrecorded time are
 excluded; active audio can keep a media session counted. Records stay in a local
 SQLite database. Window titles are off by default. The optional browser extension
 reports domains, not full URLs or page contents.
@@ -155,7 +142,7 @@ same command runs on pushes and pull requests in GitHub Actions. See
 [check setup and dependencies](docs/CHECKS.md).
 
 Installer file ownership: the user service and optional browser integration use
-SHA-256 and mode receipts under `${XDG_STATE_HOME:-~/.local/state}/omastat/install-ownership`.
+SHA-256 and mode receipts under `${XDG_STATE_HOME:-~/.local/state}/nagori/install-ownership`.
 Installation backs up existing untracked or changed targets beside the original
 as `filename.bak.<timestamp>`, following Omarchy’s config refresh convention
 (with numbered suffixes for collisions), then installs the new version. This also
@@ -163,4 +150,4 @@ handles older installations without receipts. Backups are kept during uninstall.
 Writes use temporary files and atomic replacement. Uninstall preserves
 modified files, symlinks, and untracked browser storage contents. Keep the receipts
 until uninstall is complete. Python 3 is required by these installers.
-The user service runs `%h/.cargo/bin/omastatd` directly.
+The user service runs `%h/.cargo/bin/nagorid` directly.

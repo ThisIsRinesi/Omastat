@@ -9,11 +9,11 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
-OMARCHY_BIN = Path(os.environ.get('OMASTAT_TEST_OMARCHY_BIN', '/usr/share/omarchy/bin')).resolve()
+OMARCHY_BIN = Path(os.environ.get('NAGORI_TEST_OMARCHY_BIN', '/usr/share/omarchy/bin')).resolve()
 USER_HOME = Path.home()
 MOCK = r'''#!/usr/bin/python3
 import json, os, pathlib, subprocess, sys
-p = pathlib.Path(os.environ['OMASTAT_TEST_STATE'])
+p = pathlib.Path(os.environ['NAGORI_TEST_STATE'])
 s = json.loads(p.read_text())
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -23,29 +23,29 @@ def fail():
     save()
     sys.exit(1)
 home = pathlib.Path.home()
-plugin = home / '.config/omarchy/plugins/local.omastat'
+plugin = home / '.config/omarchy/plugins/local.nagori'
 if name == 'cargo':
     if '--list' in args:
-        if s.get('installed'): print('omastat v0.1.7:\n    omastat\n    omastatd')
+        if s.get('installed'): print('nagori v0.1.7:\n    nagori\n    nagorid')
     elif args[0] == 'install':
         if s.get('build_fail'): fail()
         s['installed'] = True
         root = pathlib.Path(args[args.index('--root') + 1])
         (root / 'bin').mkdir(parents=True, exist_ok=True)
-        for binary in ['omastat', 'omastatd']:
+        for binary in ['nagori', 'nagorid']:
             f = root / 'bin' / binary
             f.write_text('#!/bin/sh\nexit 0\n')
             f.chmod(0o755)
     elif args[0] == 'uninstall':
         s['installed'] = False
-        for binary in ['omastat', 'omastatd']:
+        for binary in ['nagori', 'nagorid']:
             (home / '.cargo/bin' / binary).unlink(missing_ok=True)
 elif name == 'systemctl':
     if 'show-environment' in args and s.get('no_session'): fail()
     if 'restart' in args: s['service'] = True
     if 'disable' in args: s['service'] = False
     if 'is-active' in args and not s.get('service'): fail()
-    if 'cat' in args and not (home / '.config/systemd/user/omastat.service').exists(): fail()
+    if 'cat' in args and not (home / '.config/systemd/user/nagori.service').exists(): fail()
 elif name == 'omarchy-shell':
     if 'ping' in args:
         if s.get('no_shell'): fail()
@@ -54,26 +54,26 @@ elif name == 'omarchy-shell':
         s['enabled'] = args[-1] == 'true'
         print('ok')
     elif 'listPlugins' in args:
-        print(json.dumps([{'id': 'local.omastat', 'enabled': s.get('enabled', False)}] if plugin.exists() and not s.get('no_discovery') else []))
+        print(json.dumps([{'id': 'local.nagori', 'enabled': s.get('enabled', False)}] if plugin.exists() and not s.get('no_discovery') else []))
 elif name == 'omarchy':
     if args[:2] == ['plugin', 'validate']:
         manifest = json.loads((pathlib.Path(args[2]) / 'manifest.json').read_text())
-        assert manifest['id'] == 'local.omastat'
+        assert manifest['id'] == 'local.nagori'
     elif args[:2] == ['plugin', 'enable']:
-        assert args == ['plugin', 'enable', 'local.omastat'], 'must preserve bar placement'
+        assert args == ['plugin', 'enable', 'local.nagori'], 'must preserve bar placement'
         s['enabled'] = True
     elif args[:2] == ['plugin', 'disable']: s['enabled'] = False
     elif args[:2] in [['plugin', 'remove'], ['plugin', 'update']]:
         # Exercise Omarchy's actual lifecycle commands, with only desktop IPC mocked.
         save()
-        sys.exit(subprocess.run([os.environ['OMASTAT_TEST_OMARCHY_BIN'] + '/omarchy-plugin-' + args[1]] + args[2:]).returncode)
+        sys.exit(subprocess.run([os.environ['NAGORI_TEST_OMARCHY_BIN'] + '/omarchy-plugin-' + args[1]] + args[2:]).returncode)
 save()
 '''
 
 
 class InstallationTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='omastat-install-test-')
+        self.temp = tempfile.TemporaryDirectory(prefix='nagori-install-test-')
         self.root = Path(self.temp.name)
         self.home = self.root / 'home'
         self.home.mkdir()
@@ -89,10 +89,10 @@ class InstallationTests(unittest.TestCase):
             path = self.bin / name
             path.write_text(MOCK)
             path.chmod(0o755)
-        self.data = self.home / '.local/share/omastat/omastat.db'
+        self.data = self.home / '.local/share/nagori/nagori.db'
         self.data.parent.mkdir(parents=True)
         self.data.write_text('recorded activity must survive')
-        self.config = self.home / '.config/omastat/config.toml'
+        self.config = self.home / '.config/nagori/config.toml'
         self.config.parent.mkdir(parents=True)
         self.config.write_text('# user settings')
         self.other_plugin = self.home / '.config/omarchy/plugins/other/keep'
@@ -113,8 +113,8 @@ class InstallationTests(unittest.TestCase):
             '--bind', str(self.home), str(USER_HOME),
             '--ro-bind', str(REPO), str(self.source), '--chdir', str(self.source),
             '--setenv', 'PATH', str(self.bin) + ':' + str(self.omarchy_bin) + ':/usr/bin',
-            '--setenv', 'OMASTAT_TEST_STATE', str(self.state),
-            '--setenv', 'OMASTAT_TEST_OMARCHY_BIN', str(self.omarchy_bin),
+            '--setenv', 'NAGORI_TEST_STATE', str(self.state),
+            '--setenv', 'NAGORI_TEST_OMARCHY_BIN', str(self.omarchy_bin),
         ]
         for variable in ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_BIN_HOME', 'CARGO_HOME', 'CARGO_INSTALL_ROOT']:
             command += ['--unsetenv', variable]
@@ -133,14 +133,14 @@ class InstallationTests(unittest.TestCase):
 
     def test_install_update_uninstall_and_repeat(self):
         self.run_script('install.sh')
-        plugin = self.home / '.config/omarchy/plugins/local.omastat'
-        self.assertEqual((plugin / 'Panel.qml').read_bytes(), (REPO / 'packaging/omarchy/omastat/Panel.qml').read_bytes())
+        plugin = self.home / '.config/omarchy/plugins/local.nagori'
+        self.assertEqual((plugin / 'Panel.qml').read_bytes(), (REPO / 'packaging/omarchy/nagori/Panel.qml').read_bytes())
         self.assertTrue(self.read_state()['enabled'])
         self.assertTrue(self.read_state()['service'])
-        self.assertTrue((self.home / '.cargo/bin/omastatd').exists())
+        self.assertTrue((self.home / '.cargo/bin/nagorid').exists())
         (plugin / 'custom-note').write_text('preserve in backup')
         self.run_script('install.sh')
-        backups = list((self.home / '.local/state/omastat/install-backups').glob('*/plugin/custom-note'))
+        backups = list((self.home / '.local/state/nagori/install-backups').glob('*/plugin/custom-note'))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), 'preserve in backup')
         self.assertFalse((plugin / 'custom-note').exists())
@@ -148,8 +148,8 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse(plugin.exists())
         self.assertFalse(self.read_state()['service'])
         self.assertFalse(self.read_state()['installed'])
-        self.assertFalse((self.home / '.config/systemd/user/omastat.service').exists())
-        self.assertFalse((self.home / '.cargo/bin/omastat').exists())
+        self.assertFalse((self.home / '.config/systemd/user/nagori.service').exists())
+        self.assertFalse((self.home / '.cargo/bin/nagori').exists())
         self.run_script('uninstall.sh')
         self.assert_preserved()
 
@@ -160,29 +160,27 @@ class InstallationTests(unittest.TestCase):
             (profile / 'prefs.js').write_text('// existing preferences')
             (profile / 'extensions/other.xpi').write_text('unrelated extension')
         self.run_script('install.sh', '--with-browser')
-        self.assertTrue((self.home / '.zen/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').exists())
-        signed = (REPO / 'packaging/browser-extension/signed/omastat-domain-tracker-firefox.xpi').read_bytes()
-        self.assertEqual((self.home / '.zen/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').read_bytes(), signed)
-        self.assertEqual((self.home / '.mozilla/firefox/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').read_bytes(), signed)
-        self.assertEqual((self.home / '.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi').read_bytes(), signed)
+        archive = (REPO / 'packaging/browser-extension/signed/nagori-domain-tracker-firefox.xpi').read_bytes()
+        self.assertEqual((self.home / '.zen/test-profile/extensions/nagori-domain-tracker@thisisrinesi.github.io.xpi').read_bytes(), archive)
+        self.assertEqual((self.home / '.local/share/nagori/browser-extension/nagori-domain-tracker-firefox.xpi').read_bytes(), archive)
         self.run_script('uninstall.sh')
         for relative in ['.zen/test-profile', '.mozilla/firefox/test-profile']:
             profile = self.home / relative
             self.assertEqual((profile / 'extensions/other.xpi').read_text(), 'unrelated extension')
-            self.assertFalse((profile / 'extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi').exists())
-        self.assertFalse((self.home / '.local/bin/omastat-native-host').exists())
-        self.assertFalse((self.home / '.local/share/omastat/browser-extension').exists())
+            self.assertFalse((profile / 'extensions/nagori-domain-tracker@thisisrinesi.github.io.xpi').exists())
+        self.assertFalse((self.home / '.local/bin/nagori-native-host').exists())
+        self.assertFalse((self.home / '.local/share/nagori/browser-extension').exists())
         self.assert_preserved()
 
     def test_foreign_service_is_backed_up_and_replaced(self):
-        service = self.home / '.config/systemd/user/omastat.service'
+        service = self.home / '.config/systemd/user/nagori.service'
         service.parent.mkdir(parents=True)
         service.write_text('foreign service')
         self.run_script('install.sh')
-        backups = list(service.parent.glob('omastat.service.bak.*'))
+        backups = list(service.parent.glob('nagori.service.bak.*'))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), 'foreign service')
-        self.assertIn('ExecStart=%h/.cargo/bin/omastatd', service.read_text())
+        self.assertIn('ExecStart=%h/.cargo/bin/nagorid', service.read_text())
         self.assertNotIn('/usr/bin/env', service.read_text())
         self.run_script('uninstall.sh')
         self.assertFalse(service.exists())
@@ -190,7 +188,7 @@ class InstallationTests(unittest.TestCase):
 
     def test_modified_owned_service_is_preserved(self):
         self.run_script('install.sh')
-        service = self.home / '.config/systemd/user/omastat.service'
+        service = self.home / '.config/systemd/user/nagori.service'
         service.write_text('user replacement')
         self.run_script('uninstall.sh')
         self.assertEqual(service.read_text(), 'user replacement')
@@ -199,10 +197,9 @@ class InstallationTests(unittest.TestCase):
 
     def browser_targets(self):
         return [self.home / relative for relative in [
-            '.local/bin/omastat-native-host',
-            '.config/zen/native-messaging-hosts/io.github.thisisrinesi.omastat.json',
-            '.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi',
-            '.zen/test-profile/extensions/omastat-domain-tracker@thisisrinesi.github.io.xpi']]
+            '.local/bin/nagori-native-host',
+            '.config/zen/native-messaging-hosts/io.github.thisisrinesi.nagori.json',
+            '.local/share/nagori/browser-extension/nagori-domain-tracker-firefox.xpi']]
 
     def test_browser_backs_up_foreign_targets(self):
         self.run_script('install.sh')
@@ -228,14 +225,14 @@ class InstallationTests(unittest.TestCase):
         self.run_script('packaging/browser-extension/install.sh')
         for target in self.browser_targets():
             target.write_text('user replacement')
-        extra = self.home / '.local/share/omastat/browser-extension/unrelated'
+        extra = self.home / '.local/share/nagori/browser-extension/unrelated'
         extra.write_text('keep')
         self.run_script('uninstall.sh')
         self.run_script('uninstall.sh')
         for target in self.browser_targets():
             self.assertEqual(target.read_text(), 'user replacement')
         self.assertEqual(extra.read_text(), 'keep')
-        self.assertFalse((extra.parent / 'omastat-domain-tracker-zen.xpi').exists())
+        self.assertFalse((extra.parent / 'nagori-domain-tracker-zen.zip').exists())
 
     def test_symlink_replacement_is_preserved(self):
         self.run_script('install.sh', '--with-browser')
@@ -281,13 +278,13 @@ class InstallationTests(unittest.TestCase):
         for failure in ['no_session', 'no_shell', 'build_fail']:
             self.state.write_text(json.dumps({failure: True}))
             self.run_script('install.sh', expected=1)
-            self.assertFalse((self.home / '.config/omarchy/plugins/local.omastat').exists())
-            self.assertFalse((self.home / '.config/systemd/user/omastat.service').exists())
+            self.assertFalse((self.home / '.config/omarchy/plugins/local.nagori').exists())
+            self.assertFalse((self.home / '.config/systemd/user/nagori.service').exists())
             self.assert_preserved()
 
     def test_failed_upgrade_preserves_working_plugin(self):
         self.run_script('install.sh')
-        plugin = self.home / '.config/omarchy/plugins/local.omastat/Panel.qml'
+        plugin = self.home / '.config/omarchy/plugins/local.nagori/Panel.qml'
         previous = plugin.read_bytes()
         state = self.read_state()
         state['build_fail'] = True
@@ -298,7 +295,7 @@ class InstallationTests(unittest.TestCase):
         self.assert_preserved()
 
     def test_installed_checkout_is_not_moved_or_removed(self):
-        plugin = self.home / '.config/omarchy/plugins/local.omastat'
+        plugin = self.home / '.config/omarchy/plugins/local.nagori'
         plugin.symlink_to(self.source, target_is_directory=True)
         for script in ['install.sh', 'uninstall.sh']:
             result = self.run_script(script, expected=1)
@@ -317,13 +314,13 @@ class InstallationTests(unittest.TestCase):
         origin.mkdir()
         self.git(origin, 'init', '--initial-branch=main')
         shutil.copy(REPO / 'manifest.json', origin / 'manifest.json')
-        widget = origin / 'packaging/omarchy/omastat'
-        shutil.copytree(REPO / 'packaging/omarchy/omastat', widget)
-        (origin / 'crates/omastat').mkdir(parents=True)
-        shutil.copy(REPO / 'crates/omastat/Cargo.toml', origin / 'crates/omastat/Cargo.toml')
+        widget = origin / 'packaging/omarchy/nagori'
+        shutil.copytree(REPO / 'packaging/omarchy/nagori', widget)
+        (origin / 'crates/nagori').mkdir(parents=True)
+        shutil.copy(REPO / 'crates/nagori/Cargo.toml', origin / 'crates/nagori/Cargo.toml')
         self.git(origin, 'add', '.')
         self.git(origin, 'commit', '-m', 'Original plugin')
-        plugin = self.home / '.config/omarchy/plugins/local.omastat'
+        plugin = self.home / '.config/omarchy/plugins/local.nagori'
         self.git(self.root, 'clone', '--no-hardlinks', str(origin), str(plugin))
         return origin, plugin
 
@@ -337,20 +334,20 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.git(plugin, 'rev-parse', 'HEAD'), self.git(origin, 'rev-parse', 'HEAD'))
         self.assertEqual(self.git(plugin, 'remote', 'get-url', 'origin'), str(origin))
         calls = self.read_state()['calls']
-        self.assertIn(['omarchy', 'plugin', 'update', 'local.omastat', '--yes'], calls)
+        self.assertIn(['omarchy', 'plugin', 'update', 'local.nagori', '--yes'], calls)
         cargo = next(call for call in calls if call[:2] == ['cargo', 'install'])
-        self.assertEqual(cargo[cargo.index('--path') + 1], str(USER_HOME / '.config/omarchy/plugins/local.omastat/crates/omastat'))
+        self.assertEqual(cargo[cargo.index('--path') + 1], str(USER_HOME / '.config/omarchy/plugins/local.nagori/crates/nagori'))
         self.run_script('uninstall.sh')
-        self.assertIn(['omarchy', 'plugin', 'remove', 'local.omastat', '--yes'], self.read_state()['calls'])
+        self.assertIn(['omarchy', 'plugin', 'remove', 'local.nagori', '--yes'], self.read_state()['calls'])
         self.assertFalse(plugin.exists())
         self.assert_preserved()
 
     def test_native_update_refuses_to_overwrite_local_changes(self):
         origin, plugin = self.git_fixture()
-        (origin / 'manifest.json').write_text((origin / 'manifest.json').read_text().replace('Omastat', 'Upstream Omastat'))
+        (origin / 'manifest.json').write_text((origin / 'manifest.json').read_text().replace('Nagori', 'Upstream Nagori'))
         self.git(origin, 'add', '.')
         self.git(origin, 'commit', '-m', 'Upstream manifest update')
-        local = (plugin / 'manifest.json').read_text().replace('Omastat', 'My Omastat')
+        local = (plugin / 'manifest.json').read_text().replace('Nagori', 'My Nagori')
         (plugin / 'manifest.json').write_text(local)
         self.run_script('install.sh', expected=1)
         self.assertEqual((plugin / 'manifest.json').read_text(), local)

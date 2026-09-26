@@ -14,7 +14,7 @@ penetration test or a guarantee that no other vulnerabilities exist.
   targets are backed up as links; symlinked parents are refused. Backups are
   independent copies and names are exclusively created to avoid collisions.
 - User-service daemon discovery depended on a writable PATH. It now runs
-  `%h/.cargo/bin/omastatd`; the Arch package uses `/usr/bin/omastatd`.
+  `%h/.cargo/bin/nagorid`; the Arch package uses `/usr/bin/nagorid`.
 - SQLite activity files inherited the process umask. Writable opens now restrict
   the database and existing SQLite sidecars to mode 0600. New and migrated
   databases start with mode 0600. Read-only reporting does not change permissions;

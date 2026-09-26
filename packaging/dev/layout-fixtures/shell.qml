@@ -26,7 +26,7 @@ ShellRoot {
       for (var w of [380, 760, 1160, 2000])
         for (var lens of ['day', 'week', 'month', 'year', 'life'])
           for (var mode of [0, 1, 2])
-            for (var state of ['populated', 'empty', 'selected', 'loading', 'error', 'settings', 'evidence'])
+            for (var state of ['populated', 'empty', 'selected', 'loading', 'error', 'settings', 'evidence', 'prediction', 'expired'])
               cases.push({width: w, lens: lens, mode: mode, state: state})
       panel.open()
       advance()
@@ -38,6 +38,9 @@ ShellRoot {
       width = c.width
       mode = c.mode
       panel.selectedLens = c.lens
+      panel.selectedOffset = c.state === "prediction" || c.state === "expired" ? 0 : -1
+      panel.insightClock = Date.now() / 1000
+      panel.reportPredictions = c.state === "prediction" || c.state === "expired" ? [{kind:"upcoming-activity", title:"Slay the Spire 2 might be coming up", value:"Around 8 PM", detail:"You started Slay the Spire 2 around this time on 12 of 14 tracked days.", generated_at:panel.insightClock, display_from:panel.insightClock-60, display_until:panel.insightClock+(c.state === "expired" ? -1 : 900), supporting:{activity_kind:"app", activity_key:"spire", app_label:"Slay the Spire 2", occurrence_count:12, eligible_count:14, routine:{status:"established", cadence:"everyday"}}}] : []
       panel.selectedActivityKind = c.state === 'selected' ? 'domain' : ''
       panel.selectedActivityKey = c.state === 'selected' ? 'very-long-domain-name-for-layout-checks.example.com' : ''
       panel.activityType = c.state === 'selected' ? 'domain' : 'app'
@@ -97,7 +100,7 @@ ShellRoot {
         console.log('AUDIT ' + JSON.stringify({test:win.cases[win.step], failures:failures}))
         // Save all populated layouts and compact settings; assertions cover every state.
         var c = win.cases[win.step]
-        if (c.state === 'populated' || c.state === 'settings' && c.width === 380) {
+        if (c.state === 'populated' || c.state === 'prediction' || c.state === 'settings' && c.width === 380) {
           var name = c.width + '-' + c.lens + '-' + c.mode + '-' + c.state
           panel.auditBody.grabToImage(function(b) { b.saveToFile(win.output + '/body-' + name + '.png') })
           win.contentItem.grabToImage(function(r) { r.saveToFile(win.output + '/' + name + '.png'); win.advance() })

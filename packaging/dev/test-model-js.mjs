@@ -5,11 +5,12 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const modelPath = resolve(scriptDir, "../omarchy/omastat/Model.js");
+const modelPath = resolve(scriptDir, "../omarchy/nagori/Model.js");
 const source = readFileSync(modelPath, "utf8");
 const context = vm.createContext({});
 
 vm.runInContext(source, context, { filename: modelPath });
+vm.runInContext(readFileSync(resolve(scriptDir, "../omarchy/nagori/InsightCopy.js"), "utf8"), context);
 
 assert.equal(context.fmt(0), "0s");
 assert.equal(context.fmt(65), "1m");
@@ -229,7 +230,7 @@ const visibleHabits = context.widgetInsights([
 ]);
 assert.equal(visibleHabits.length, 2);
 assert.equal(visibleHabits[0], habit);
-assert.equal(context.insightQualifier(habit), 'Early hint');
+assert.equal(context.insightQualifier(habit), 'Recent pattern');
 assert.equal(context.insightQualifier({ confidence: 'high' }), '');
 assert.match(context.insightExplanation(habit), /Original evidence stays intact/);
 assert.doesNotMatch(context.insightEvidence(habit), /Original evidence stays intact/);
@@ -496,6 +497,22 @@ const orderedInsights = context.dashboardInsights([
 assert.equal(orderedInsights.length, 2);
 assert.equal(orderedInsights[0].kind, 'stretch-trend');
 const routineCard = {kind: 'app-routine', title: 'Spire, most evenings', supporting: {activity_kind: 'app', activity_key: 'spire', app_label: 'Spire'}};
-assert.equal(context.insightHeading(routineCard, 'warm', '2026-09-25'), routineCard.title);
+assert.match(context.insightHeading(routineCard, 'warm', '2026-09-25'), /Spire/);
 assert.match(context.insightHeading(routineCard, 'concise', '2026-09-25'), /Spire/);
 assert.match(context.insightHeading(routineCard, 'playful', '2026-09-25'), /Spire/);
+
+// Daily wording stays stable on refresh and changes on consecutive dates.
+for (const tone of ['warm', 'concise', 'playful']) {
+  for (const item of [routineCard, prediction]) {
+    const a = context.insightHeading(item, tone, '2026-09-25');
+    assert.equal(a, context.insightHeading(item, tone, '2026-09-25'));
+    assert.notEqual(a, context.insightHeading(item, tone, '2026-09-26'));
+  }
+}
+const typed = {...prediction, generated_at: 1000, display_from: 950, display_until: 1100};
+assert.equal(context.visiblePredictions([typed], 949, '', '').length, 0);
+assert.equal(context.visiblePredictions([typed], 1000, '', '').length, 1);
+assert.equal(context.visiblePredictions([typed], 1100, '', '').length, 0);
+assert.equal(context.visiblePredictions([typed], 999, '', '').length, 0);
+const third = {...typed, supporting: {...typed.supporting, activity_key: 'third'}};
+assert.equal(context.visiblePredictions([typed, typed, third], 1000, 'app', 'third')[0], third);

@@ -1,10 +1,10 @@
 # Maintainer: rinesi
-pkgname=omastat
-pkgver=0.1.10
+pkgname=nagori
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Local app focus tracking utility for Hyprland and Omarchy"
 arch=("x86_64")
-url="https://github.com/ThisIsRinesi/Omastat"
+url="https://github.com/ThisIsRinesi/Nagori"
 license=("MIT")
 depends=("gcc-libs" "glibc" "systemd" "hyprland" "python")
 makedepends=("cargo")
@@ -13,7 +13,7 @@ sha256sums=("SKIP")
 
 build() {
   cd "$pkgname-$pkgver"
-  cargo build --release --locked -p omastat
+  cargo build --release --locked -p nagori
 }
 
 check() {
@@ -23,19 +23,19 @@ check() {
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 "target/release/omastat" "$pkgdir/usr/bin/omastat"
-  install -Dm755 "target/release/omastatd" "$pkgdir/usr/bin/omastatd"
-  install -Dm644 "packaging/systemd/omastat.service" "$pkgdir/usr/lib/systemd/user/omastat.service"
-  sed -i 's|ExecStart=%h/.cargo/bin/omastatd|ExecStart=/usr/bin/omastatd|' "$pkgdir/usr/lib/systemd/user/omastat.service"
-  install -Dm644 "packaging/owned-files.py" "$pkgdir/usr/share/omastat/owned-files.py"
-  install -Dm755 "packaging/browser-extension/uninstall.sh" "$pkgdir/usr/share/omastat/browser-extension/uninstall.sh"
-  install -Dm644 "README.md" "$pkgdir/usr/share/doc/omastat/README.md"
-  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/omastat/LICENSE"
-  install -Dm755 "packaging/browser-extension/install.sh" "$pkgdir/usr/share/omastat/browser-extension/install.sh"
-  install -Dm644 "packaging/browser-extension/signed/omastat-domain-tracker-firefox.xpi" "$pkgdir/usr/share/omastat/browser-extension/signed/omastat-domain-tracker-firefox.xpi"
-  install -Dm644 "packaging/browser-extension/domain-tracker/manifest.json" "$pkgdir/usr/share/omastat/browser-extension/domain-tracker/manifest.json"
-  install -Dm644 "packaging/browser-extension/domain-tracker/background.js" "$pkgdir/usr/share/omastat/browser-extension/domain-tracker/background.js"
-  install -Dm644 "packaging/omarchy/omastat/manifest.json" "$pkgdir/usr/share/omastat/omarchy/omastat/manifest.json"
-  install -Dm644 "packaging/omarchy/omastat/Model.js" "$pkgdir/usr/share/omastat/omarchy/omastat/Model.js"
-  install -m644 packaging/omarchy/omastat/*.qml "$pkgdir/usr/share/omastat/omarchy/omastat/"
+  install -Dm755 "target/release/nagori" "$pkgdir/usr/bin/nagori"
+  install -Dm755 "target/release/nagorid" "$pkgdir/usr/bin/nagorid"
+  install -Dm644 "packaging/systemd/nagori.service" "$pkgdir/usr/lib/systemd/user/nagori.service"
+  sed -i 's|ExecStart=%h/.cargo/bin/nagorid|ExecStart=/usr/bin/nagorid|' "$pkgdir/usr/lib/systemd/user/nagori.service"
+  install -Dm644 "packaging/owned-files.py" "$pkgdir/usr/share/nagori/owned-files.py"
+  install -Dm755 "packaging/browser-extension/uninstall.sh" "$pkgdir/usr/share/nagori/browser-extension/uninstall.sh"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/nagori/README.md"
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/nagori/LICENSE"
+  install -Dm755 "packaging/browser-extension/install.sh" "$pkgdir/usr/share/nagori/browser-extension/install.sh"
+  install -Dm644 "packaging/browser-extension/signed/nagori-domain-tracker-firefox.xpi" "$pkgdir/usr/share/nagori/browser-extension/signed/nagori-domain-tracker-firefox.xpi"
+  install -Dm644 "packaging/browser-extension/domain-tracker/manifest.json" "$pkgdir/usr/share/nagori/browser-extension/domain-tracker/manifest.json"
+  install -Dm644 "packaging/browser-extension/domain-tracker/background.js" "$pkgdir/usr/share/nagori/browser-extension/domain-tracker/background.js"
+  install -Dm644 "packaging/omarchy/nagori/manifest.json" "$pkgdir/usr/share/nagori/omarchy/nagori/manifest.json"
+  install -Dm644 "packaging/omarchy/nagori/Model.js" "$pkgdir/usr/share/nagori/omarchy/nagori/Model.js"
+  install -m644 packaging/omarchy/nagori/*.qml "$pkgdir/usr/share/nagori/omarchy/nagori/"
 }

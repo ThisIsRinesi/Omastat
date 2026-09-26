@@ -90,16 +90,17 @@ def measure(binary, database, lens, command, config, app, domain, offset=0):
     return time.perf_counter()-start, json.loads(result.stdout), len(result.stdout)
 
 
-def stable_data(report):
+def stable_data(report, path=()):
     # Current-period elapsed/gap values and time-relative insights change between
     # subprocesses. Historical reports are also compared separately below.
     volatile = {"generated_at", "query_end_ts", "total_elapsed_seconds",
                 "total_unobserved_seconds", "elapsed_seconds", "unobserved_seconds",
                 "insights", "predictions", "widget_insight", "tooltip", "status_text"}
     if isinstance(report, dict):
-        return {k: stable_data(v) for k, v in report.items() if k not in volatile}
+        return {k: stable_data(v, path + (k,)) for k, v in report.items()
+                if k not in volatile and not (path == ("multitasking", "timeline") and k == "end")}
     if isinstance(report, list):
-        return [stable_data(v) for v in report]
+        return [stable_data(v, path) for v in report]
     return report
 
 
@@ -127,7 +128,7 @@ def main():
     args = parser.parse_args()
     if args.runs < 1 or args.synthetic_intervals < 0:
         parser.error("runs must be positive and synthetic-intervals nonnegative")
-    with tempfile.TemporaryDirectory(prefix="omastat-benchmark-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nagori-benchmark-") as directory:
         database = Path(directory)/"snapshot.db"
         if args.synthetic_intervals:
             synthetic(args.database, database, args.synthetic_intervals)

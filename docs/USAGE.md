@@ -2,7 +2,7 @@
 
 ## Installation and removal
 
-Run `./install.sh` from a checkout outside `~/.config/omarchy/plugins/local.omastat/`,
+Run `./install.sh` from a checkout outside `~/.config/omarchy/plugins/local.nagori/`,
 as your normal user inside a running Omarchy desktop session. It installs the
 backend to `~/.cargo/bin`, restarts the systemd user service, and installs/enables
 the bar plugin. Add `~/.cargo/bin` to your session's `PATH` for CLI use.
@@ -15,7 +15,7 @@ updated checkout, preserving the plugin's origin and history. Existing bar
 placement and settings are retained.
 
 Replaced local plugin files are backed up under
-`${XDG_STATE_HOME:-~/.local/state}/omastat/install-backups/`.
+`${XDG_STATE_HOME:-~/.local/state}/nagori/install-backups/`.
 `./uninstall.sh` uses `omarchy plugin remove`, including its backup behavior for
 local copies, then removes the user service, Cargo backend, and optional browser
 integration. Recorded activity, configuration, and installer backups are kept.
@@ -25,20 +25,20 @@ their package manager.
 ## Reports
 
 ```bash
-omastat today
-omastat week
-omastat apps
-omastat range --from 2026-07-01 --to 2026-07-30
-omastat --json today
-omastat summary
-omastat summary --lens week --offset -1
-omastat summary --lens month --days 31
-omastat insights --json
-omastat insights --lens week --offset -1 --json
-omastat goals --lens week
-omastat digest --lens week
-omastat widget-insight --json
-omastat widget-summary --lens day
+nagori today
+nagori week
+nagori apps
+nagori range --from 2026-07-01 --to 2026-07-30
+nagori --json today
+nagori summary
+nagori summary --lens week --offset -1
+nagori summary --lens month --days 31
+nagori insights --json
+nagori insights --lens week --offset -1 --json
+nagori goals --lens week
+nagori digest --lens week
+nagori widget-insight --json
+nagori widget-summary --lens day
 ```
 
 `summary` is the compact JSON report used by the Omarchy widget. It accepts
@@ -87,10 +87,10 @@ and caches from a previous local date are not reused.
 Export raw intervals, aggregate rows, or both:
 
 ```bash
-omastat export-data --lens month --format json --output ~/omastat-month.json
-omastat export-data --lens week --format csv --output ~/omastat-week-csv
-omastat export-data --scope raw --format json --output ~/omastat-raw.json
-omastat export-data --scope aggregate --format csv --output ~/omastat-aggregate
+nagori export-data --lens month --format json --output ~/nagori-month.json
+nagori export-data --lens week --format csv --output ~/nagori-week-csv
+nagori export-data --scope raw --format json --output ~/nagori-raw.json
+nagori export-data --scope aggregate --format csv --output ~/nagori-aggregate
 ```
 
 JSON writes one file. CSV writes a directory containing `metadata.json` plus
@@ -105,10 +105,10 @@ rows include idle, locked, sleep, and unobserved gaps.
 Delete older local telemetry after reviewing a dry run:
 
 ```bash
-omastat purge --older-than-days 90 --dry-run
-systemctl --user stop omastat.service
-omastat purge --older-than-days 90 --confirm --vacuum
-systemctl --user start omastat.service
+nagori purge --older-than-days 90 --dry-run
+systemctl --user stop nagori.service
+nagori purge --older-than-days 90 --confirm --vacuum
+systemctl --user start nagori.service
 ```
 
 `purge` requires exactly one selector: `--before YYYY-MM-DD`,
@@ -131,13 +131,13 @@ updated one or running a destructive purge.
 Config path:
 
 ```text
-${XDG_CONFIG_HOME:-~/.config}/omastat/config.toml
+${XDG_CONFIG_HOME:-~/.config}/nagori/config.toml
 ```
 
 Database path:
 
 ```text
-${XDG_DATA_HOME:-~/.local/share}/omastat/omastat.db
+${XDG_DATA_HOME:-~/.local/share}/nagori/nagori.db
 ```
 
 Default config values:
@@ -185,14 +185,14 @@ blocklist matches win over allowlist matches.
 
 Idle tracking uses Wayland `ext-idle-notify-v1` when the compositor exposes it.
 `idle_timeout_seconds` controls how long the seat must have no keyboard, mouse,
-or touch input before Omastat records idle time. When the Wayland monitor is not
-available, Omastat falls back to Omarchy/logind session status polling; logind's
+or touch input before Nagori records idle time. When the Wayland monitor is not
+available, Nagori falls back to Omarchy/logind session status polling; logind's
 idle-since timestamp is used when available so idle intervals can still be
 backdated to the real session transition.
 
 Browser domain tracking is the preferred browser breakdown path. With
 `browser_domains = true`, the optional Zen/Firefox extension sends only the
-active tab domain to `omastat native-host`; Omastat counts that domain only
+active tab domain to `nagori native-host`; Nagori counts that domain only
 where it overlaps focused browser window time. The extension does not send tab
 titles, full URLs, page contents, or history.
 
@@ -205,22 +205,13 @@ packaging/browser-extension/install.sh
 Restart Zen/Firefox after installing. The development reinstall script runs the
 same browser-extension install step.
 
-The installer uses the bundled Mozilla-signed Firefox extension (version 0.2.0,
-Firefox 140 or newer). If Firefox does not offer to enable it after restarting,
-open `about:addons`, choose **Install Add-on From File** from the gear menu, and
-select `~/.local/share/omastat/browser-extension/omastat-domain-tracker-firefox.xpi`
-(or the equivalent path under `$XDG_DATA_HOME`). Accept the browsing activity
-permission to enable domain tracking. Domains are sent to the local Omastat app.
-
-Zen uses the same signed package. The native host identifies the launching browser
-from its process ancestry and records Zen activity under `zen`, even though the
-extension's embedded configuration says Firefox. Firefox activity stays under
-`firefox`. This requires the updated Omastat native host.
+The signed Nagori browser extension is version 0.4.0. The installer places it in supported browser profiles. Restart Zen/Firefox after installing.
+The native host distinguishes Zen and Firefox from the launching process.
 
 Set `title_capture = "all"` only if you want focused intervals to include
 cleaned window titles. When title capture is enabled and no direct domain rows
 exist for a period, browser windows can fall back to page/title inference in
-the widget panel. Set `browser_history = true` to let Omastat enrich Zen
+the widget panel. Set `browser_history = true` to let Nagori enrich Zen
 Browser titles from local `~/.zen/*/places.sqlite` history files. History
 enrichment is read-only, local, best-effort, and ignored unless
 `title_capture = "all"` is also enabled.
@@ -233,8 +224,8 @@ categories can all be used for grouping and budgets.
 Existing databases can be normalized after upgrades:
 
 ```bash
-omastat repair-titles --dry-run
-omastat repair-titles
+nagori repair-titles --dry-run
+nagori repair-titles
 ```
 
 Focused intervals also store workspace and monitor context when Hyprland exposes
@@ -262,7 +253,7 @@ remain responsive during retries and desktop queries have bounded timeouts.
 Delayed idle notifications trim focus back to the inferred idle onset within the
 current observation segment, without removing confirmed audio-active time.
 
-On systemd desktops, Omastat listens for logind's `PrepareForSleep` signal on
+On systemd desktops, Nagori listens for logind's `PrepareForSleep` signal on
 the system D-Bus and holds a short sleep delay inhibitor when available so it
 can close active focus/open/session intervals before suspend. The matching
 resume signal closes the sleep interval and rebuilds live Hyprland state from a
@@ -287,8 +278,8 @@ so observations do not make those claims or treat more screen time as better.
 ### Queries
 
 ```bash
-omastat activity-detail --lens week --app zen
-omastat activity-detail --lens month --offset -1 --domain github.com
+nagori activity-detail --lens week --app zen
+nagori activity-detail --lens month --offset -1 --domain github.com
 ```
 
 Exactly one of `--app` or `--domain` is required. Use the stable `key` from
@@ -358,10 +349,5 @@ reports enrich matching system audio; they do not count as extra focused time.
 Media titles are used as a fallback only when `title_capture = "all"`; otherwise
 unattributed streams retain the app label. A selected browser tab's domain is
 never assumed to be the audio source.
-
-The bundled signed extension is 0.3.0. Run the browser integration installer
-and restart Zen/Firefox to load the update. Older extensions remain compatible
-with app-level audio tracking and optional media-title fallback, but do not
-report audible domains.
 
 See [Context insights](INSIGHTS.md) for comparison windows, evidence thresholds and audio companion semantics.
