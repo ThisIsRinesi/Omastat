@@ -131,7 +131,7 @@ impl Storage {
     }
 
     pub fn media_intervals_between(&self, start: i64, end: i64) -> Result<Vec<MediaInterval>> {
-        let mut stmt = self.conn.prepare("SELECT source,app_class,label,MAX(started_at,?1),MIN(COALESCE(ended_at,?2),last_confirmed_at+ttl,?2) FROM media_intervals WHERE started_at<?2 AND COALESCE(ended_at,last_confirmed_at+ttl)>?1 ORDER BY started_at,id")?;
+        let mut stmt = self.conn.prepare("SELECT source,app_class,label,MAX(started_at,?1),MIN(COALESCE(ended_at,?2),last_confirmed_at+ttl,?2) FROM media_intervals WHERE started_at<?2 AND COALESCE(ended_at,last_confirmed_at+ttl)>?1 AND NOT (source='system' AND lower(trim(app_class))='unknown') ORDER BY started_at,id")?;
         Ok(stmt
             .query_map(params![start, end], |r| {
                 Ok(MediaInterval {
@@ -337,7 +337,7 @@ impl Storage {
     pub fn multitasked_seconds_between(&self, start: i64, end: i64) -> Result<i64> {
         let mut stmt = self.conn.prepare(
             "SELECT app_class,MAX(started_at,?1),MIN(COALESCE(ended_at,?2),last_confirmed_at+ttl,?2)
-             FROM media_intervals WHERE source='system' AND started_at<?2
+             FROM media_intervals WHERE source='system' AND lower(trim(app_class))!='unknown' AND started_at<?2
              AND COALESCE(ended_at,last_confirmed_at+ttl)>?1")?;
         let audio = stmt
             .query_map(params![start, end], |r| {
@@ -445,7 +445,7 @@ impl Storage {
     ) -> Result<MultitaskingReport> {
         // Most historical periods predate media tracking: skip loading focus there.
         let has_media: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM media_intervals WHERE source='system' AND started_at<?2 AND COALESCE(ended_at,last_confirmed_at+ttl)>?1)",
+            "SELECT EXISTS(SELECT 1 FROM media_intervals WHERE source='system' AND lower(trim(app_class))!='unknown' AND started_at<?2 AND COALESCE(ended_at,last_confirmed_at+ttl)>?1)",
             params![start,end], |r| r.get(0))?;
         if !has_media {
             return Ok(MultitaskingReport::default());
@@ -628,6 +628,28 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert_eq!((segments[0].start, segments[0].end), (120, 180));
         assert!(segments[0].audio.is_empty());
+    }
+
+    #[test]
+    fn historical_unknown_audio_is_hidden_from_all_reports() {
+        let (_dir, mut storage, config) = setup();
+        focus(&mut storage, "editor", 100, 200);
+        storage
+            .record_media_snapshot("system", &[("unknown".into(), "".into())], 100, 100)
+            .unwrap();
+        assert_eq!(storage.media_intervals_between(100, 200).unwrap().len(), 0);
+        assert_eq!(storage.multitasked_seconds_between(100, 200).unwrap(), 0);
+        let report = storage.multitasking_between(100, 200, &config).unwrap();
+        assert_eq!(report.total_seconds, 0);
+        assert!(report.sources.is_empty());
+        let metadata = storage.focused_interval_metadata_between(100, 200).unwrap();
+        let timeline = storage
+            .multitasking_from_metadata(100, 200, &metadata, &config, true)
+            .unwrap()
+            .timeline
+            .unwrap();
+        assert_eq!(timeline.segments.len(), 1);
+        assert!(timeline.segments[0].audio.is_empty());
     }
 
     #[test]

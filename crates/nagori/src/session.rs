@@ -413,10 +413,23 @@ fn parse_audio_sources(output: &str) -> Result<Vec<AudioSource>> {
             continue;
         }
         let properties = &input["properties"];
+        // Virtual mixer routes are permanent sink inputs, not playback apps.
+        if matches!(properties["node.virtual"].as_str(), Some("true"))
+            || properties["node.virtual"].as_bool() == Some(true)
+        {
+            continue;
+        }
         let binary = properties["application.process.binary"]
             .as_str()
-            .or_else(|| properties["application.name"].as_str())
-            .unwrap_or("unknown");
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("unknown"))
+            .or_else(|| {
+                properties["application.name"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("unknown"))
+            });
+        let Some(binary) = binary else { continue };
         let source = AudioSource {
             app_class: crate::identity::canonical_app_class(
                 binary.strip_suffix("-bin").unwrap_or(binary),
@@ -598,6 +611,19 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].app_class, "zen");
         assert_eq!(sources[0].pid, Some(42));
+    }
+
+    #[test]
+    fn audio_sources_exclude_virtual_and_unidentified_routes() {
+        let sources = parse_audio_sources(r#"[
+            {"corked":false,"mute":false,"properties":{"node.virtual":"true","application.name":"Virtual mixer"}},
+            {"corked":false,"mute":false,"properties":{"node.virtual":true,"application.process.binary":"mixer"}},
+            {"corked":false,"mute":false,"properties":{"media.name":"OpenXLR output"}},
+            {"corked":false,"mute":false,"properties":{"application.process.binary":" ","application.name":"Spotify"}},
+            {"corked":false,"mute":false,"properties":{"application.process.binary":"unknown"}}
+        ]"#).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].app_class, "Spotify");
     }
 
     #[test]

@@ -619,7 +619,7 @@ impl Tracker {
             status
                 .audio_sources
                 .iter()
-                .map(|source| {
+                .filter_map(|source| {
                     let window = self
                         .state
                         .windows
@@ -630,7 +630,7 @@ impl Tracker {
                         .unwrap_or_else(|| source.app_class.clone());
                     // Attribution comes from the owning app or the browser extension's
                     // audible domain. Stream names are neither app nor website identities.
-                    (app, String::new())
+                    (!app.eq_ignore_ascii_case("unknown")).then_some((app, String::new()))
                 })
                 .collect()
         };
