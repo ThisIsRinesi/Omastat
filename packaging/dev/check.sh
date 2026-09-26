@@ -33,4 +33,5 @@ cargo test --locked --workspace
 
 echo 'Building release binaries'
 cargo build --locked --release --workspace --bins
+python3 packaging/dev/check-arch-package.py
 echo 'All checks passed'

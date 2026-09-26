@@ -37,5 +37,7 @@ package() {
   install -Dm644 "packaging/browser-extension/domain-tracker/background.js" "$pkgdir/usr/share/nagori/browser-extension/domain-tracker/background.js"
   install -Dm644 "packaging/omarchy/nagori/manifest.json" "$pkgdir/usr/share/nagori/omarchy/nagori/manifest.json"
   install -Dm644 "packaging/omarchy/nagori/Model.js" "$pkgdir/usr/share/nagori/omarchy/nagori/Model.js"
+  install -Dm644 "packaging/omarchy/nagori/InsightCopy.js" "$pkgdir/usr/share/nagori/omarchy/nagori/InsightCopy.js"
+  install -Dm644 "packaging/browser-extension/domain-tracker/config.js" "$pkgdir/usr/share/nagori/browser-extension/domain-tracker/config.js"
   install -m644 packaging/omarchy/nagori/*.qml "$pkgdir/usr/share/nagori/omarchy/nagori/"
 }

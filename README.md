@@ -28,7 +28,7 @@ and Dynamic Island appearance.*
 ## Install
 
 Requires a running Omarchy Quattro desktop, Git, jq, Cargo/Rust, and a C compiler.
-Run as your normal user, without `sudo`:
+Run as your normal desktop user:
 
 ```bash
 git clone https://github.com/ThisIsRinesi/Nagori.git
@@ -46,6 +46,11 @@ For website breakdowns in Zen or Firefox:
 ```
 
 The signed Nagori extension is included and installed into supported Zen and Firefox profiles by `./install.sh --with-browser`. Restart the browser after installation.
+
+**Marketplace setup:** A plugin clone installs the QML widget but does not build
+the required Rust tracker or start its user service. Install from a checkout
+with `./install.sh`; choose `--with-browser` for website activity. Marketplace
+maintainers should mark this listing as requiring manual setup.
 
 ## Use
 
